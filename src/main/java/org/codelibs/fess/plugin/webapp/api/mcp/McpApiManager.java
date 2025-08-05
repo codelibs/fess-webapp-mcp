@@ -141,8 +141,8 @@ public class McpApiManager extends BaseApiManager {
     protected Object dispatchRpcMethod(final String method, final Map<String, Object> params) {
         return switch (method) {
         case "initialize" -> handleInitialize();
-        case "listTools" -> handleListTools();
-        case "invoke" -> handleInvoke(params);
+        case "tools/list" -> handleListTools();
+        case "tools/call" -> handleInvoke(params);
         default -> throw new McpApiException(ErrorCode.MethodNotFound, "Unknown method: " + method);
         };
     }
@@ -157,79 +157,74 @@ public class McpApiManager extends BaseApiManager {
      * the capabilities of the MCP API.
      *
      * @return a map with the following keys:
-     *         - "version": the version of the API (e.g., "1.0").
-     *         - "protocol": the protocol used by the API (e.g., "MCP/1.0").
-     *         - "methods": a list of supported RPC methods (e.g., "initialize", "listTools", "invoke").
+     *         - "protocolVersion": the MCP protocol version (e.g., "2024-11-05").
+     *         - "capabilities": object containing server capabilities including tools support.
+     *         - "serverInfo": object containing server name and version information.
      */
     protected Map<String, Object> handleInitialize() {
         final Map<String, Object> caps = new HashMap<>();
-        caps.put("version", "1.0");
-        caps.put("protocol", "MCP/1.0");
-        caps.put("methods", Arrays.asList("initialize", "listTools", "invoke"));
+        caps.put("tools", new HashMap<>());
 
         final Map<String, Object> serverInfo = new HashMap<>();
         serverInfo.put("name", "fess-mcp-server");
         serverInfo.put("version", "1.0.0");
 
-        return Map.of("capabilities", caps, "serverInfo", serverInfo);
+        return Map.of("protocolVersion", "2024-11-05", "capabilities", caps, "serverInfo", serverInfo);
     }
 
     /**
      * Handles the creation of a list of tools with their metadata.
      *
-     * @return A list containing a single map that represents a tool. The map includes:
+     * @return A map with "tools" key containing a list of available tools. Each tool includes:
      *         - "name": The name of the tool (e.g., "search").
      *         - "description": A brief description of the tool (e.g., "Search documents via Fess").
-     *         - "parameters": A list of parameter maps, where each parameter map contains:
-     *             - "name": The name of the parameter (e.g., "q").
-     *             - "type": The type of the parameter (e.g., "string").
-     *             - "desc": A description of the parameter (e.g., "query string").
+     *         - "inputSchema": A JSON Schema object defining the tool's input parameters.
      */
     protected Map<String, Object> handleListTools() {
-        final Map<Object, Object> toolSearch = new HashMap<>() {
-            {
-                put("name", "search"); //
-                put("description", "Search documents via Fess"); //
-                put("parameters", List.of( //
-                        Map.of("name", "q", "type", "string", "desc", "query string"), //
-                        Map.of("name", "start", "type", "integer", "desc", "start position"), //
-                        Map.of("name", "offset", "type", "integer", "desc", "offset (alias of start)"), //
-                        Map.of("name", "num", "type", "integer", "desc", "number of results"), //
-                        Map.of("name", "sort", "type", "string", "desc", "sort order"), //
-                        Map.of("name", "fields.label", "type", "array", "desc", "labels to return"), //
-                        // Map.of("name", "facet.field", "type", "array", "desc", "facet fields"), //
-                        // Map.of("name", "facet.query", "type", "array", "desc", "facet queries"), //
-                        // Map.of("name", "facet.size", "type", "integer", "desc", "facet size"), //
-                        // Map.of("name", "facet.minDocCount", "type", "integer", "desc", "facet minDocCount"), //
-                        // Map.of("name", "geo.location.point", "type", "string", "desc", "geo point"), //
-                        // Map.of("name", "geo.location.distance", "type", "string", "desc", "geo distance"), //
-                        Map.of("name", "lang", "type", "string", "desc", "language"), //
-                        Map.of("name", "preference", "type", "string", "desc", "preference") //
-                ));
-            }
-        };
+        final Map<String, Object> properties = new HashMap<>();
+        properties.put("q", Map.of("type", "string", "description", "query string"));
+        properties.put("start", Map.of("type", "integer", "description", "start position"));
+        properties.put("offset", Map.of("type", "integer", "description", "offset (alias of start)"));
+        properties.put("num", Map.of("type", "integer", "description", "number of results"));
+        properties.put("sort", Map.of("type", "string", "description", "sort order"));
+        properties.put("fields.label", Map.of("type", "array", "description", "labels to return"));
+        properties.put("lang", Map.of("type", "string", "description", "language"));
+        properties.put("preference", Map.of("type", "string", "description", "preference"));
+
+        final Map<String, Object> inputSchema = new HashMap<>();
+        inputSchema.put("type", "object");
+        inputSchema.put("properties", properties);
+        inputSchema.put("required", List.of("q"));
+
+        final Map<String, Object> toolSearch = new HashMap<>();
+        toolSearch.put("name", "search");
+        toolSearch.put("description", "Search documents via Fess");
+        toolSearch.put("inputSchema", inputSchema);
+
         return Map.of("tools", List.of(toolSearch));
     }
 
     /**
-     * Handles the invocation of the MCP API by processing the input parameters,
-     * executing a search query, and formatting the search results.
+     * Handles the invocation of tools via the MCP API by processing the input parameters,
+     * executing the requested tool, and returning the results.
      *
-     * @param params A map containing the input parameters for the API call.
-     *               It must include a nested map under the key "params" with a required key "q"
-     *               representing the search query string.
-     * @return A map containing the search results under the key "documents".
-     *         Each document is represented as a map with fields such as "id", "title", "url", and "score".
-     * @throws McpApiException If the required parameter "q" is missing or invalid.
+     * @param params A map containing the input parameters for the tool call.
+     *               It must include "name" (tool name) and "arguments" (tool parameters).
+     * @return A map containing the tool execution results. For search tool, returns search results
+     *         with documents, pagination info, and facets.
+     * @throws McpApiException If required parameters are missing or invalid.
      */
     @SuppressWarnings("unchecked")
     protected Map<String, Object> handleInvoke(final Map<String, Object> params) {
-        final String tool = (String) params.get("method");
-        if (tool == null) {
-            throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: tool");
+        final String tool = (String) params.get("name");
+        if (tool == null || tool.isEmpty()) {
+            throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: name");
         }
 
-        final Map<String, Object> toolParams = (Map<String, Object>) params.get("params");
+        final Map<String, Object> toolParams = (Map<String, Object>) params.get("arguments");
+        if (toolParams == null) {
+            throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: arguments");
+        }
         return switch (tool) {
         case "search" -> invokeSearch(toolParams);
         // TODO Add administrative tools here...
@@ -420,15 +415,12 @@ public class McpApiManager extends BaseApiManager {
      * @param response The {@link HttpServletResponse} object to which the error response will be written.
      */
     protected void writeError(final Object id, final ErrorCode code, final String message, final HttpServletResponse response) {
-        final StringBuilder sb = new StringBuilder();
-        sb.append("{");
-        sb.append("\"jsonrpc\":\"2.0\",");
-        sb.append("\"id\":").append(id == null ? "null" : "\"" + id + "\"").append(",");
-        sb.append("\"error\":{");
-        sb.append("\"code\":").append(code.getCode()).append(",");
-        sb.append("\"message\":\"").append(message).append("\"");
-        sb.append("}");
-        sb.append("}");
-        write(sb.toString(), mimeType, Constants.UTF_8);
+        final Map<String, Object> error = Map.of("code", code.getCode(), "message", message);
+        final Map<String, Object> errorResponse = Map.of("jsonrpc", "2.0", "id", id, "error", error);
+        try {
+            write(JsonXContent.contentBuilder().map(errorResponse).toString(), mimeType, Constants.UTF_8);
+        } catch (IOException e) {
+            logger.error("Failed to write error response", e);
+        }
     }
 }
