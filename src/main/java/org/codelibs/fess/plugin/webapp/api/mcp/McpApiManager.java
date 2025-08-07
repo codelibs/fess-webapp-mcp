@@ -134,11 +134,17 @@ public class McpApiManager extends BaseApiManager {
 
     protected Map<String, Object> parseRequestBody(final HttpServletRequest request) throws IOException {
         return JsonXContent.jsonXContent
-                .createParser(NamedXContentRegistry.EMPTY, LoggingDeprecationHandler.INSTANCE, request.getInputStream()).map();
+                .createParser(NamedXContentRegistry.EMPTY, LoggingDeprecationHandler.INSTANCE, request.getInputStream())
+                .map();
     }
 
     protected Object dispatchRpcMethod(final String method, final Map<String, Object> params) {
-        return switch(method){case"initialize"->handleInitialize();case"tools/list"->handleListTools();case"tools/call"->handleInvoke(params);default->throw new McpApiException(ErrorCode.MethodNotFound,"Unknown method: "+method);};
+        return switch (method) {
+        case "initialize" -> handleInitialize();
+        case "tools/list" -> handleListTools();
+        case "tools/call" -> handleInvoke(params);
+        default -> throw new McpApiException(ErrorCode.MethodNotFound, "Unknown method: " + method);
+        };
     }
 
     @Override
@@ -210,11 +216,20 @@ public class McpApiManager extends BaseApiManager {
      */
     @SuppressWarnings("unchecked")
     protected Map<String, Object> handleInvoke(final Map<String, Object> params) {
-        final String tool=(String)params.get("name");if(tool==null||tool.isEmpty()){throw new McpApiException(ErrorCode.InvalidParams,"Missing required parameter: name");}
+        final String tool = (String) params.get("name");
+        if (tool == null || tool.isEmpty()) {
+            throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: name");
+        }
 
-        final Map<String,Object>toolParams=(Map<String,Object>)params.get("arguments");if(toolParams==null){throw new McpApiException(ErrorCode.InvalidParams,"Missing required parameter: arguments");}return switch(tool){case"search"->invokeSearch(toolParams);
+        final Map<String, Object> toolParams = (Map<String, Object>) params.get("arguments");
+        if (toolParams == null) {
+            throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: arguments");
+        }
+        return switch (tool) {
+        case "search" -> invokeSearch(toolParams);
         // TODO Add administrative tools here...
-        default->throw new McpApiException(ErrorCode.InvalidParams,"Unknown tool: "+tool);};
+        default -> throw new McpApiException(ErrorCode.InvalidParams, "Unknown tool: " + tool);
+        };
     }
 
     @SuppressWarnings("unchecked")
@@ -233,7 +248,8 @@ public class McpApiManager extends BaseApiManager {
             public Map<String, String[]> getFields() {
                 final Map<String, Object> fields = (Map<String, Object>) paramMap.get("fields");
                 if (fields != null) {
-                    return fields.entrySet().stream()
+                    return fields.entrySet()
+                            .stream()
                             .collect(Collectors.toMap(Map.Entry::getKey, e -> ((List<String>) e.getValue()).toArray(n -> new String[n])));
                 }
                 return Collections.emptyMap();
@@ -243,8 +259,10 @@ public class McpApiManager extends BaseApiManager {
             public Map<String, String[]> getConditions() {
                 final Map<String, Object> conditions = (Map<String, Object>) paramMap.get("as");
                 if (conditions != null) {
-                    return conditions.entrySet().stream().collect(Collectors.toMap(Map.Entry::getKey,
-                            e -> ((List<?>) e.getValue()).stream().map(Object::toString).toArray(n -> new String[n])));
+                    return conditions.entrySet()
+                            .stream()
+                            .collect(Collectors.toMap(Map.Entry::getKey,
+                                    e -> ((List<?>) e.getValue()).stream().map(Object::toString).toArray(n -> new String[n])));
                 }
                 return Collections.emptyMap();
             }
@@ -384,8 +402,13 @@ public class McpApiManager extends BaseApiManager {
                         field.getValueCountMap().entrySet().stream().map(e -> Map.of("value", e.getKey(), "count", e.getValue())).toList());
                 return m;
             }).toList());
-            result.put("facet_query", data.getFacetResponse().getQueryCountMap().entrySet().stream()
-                    .map(e -> Map.of("value", e.getKey(), "count", e.getValue())).toList());
+            result.put("facet_query",
+                    data.getFacetResponse()
+                            .getQueryCountMap()
+                            .entrySet()
+                            .stream()
+                            .map(e -> Map.of("value", e.getKey(), "count", e.getValue()))
+                            .toList());
         }
 
         return result;
