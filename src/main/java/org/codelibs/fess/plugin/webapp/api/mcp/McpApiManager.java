@@ -16,7 +16,6 @@
 package org.codelibs.fess.plugin.webapp.api.mcp;
 
 import java.io.IOException;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -25,12 +24,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
-
-import javax.annotation.PostConstruct;
-import javax.servlet.FilterChain;
-import javax.servlet.ServletException;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -49,6 +42,12 @@ import org.dbflute.optional.OptionalThing;
 import org.opensearch.common.xcontent.LoggingDeprecationHandler;
 import org.opensearch.common.xcontent.json.JsonXContent;
 import org.opensearch.core.xcontent.NamedXContentRegistry;
+
+import jakarta.annotation.PostConstruct;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 
 /**
  * The {@code McpApiManager} class is responsible for handling JSON-RPC 2.0 API requests
@@ -139,12 +138,7 @@ public class McpApiManager extends BaseApiManager {
     }
 
     protected Object dispatchRpcMethod(final String method, final Map<String, Object> params) {
-        return switch (method) {
-        case "initialize" -> handleInitialize();
-        case "tools/list" -> handleListTools();
-        case "tools/call" -> handleInvoke(params);
-        default -> throw new McpApiException(ErrorCode.MethodNotFound, "Unknown method: " + method);
-        };
+        return switch(method){case"initialize"->handleInitialize();case"tools/list"->handleListTools();case"tools/call"->handleInvoke(params);default->throw new McpApiException(ErrorCode.MethodNotFound,"Unknown method: "+method);};
     }
 
     @Override
@@ -216,20 +210,11 @@ public class McpApiManager extends BaseApiManager {
      */
     @SuppressWarnings("unchecked")
     protected Map<String, Object> handleInvoke(final Map<String, Object> params) {
-        final String tool = (String) params.get("name");
-        if (tool == null || tool.isEmpty()) {
-            throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: name");
-        }
+        final String tool=(String)params.get("name");if(tool==null||tool.isEmpty()){throw new McpApiException(ErrorCode.InvalidParams,"Missing required parameter: name");}
 
-        final Map<String, Object> toolParams = (Map<String, Object>) params.get("arguments");
-        if (toolParams == null) {
-            throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: arguments");
-        }
-        return switch (tool) {
-        case "search" -> invokeSearch(toolParams);
+        final Map<String,Object>toolParams=(Map<String,Object>)params.get("arguments");if(toolParams==null){throw new McpApiException(ErrorCode.InvalidParams,"Missing required parameter: arguments");}return switch(tool){case"search"->invokeSearch(toolParams);
         // TODO Add administrative tools here...
-        default -> throw new McpApiException(ErrorCode.InvalidParams, "Unknown tool: " + tool);
-        };
+        default->throw new McpApiException(ErrorCode.InvalidParams,"Unknown tool: "+tool);};
     }
 
     @SuppressWarnings("unchecked")
@@ -419,7 +404,7 @@ public class McpApiManager extends BaseApiManager {
         final Map<String, Object> errorResponse = Map.of("jsonrpc", "2.0", "id", id, "error", error);
         try {
             write(JsonXContent.contentBuilder().map(errorResponse).toString(), mimeType, Constants.UTF_8);
-        } catch (IOException e) {
+        } catch (final IOException e) {
             logger.error("Failed to write error response", e);
         }
     }
