@@ -16,7 +16,6 @@
 package org.codelibs.fess.plugin.webapp.api.mcp;
 
 import java.io.IOException;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -25,12 +24,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
-
-import javax.annotation.PostConstruct;
-import javax.servlet.FilterChain;
-import javax.servlet.ServletException;
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpServletResponse;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -49,6 +42,12 @@ import org.dbflute.optional.OptionalThing;
 import org.opensearch.common.xcontent.LoggingDeprecationHandler;
 import org.opensearch.common.xcontent.json.JsonXContent;
 import org.opensearch.core.xcontent.NamedXContentRegistry;
+
+import jakarta.annotation.PostConstruct;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 
 /**
  * The {@code McpApiManager} class is responsible for handling JSON-RPC 2.0 API requests
@@ -135,7 +134,8 @@ public class McpApiManager extends BaseApiManager {
 
     protected Map<String, Object> parseRequestBody(final HttpServletRequest request) throws IOException {
         return JsonXContent.jsonXContent
-                .createParser(NamedXContentRegistry.EMPTY, LoggingDeprecationHandler.INSTANCE, request.getInputStream()).map();
+                .createParser(NamedXContentRegistry.EMPTY, LoggingDeprecationHandler.INSTANCE, request.getInputStream())
+                .map();
     }
 
     protected Object dispatchRpcMethod(final String method, final Map<String, Object> params) {
@@ -248,7 +248,8 @@ public class McpApiManager extends BaseApiManager {
             public Map<String, String[]> getFields() {
                 final Map<String, Object> fields = (Map<String, Object>) paramMap.get("fields");
                 if (fields != null) {
-                    return fields.entrySet().stream()
+                    return fields.entrySet()
+                            .stream()
                             .collect(Collectors.toMap(Map.Entry::getKey, e -> ((List<String>) e.getValue()).toArray(n -> new String[n])));
                 }
                 return Collections.emptyMap();
@@ -258,8 +259,10 @@ public class McpApiManager extends BaseApiManager {
             public Map<String, String[]> getConditions() {
                 final Map<String, Object> conditions = (Map<String, Object>) paramMap.get("as");
                 if (conditions != null) {
-                    return conditions.entrySet().stream().collect(Collectors.toMap(Map.Entry::getKey,
-                            e -> ((List<?>) e.getValue()).stream().map(Object::toString).toArray(n -> new String[n])));
+                    return conditions.entrySet()
+                            .stream()
+                            .collect(Collectors.toMap(Map.Entry::getKey,
+                                    e -> ((List<?>) e.getValue()).stream().map(Object::toString).toArray(n -> new String[n])));
                 }
                 return Collections.emptyMap();
             }
@@ -399,8 +402,13 @@ public class McpApiManager extends BaseApiManager {
                         field.getValueCountMap().entrySet().stream().map(e -> Map.of("value", e.getKey(), "count", e.getValue())).toList());
                 return m;
             }).toList());
-            result.put("facet_query", data.getFacetResponse().getQueryCountMap().entrySet().stream()
-                    .map(e -> Map.of("value", e.getKey(), "count", e.getValue())).toList());
+            result.put("facet_query",
+                    data.getFacetResponse()
+                            .getQueryCountMap()
+                            .entrySet()
+                            .stream()
+                            .map(e -> Map.of("value", e.getKey(), "count", e.getValue()))
+                            .toList());
         }
 
         return result;
@@ -419,7 +427,7 @@ public class McpApiManager extends BaseApiManager {
         final Map<String, Object> errorResponse = Map.of("jsonrpc", "2.0", "id", id, "error", error);
         try {
             write(JsonXContent.contentBuilder().map(errorResponse).toString(), mimeType, Constants.UTF_8);
-        } catch (IOException e) {
+        } catch (final IOException e) {
             logger.error("Failed to write error response", e);
         }
     }
