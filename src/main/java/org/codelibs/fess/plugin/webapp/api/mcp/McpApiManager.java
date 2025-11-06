@@ -143,6 +143,8 @@ public class McpApiManager extends BaseApiManager {
         case "initialize" -> handleInitialize();
         case "tools/list" -> handleListTools();
         case "tools/call" -> handleInvoke(params);
+        case "resources/list" -> handleListResources();
+        case "prompts/list" -> handleListPrompts();
         default -> throw new McpApiException(ErrorCode.MethodNotFound, "Unknown method: " + method);
         };
     }
@@ -158,12 +160,14 @@ public class McpApiManager extends BaseApiManager {
      *
      * @return a map with the following keys:
      *         - "protocolVersion": the MCP protocol version (e.g., "2024-11-05").
-     *         - "capabilities": object containing server capabilities including tools support.
+     *         - "capabilities": object containing server capabilities including tools, resources, and prompts support.
      *         - "serverInfo": object containing server name and version information.
      */
     protected Map<String, Object> handleInitialize() {
         final Map<String, Object> caps = new HashMap<>();
         caps.put("tools", new HashMap<>());
+        caps.put("resources", new HashMap<>());
+        caps.put("prompts", new HashMap<>());
 
         final Map<String, Object> serverInfo = new HashMap<>();
         serverInfo.put("name", "fess-mcp-server");
@@ -181,37 +185,48 @@ public class McpApiManager extends BaseApiManager {
      *         - "inputSchema": A JSON Schema object defining the tool's input parameters.
      */
     protected Map<String, Object> handleListTools() {
-        final Map<String, Object> properties = new HashMap<>();
-        properties.put("q", Map.of("type", "string", "description", "query string"));
-        properties.put("start", Map.of("type", "integer", "description", "start position"));
-        properties.put("offset", Map.of("type", "integer", "description", "offset (alias of start)"));
-        properties.put("num", Map.of("type", "integer", "description", "number of results"));
-        properties.put("sort", Map.of("type", "string", "description", "sort order"));
-        properties.put("fields.label", Map.of("type", "array", "description", "labels to return"));
-        properties.put("lang", Map.of("type", "string", "description", "language"));
-        properties.put("preference", Map.of("type", "string", "description", "preference"));
+        // Search tool
+        final Map<String, Object> searchProperties = new HashMap<>();
+        searchProperties.put("q", Map.of("type", "string", "description", "query string"));
+        searchProperties.put("start", Map.of("type", "integer", "description", "start position"));
+        searchProperties.put("offset", Map.of("type", "integer", "description", "offset (alias of start)"));
+        searchProperties.put("num", Map.of("type", "integer", "description", "number of results"));
+        searchProperties.put("sort", Map.of("type", "string", "description", "sort order"));
+        searchProperties.put("fields.label", Map.of("type", "array", "description", "labels to return"));
+        searchProperties.put("lang", Map.of("type", "string", "description", "language"));
+        searchProperties.put("preference", Map.of("type", "string", "description", "preference"));
 
-        final Map<String, Object> inputSchema = new HashMap<>();
-        inputSchema.put("type", "object");
-        inputSchema.put("properties", properties);
-        inputSchema.put("required", List.of("q"));
+        final Map<String, Object> searchInputSchema = new HashMap<>();
+        searchInputSchema.put("type", "object");
+        searchInputSchema.put("properties", searchProperties);
+        searchInputSchema.put("required", List.of("q"));
 
         final Map<String, Object> toolSearch = new HashMap<>();
         toolSearch.put("name", "search");
         toolSearch.put("description", "Search documents via Fess");
-        toolSearch.put("inputSchema", inputSchema);
+        toolSearch.put("inputSchema", searchInputSchema);
 
-        return Map.of("tools", List.of(toolSearch));
+        // Index stats tool
+        final Map<String, Object> statsInputSchema = new HashMap<>();
+        statsInputSchema.put("type", "object");
+        statsInputSchema.put("properties", new HashMap<>());
+
+        final Map<String, Object> toolStats = new HashMap<>();
+        toolStats.put("name", "get_index_stats");
+        toolStats.put("description", "Get index statistics and information");
+        toolStats.put("inputSchema", statsInputSchema);
+
+        return Map.of("tools", List.of(toolSearch, toolStats));
     }
 
     /**
      * Handles the invocation of tools via the MCP API by processing the input parameters,
-     * executing the requested tool, and returning the results.
+     * executing the requested tool, and returning the results in MCP-compliant format.
      *
      * @param params A map containing the input parameters for the tool call.
      *               It must include "name" (tool name) and "arguments" (tool parameters).
-     * @return A map containing the tool execution results. For search tool, returns search results
-     *         with documents, pagination info, and facets.
+     * @return A map containing the tool execution results in MCP format with "content" array.
+     *         Each content item has "type" and "text" fields.
      * @throws McpApiException If required parameters are missing or invalid.
      */
     @SuppressWarnings("unchecked")
@@ -227,7 +242,8 @@ public class McpApiManager extends BaseApiManager {
         }
         return switch (tool) {
         case "search" -> invokeSearch(toolParams);
-        // TODO Add administrative tools here...
+        case "get_index_stats" -> invokeGetIndexStats();
+        // TODO Add more administrative tools here...
         default -> throw new McpApiException(ErrorCode.InvalidParams, "Unknown tool: " + tool);
         };
     }
@@ -411,7 +427,99 @@ public class McpApiManager extends BaseApiManager {
                             .toList());
         }
 
-        return result;
+        // Return MCP-compliant response with content array
+        try {
+            final String jsonResult = JsonXContent.contentBuilder().map(result).toString();
+            final Map<String, Object> content = new HashMap<>();
+            content.put("type", "text");
+            content.put("text", jsonResult);
+            return Map.of("content", List.of(content));
+        } catch (final IOException e) {
+            throw new McpApiException(ErrorCode.InternalError, "Failed to serialize search results: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Retrieves index statistics and system information.
+     *
+     * @return A map containing index statistics in MCP-compliant format with "content" array.
+     */
+    protected Map<String, Object> invokeGetIndexStats() {
+        final Map<String, Object> stats = new HashMap<>();
+        try {
+            final FessConfig fessConfig = ComponentUtil.getFessConfig();
+            stats.put("server_name", fessConfig.getSystemProperty("fess.server.name", "Fess"));
+            stats.put("index_name", fessConfig.getIndexDocumentSearchIndex());
+            stats.put("max_page_size", fessConfig.getPagingSearchPageMaxSizeAsInteger());
+            stats.put("default_page_size", fessConfig.getPagingSearchPageSizeAsInteger());
+
+            // Return MCP-compliant response with content array
+            final String jsonResult = JsonXContent.contentBuilder().map(stats).toString();
+            final Map<String, Object> content = new HashMap<>();
+            content.put("type", "text");
+            content.put("text", jsonResult);
+            return Map.of("content", List.of(content));
+        } catch (final IOException e) {
+            throw new McpApiException(ErrorCode.InternalError, "Failed to serialize index stats: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Handles the resources/list request and returns available resources.
+     *
+     * @return A map with "resources" key containing a list of available resources.
+     */
+    protected Map<String, Object> handleListResources() {
+        final Map<String, Object> indexResource = new HashMap<>();
+        indexResource.put("uri", "fess://index/stats");
+        indexResource.put("name", "Index Statistics");
+        indexResource.put("description", "Fess index statistics and configuration information");
+        indexResource.put("mimeType", "application/json");
+
+        return Map.of("resources", List.of(indexResource));
+    }
+
+    /**
+     * Handles the prompts/list request and returns available prompts.
+     *
+     * @return A map with "prompts" key containing a list of available prompts.
+     */
+    protected Map<String, Object> handleListPrompts() {
+        // Basic search prompt
+        final Map<String, Object> basicSearchPrompt = new HashMap<>();
+        basicSearchPrompt.put("name", "basic_search");
+        basicSearchPrompt.put("description", "Perform a basic search with a query string");
+
+        final Map<String, Object> basicSearchArg = new HashMap<>();
+        basicSearchArg.put("name", "query");
+        basicSearchArg.put("description", "The search query");
+        basicSearchArg.put("required", true);
+
+        basicSearchPrompt.put("arguments", List.of(basicSearchArg));
+
+        // Advanced search prompt
+        final Map<String, Object> advancedSearchPrompt = new HashMap<>();
+        advancedSearchPrompt.put("name", "advanced_search");
+        advancedSearchPrompt.put("description", "Perform an advanced search with filters and sorting");
+
+        final Map<String, Object> advQueryArg = new HashMap<>();
+        advQueryArg.put("name", "query");
+        advQueryArg.put("description", "The search query");
+        advQueryArg.put("required", true);
+
+        final Map<String, Object> advSortArg = new HashMap<>();
+        advSortArg.put("name", "sort");
+        advSortArg.put("description", "Sort order (e.g., 'score.desc', 'last_modified.desc')");
+        advSortArg.put("required", false);
+
+        final Map<String, Object> advNumArg = new HashMap<>();
+        advNumArg.put("name", "num");
+        advNumArg.put("description", "Number of results to return");
+        advNumArg.put("required", false);
+
+        advancedSearchPrompt.put("arguments", List.of(advQueryArg, advSortArg, advNumArg));
+
+        return Map.of("prompts", List.of(basicSearchPrompt, advancedSearchPrompt));
     }
 
     /**
