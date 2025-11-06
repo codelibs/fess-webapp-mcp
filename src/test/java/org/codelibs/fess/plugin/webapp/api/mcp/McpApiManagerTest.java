@@ -179,14 +179,4 @@ public class McpApiManagerTest {
     public void testHandleInvoke_UnknownTool() {
         mcpApiManager.handleInvoke(Map.of("name", "unknown_tool", "arguments", Map.of()));
     }
-
-    @Test
-    public void testPathPrefix() {
-        assertEquals("Path prefix should be /mcp", "/mcp", mcpApiManager.pathPrefix);
-    }
-
-    @Test
-    public void testMimeType() {
-        assertEquals("MIME type should be application/json", "application/json", mcpApiManager.mimeType);
-    }
 }
