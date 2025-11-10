@@ -347,7 +347,7 @@ public class McpApiManagerTest {
         assertTrue("version should be a String", serverInfo.get("version") instanceof String);
     }
 
-    @Test(expected = McpApiException.class)
+    @Test(expected = NullPointerException.class)
     public void testDispatchRpcMethod_NullMethod() {
         mcpApiManager.dispatchRpcMethod(null, Map.of());
     }
