@@ -17,6 +17,7 @@ package org.codelibs.fess.plugin.webapp.exception;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
 
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
 import org.junit.Test;
