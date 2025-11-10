@@ -57,4 +57,64 @@ public class ErrorCodeTest {
         final ErrorCode[] values = ErrorCode.values();
         assertEquals("Should have 5 error codes", 5, values.length);
     }
+
+    @Test
+    public void testValueOf() {
+        // Test valueOf method for enum
+        assertEquals("valueOf ParseError should work", ErrorCode.ParseError, ErrorCode.valueOf("ParseError"));
+        assertEquals("valueOf InvalidRequest should work", ErrorCode.InvalidRequest, ErrorCode.valueOf("InvalidRequest"));
+        assertEquals("valueOf MethodNotFound should work", ErrorCode.MethodNotFound, ErrorCode.valueOf("MethodNotFound"));
+        assertEquals("valueOf InvalidParams should work", ErrorCode.InvalidParams, ErrorCode.valueOf("InvalidParams"));
+        assertEquals("valueOf InternalError should work", ErrorCode.InternalError, ErrorCode.valueOf("InternalError"));
+    }
+
+    @Test
+    public void testAllErrorCodesAreUnique() {
+        final ErrorCode[] values = ErrorCode.values();
+        final java.util.Set<Integer> codes = new java.util.HashSet<>();
+
+        for (final ErrorCode errorCode : values) {
+            assertTrue("Error code " + errorCode.name() + " should be unique", codes.add(errorCode.getCode()));
+        }
+
+        assertEquals("All error codes should be unique", values.length, codes.size());
+    }
+
+    @Test
+    public void testErrorCodesAreNegative() {
+        // JSON-RPC 2.0 error codes should be negative
+        final ErrorCode[] values = ErrorCode.values();
+
+        for (final ErrorCode errorCode : values) {
+            assertTrue("Error code " + errorCode.name() + " should be negative", errorCode.getCode() < 0);
+        }
+    }
+
+    @Test
+    public void testErrorCodeRange() {
+        // JSON-RPC 2.0 standard error codes should be in range -32768 to -32000
+        final ErrorCode[] values = ErrorCode.values();
+
+        for (final ErrorCode errorCode : values) {
+            final int code = errorCode.getCode();
+            assertTrue("Error code " + errorCode.name() + " should be >= -32768", code >= -32768);
+            assertTrue("Error code " + errorCode.name() + " should be <= -32000", code <= -32000);
+        }
+    }
+
+    @Test
+    public void testSpecificErrorCodeValues() {
+        // Verify specific JSON-RPC 2.0 error code values according to spec
+        final java.util.Map<ErrorCode, Integer> expectedCodes = new java.util.HashMap<>();
+        expectedCodes.put(ErrorCode.ParseError, -32700);
+        expectedCodes.put(ErrorCode.InvalidRequest, -32600);
+        expectedCodes.put(ErrorCode.MethodNotFound, -32601);
+        expectedCodes.put(ErrorCode.InvalidParams, -32602);
+        expectedCodes.put(ErrorCode.InternalError, -32603);
+
+        for (final java.util.Map.Entry<ErrorCode, Integer> entry : expectedCodes.entrySet()) {
+            assertEquals("Error code " + entry.getKey().name() + " should have correct value",
+                    entry.getValue().intValue(), entry.getKey().getCode());
+        }
+    }
 }
