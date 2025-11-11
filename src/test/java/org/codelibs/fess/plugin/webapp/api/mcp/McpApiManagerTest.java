@@ -179,4 +179,200 @@ public class McpApiManagerTest {
     public void testHandleInvoke_UnknownTool() {
         mcpApiManager.handleInvoke(Map.of("name", "unknown_tool", "arguments", Map.of()));
     }
+
+    @Test(expected = McpApiException.class)
+    public void testHandleInvoke_EmptyToolName() {
+        mcpApiManager.handleInvoke(Map.of("name", "", "arguments", Map.of()));
+    }
+
+    @Test
+    public void testHandleListTools_DetailedSchema() {
+        final Map<String, Object> result = mcpApiManager.handleListTools();
+
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> tools = (List<Map<String, Object>>) result.get("tools");
+
+        // Verify search tool schema details
+        final Map<String, Object> searchTool = tools.get(0);
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> searchSchema = (Map<String, Object>) searchTool.get("inputSchema");
+
+        assertNotNull("Search schema should not be null", searchSchema);
+        assertEquals("Schema type should be object", "object", searchSchema.get("type"));
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> searchProperties = (Map<String, Object>) searchSchema.get("properties");
+        assertNotNull("Properties should not be null", searchProperties);
+        assertTrue("Should have 'q' property", searchProperties.containsKey("q"));
+        assertTrue("Should have 'start' property", searchProperties.containsKey("start"));
+        assertTrue("Should have 'num' property", searchProperties.containsKey("num"));
+        assertTrue("Should have 'sort' property", searchProperties.containsKey("sort"));
+        assertTrue("Should have 'lang' property", searchProperties.containsKey("lang"));
+
+        @SuppressWarnings("unchecked")
+        final List<String> required = (List<String>) searchSchema.get("required");
+        assertNotNull("Required array should not be null", required);
+        assertEquals("Should have 1 required field", 1, required.size());
+        assertEquals("Query 'q' should be required", "q", required.get(0));
+
+        // Verify get_index_stats tool schema
+        final Map<String, Object> statsTool = tools.get(1);
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> statsSchema = (Map<String, Object>) statsTool.get("inputSchema");
+
+        assertNotNull("Stats schema should not be null", statsSchema);
+        assertEquals("Stats schema type should be object", "object", statsSchema.get("type"));
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> statsProperties = (Map<String, Object>) statsSchema.get("properties");
+        assertNotNull("Stats properties should not be null", statsProperties);
+        assertTrue("Stats properties should be empty", statsProperties.isEmpty());
+    }
+
+    @Test
+    public void testHandleListPrompts_DetailedArguments() {
+        final Map<String, Object> result = mcpApiManager.handleListPrompts();
+
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> prompts = (List<Map<String, Object>>) result.get("prompts");
+
+        // Verify basic_search prompt arguments
+        final Map<String, Object> basicPrompt = prompts.get(0);
+        assertEquals("Prompt name should be basic_search", "basic_search", basicPrompt.get("name"));
+        assertEquals("Description should match", "Perform a basic search with a query string", basicPrompt.get("description"));
+
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> basicArgs = (List<Map<String, Object>>) basicPrompt.get("arguments");
+        assertNotNull("Arguments should not be null", basicArgs);
+        assertEquals("Should have 1 argument", 1, basicArgs.size());
+
+        final Map<String, Object> queryArg = basicArgs.get(0);
+        assertEquals("Argument name should be query", "query", queryArg.get("name"));
+        assertEquals("Argument description should match", "The search query", queryArg.get("description"));
+        assertEquals("Argument should be required", true, queryArg.get("required"));
+
+        // Verify advanced_search prompt arguments
+        final Map<String, Object> advancedPrompt = prompts.get(1);
+        assertEquals("Prompt name should be advanced_search", "advanced_search", advancedPrompt.get("name"));
+
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> advancedArgs = (List<Map<String, Object>>) advancedPrompt.get("arguments");
+        assertNotNull("Arguments should not be null", advancedArgs);
+        assertEquals("Should have 3 arguments", 3, advancedArgs.size());
+
+        // Check first argument (query)
+        final Map<String, Object> advQueryArg = advancedArgs.get(0);
+        assertEquals("First argument should be query", "query", advQueryArg.get("name"));
+        assertEquals("Query should be required", true, advQueryArg.get("required"));
+
+        // Check second argument (sort)
+        final Map<String, Object> sortArg = advancedArgs.get(1);
+        assertEquals("Second argument should be sort", "sort", sortArg.get("name"));
+        assertEquals("Sort should not be required", false, sortArg.get("required"));
+
+        // Check third argument (num)
+        final Map<String, Object> numArg = advancedArgs.get(2);
+        assertEquals("Third argument should be num", "num", numArg.get("name"));
+        assertEquals("Num should not be required", false, numArg.get("required"));
+    }
+
+    @Test
+    public void testHandleListResources_DetailedFields() {
+        final Map<String, Object> result = mcpApiManager.handleListResources();
+
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> resources = (List<Map<String, Object>>) result.get("resources");
+
+        final Map<String, Object> resource = resources.get(0);
+        assertEquals("URI should match", "fess://index/stats", resource.get("uri"));
+        assertEquals("Name should match", "Index Statistics", resource.get("name"));
+        assertEquals("Description should not be null",
+                "Fess index statistics and configuration information", resource.get("description"));
+        assertEquals("MimeType should be application/json", "application/json", resource.get("mimeType"));
+
+        // Verify all expected keys are present
+        assertTrue("Resource should have uri", resource.containsKey("uri"));
+        assertTrue("Resource should have name", resource.containsKey("name"));
+        assertTrue("Resource should have description", resource.containsKey("description"));
+        assertTrue("Resource should have mimeType", resource.containsKey("mimeType"));
+    }
+
+    @Test
+    public void testDispatchRpcMethod_ToolsCall() {
+        // Test tools/call method with missing name parameter (should trigger error in handleInvoke)
+        try {
+            mcpApiManager.dispatchRpcMethod("tools/call", Map.of());
+            assertTrue("Should have thrown McpApiException", false);
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+            assertTrue("Error message should mention missing name", e.getMessage().contains("name"));
+        }
+    }
+
+    @Test
+    public void testDispatchRpcMethod_AllMethods() {
+        // Test all valid methods return non-null results
+        final String[] methods = { "initialize", "tools/list", "resources/list", "prompts/list" };
+
+        for (final String method : methods) {
+            final Object result = mcpApiManager.dispatchRpcMethod(method, Map.of());
+            assertNotNull("Result for method '" + method + "' should not be null", result);
+            assertTrue("Result for method '" + method + "' should be a Map", result instanceof Map);
+        }
+    }
+
+    @Test
+    public void testHandleInitialize_CapabilitiesStructure() {
+        final Map<String, Object> result = mcpApiManager.handleInitialize();
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> capabilities = (Map<String, Object>) result.get("capabilities");
+
+        // Verify capabilities structure
+        assertNotNull("tools capability should not be null", capabilities.get("tools"));
+        assertNotNull("resources capability should not be null", capabilities.get("resources"));
+        assertNotNull("prompts capability should not be null", capabilities.get("prompts"));
+
+        assertTrue("tools should be a Map", capabilities.get("tools") instanceof Map);
+        assertTrue("resources should be a Map", capabilities.get("resources") instanceof Map);
+        assertTrue("prompts should be a Map", capabilities.get("prompts") instanceof Map);
+
+        // Verify serverInfo structure
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> serverInfo = (Map<String, Object>) result.get("serverInfo");
+
+        assertTrue("serverInfo should have name", serverInfo.containsKey("name"));
+        assertTrue("serverInfo should have version", serverInfo.containsKey("version"));
+        assertTrue("name should be a String", serverInfo.get("name") instanceof String);
+        assertTrue("version should be a String", serverInfo.get("version") instanceof String);
+    }
+
+    @Test(expected = NullPointerException.class)
+    public void testDispatchRpcMethod_NullMethod() {
+        mcpApiManager.dispatchRpcMethod(null, Map.of());
+    }
+
+    @Test
+    public void testErrorCodeInException() {
+        // Test that different error codes are properly returned in exceptions
+        try {
+            mcpApiManager.dispatchRpcMethod("unknown_method", Map.of());
+            assertTrue("Should have thrown McpApiException", false);
+        } catch (final McpApiException e) {
+            assertEquals("Error code should be MethodNotFound", ErrorCode.MethodNotFound, e.getCode());
+        }
+
+        try {
+            mcpApiManager.handleInvoke(Map.of());
+            assertTrue("Should have thrown McpApiException", false);
+        } catch (final McpApiException e) {
+            assertEquals("Error code should be InvalidParams", ErrorCode.InvalidParams, e.getCode());
+        }
+    }
+
+    @Test
+    public void testConstructor() {
+        final McpApiManager manager = new McpApiManager();
+        assertNotNull("McpApiManager should be created", manager);
+    }
 }
