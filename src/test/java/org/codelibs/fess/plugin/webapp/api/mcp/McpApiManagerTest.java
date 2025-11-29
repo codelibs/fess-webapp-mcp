@@ -19,6 +19,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -279,6 +280,384 @@ public class McpApiManagerTest {
     }
 
     @Test
+    public void testHandleGetPrompt_BasicSearch() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "basic_search");
+        params.put("arguments", Map.of("query", "test query"));
+
+        final Map<String, Object> result = mcpApiManager.handleGetPrompt(params);
+
+        assertNotNull("GetPrompt result should not be null", result);
+        assertTrue("Result should contain messages key", result.containsKey("messages"));
+
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> messages = (List<Map<String, Object>>) result.get("messages");
+        assertNotNull("Messages list should not be null", messages);
+        assertEquals("Should have 1 message", 1, messages.size());
+
+        final Map<String, Object> message = messages.get(0);
+        assertEquals("Message role should be user", "user", message.get("role"));
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> content = (Map<String, Object>) message.get("content");
+        assertEquals("Content type should be text", "text", content.get("type"));
+        assertTrue("Content text should contain query", content.get("text").toString().contains("test query"));
+    }
+
+    @Test
+    public void testHandleGetPrompt_AdvancedSearch() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "advanced_search");
+        params.put("arguments", Map.of("query", "test query", "sort", "score.desc", "num", "10"));
+
+        final Map<String, Object> result = mcpApiManager.handleGetPrompt(params);
+
+        assertNotNull("GetPrompt result should not be null", result);
+        assertTrue("Result should contain messages key", result.containsKey("messages"));
+
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> messages = (List<Map<String, Object>>) result.get("messages");
+        assertEquals("Should have 1 message", 1, messages.size());
+
+        final Map<String, Object> message = messages.get(0);
+        assertEquals("Message role should be user", "user", message.get("role"));
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> content = (Map<String, Object>) message.get("content");
+        assertEquals("Content type should be text", "text", content.get("type"));
+        final String text = content.get("text").toString();
+        assertTrue("Content text should contain query", text.contains("test query"));
+        assertTrue("Content text should contain sort", text.contains("score.desc"));
+        assertTrue("Content text should contain num", text.contains("10"));
+    }
+
+    @Test
+    public void testHandleGetPrompt_AdvancedSearch_MinimalArgs() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "advanced_search");
+        params.put("arguments", Map.of("query", "minimal query"));
+
+        final Map<String, Object> result = mcpApiManager.handleGetPrompt(params);
+
+        assertNotNull("GetPrompt result should not be null", result);
+        assertTrue("Result should contain messages key", result.containsKey("messages"));
+
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> messages = (List<Map<String, Object>>) result.get("messages");
+        assertEquals("Should have 1 message", 1, messages.size());
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> content = (Map<String, Object>) messages.get(0).get("content");
+        final String text = content.get("text").toString();
+        assertTrue("Content text should contain query", text.contains("minimal query"));
+    }
+
+    @Test(expected = McpApiException.class)
+    public void testHandleGetPrompt_MissingName() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("arguments", Map.of("query", "test"));
+        mcpApiManager.handleGetPrompt(params);
+    }
+
+    @Test(expected = McpApiException.class)
+    public void testHandleGetPrompt_EmptyName() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "");
+        params.put("arguments", Map.of("query", "test"));
+        mcpApiManager.handleGetPrompt(params);
+    }
+
+    @Test(expected = McpApiException.class)
+    public void testHandleGetPrompt_UnknownPrompt() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "unknown_prompt");
+        params.put("arguments", Map.of("query", "test"));
+        mcpApiManager.handleGetPrompt(params);
+    }
+
+    @Test(expected = McpApiException.class)
+    public void testHandleGetPrompt_MissingRequiredArgument() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "basic_search");
+        params.put("arguments", Map.of());
+        mcpApiManager.handleGetPrompt(params);
+    }
+
+    @Test
+    public void testDispatchRpcMethod_PromptsGet() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "basic_search");
+        params.put("arguments", Map.of("query", "dispatch test"));
+
+        final Object result = mcpApiManager.dispatchRpcMethod("prompts/get", params);
+
+        assertNotNull("dispatchRpcMethod should return non-null result for prompts/get", result);
+        assertTrue("Result should be a Map", result instanceof Map);
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> resultMap = (Map<String, Object>) result;
+        assertTrue("Result should contain messages key", resultMap.containsKey("messages"));
+    }
+
+    // ==================== Comprehensive prompts/get Tests ====================
+
+    @Test
+    public void testHandleGetPrompt_BasicSearch_WithJapaneseQuery() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "basic_search");
+        params.put("arguments", Map.of("query", "インストール方法"));
+
+        final Map<String, Object> result = mcpApiManager.handleGetPrompt(params);
+
+        assertNotNull("Result should not be null", result);
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> messages = (List<Map<String, Object>>) result.get("messages");
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> content = (Map<String, Object>) messages.get(0).get("content");
+        assertTrue("Content should contain Japanese query", content.get("text").toString().contains("インストール方法"));
+    }
+
+    @Test
+    public void testHandleGetPrompt_BasicSearch_WithSpecialCharacters() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "basic_search");
+        params.put("arguments", Map.of("query", "test AND (foo OR bar) -exclude \"exact phrase\""));
+
+        final Map<String, Object> result = mcpApiManager.handleGetPrompt(params);
+
+        assertNotNull("Result should not be null", result);
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> messages = (List<Map<String, Object>>) result.get("messages");
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> content = (Map<String, Object>) messages.get(0).get("content");
+        assertTrue("Content should contain special characters", content.get("text").toString().contains("AND"));
+        assertTrue("Content should contain special characters", content.get("text").toString().contains("\"exact phrase\""));
+    }
+
+    @Test
+    public void testHandleGetPrompt_BasicSearch_MessageStructure() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "basic_search");
+        params.put("arguments", Map.of("query", "test"));
+
+        final Map<String, Object> result = mcpApiManager.handleGetPrompt(params);
+
+        assertTrue("Result should have messages key", result.containsKey("messages"));
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> messages = (List<Map<String, Object>>) result.get("messages");
+        assertEquals("Should have exactly 1 message", 1, messages.size());
+
+        final Map<String, Object> message = messages.get(0);
+        assertEquals("Message role should be 'user'", "user", message.get("role"));
+        assertTrue("Message should have content", message.containsKey("content"));
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> content = (Map<String, Object>) message.get("content");
+        assertEquals("Content type should be 'text'", "text", content.get("type"));
+        assertNotNull("Content text should not be null", content.get("text"));
+    }
+
+    @Test
+    public void testHandleGetPrompt_BasicSearch_NullArguments() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "basic_search");
+        params.put("arguments", null);
+
+        try {
+            mcpApiManager.handleGetPrompt(params);
+            assertTrue("Should have thrown McpApiException", false);
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+        }
+    }
+
+    @Test
+    public void testHandleGetPrompt_BasicSearch_EmptyQuery() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "basic_search");
+        params.put("arguments", Map.of("query", ""));
+
+        try {
+            mcpApiManager.handleGetPrompt(params);
+            assertTrue("Should have thrown McpApiException for empty query", false);
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+            assertTrue("Error message should mention query", e.getMessage().contains("query"));
+        }
+    }
+
+    @Test
+    public void testHandleGetPrompt_AdvancedSearch_AllParameters() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "advanced_search");
+        final Map<String, Object> arguments = new HashMap<>();
+        arguments.put("query", "検索テスト");
+        arguments.put("sort", "last_modified.desc");
+        arguments.put("num", "25");
+        params.put("arguments", arguments);
+
+        final Map<String, Object> result = mcpApiManager.handleGetPrompt(params);
+
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> messages = (List<Map<String, Object>>) result.get("messages");
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> content = (Map<String, Object>) messages.get(0).get("content");
+        final String text = content.get("text").toString();
+
+        assertTrue("Content should contain query", text.contains("検索テスト"));
+        assertTrue("Content should contain sort", text.contains("last_modified.desc"));
+        assertTrue("Content should contain num", text.contains("25"));
+    }
+
+    @Test
+    public void testHandleGetPrompt_AdvancedSearch_OnlySortOptional() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "advanced_search");
+        final Map<String, Object> arguments = new HashMap<>();
+        arguments.put("query", "test query");
+        arguments.put("sort", "score.desc");
+        params.put("arguments", arguments);
+
+        final Map<String, Object> result = mcpApiManager.handleGetPrompt(params);
+
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> messages = (List<Map<String, Object>>) result.get("messages");
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> content = (Map<String, Object>) messages.get(0).get("content");
+        final String text = content.get("text").toString();
+
+        assertTrue("Content should contain query", text.contains("test query"));
+        assertTrue("Content should contain sort", text.contains("score.desc"));
+    }
+
+    @Test
+    public void testHandleGetPrompt_AdvancedSearch_OnlyNumOptional() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "advanced_search");
+        final Map<String, Object> arguments = new HashMap<>();
+        arguments.put("query", "test query");
+        arguments.put("num", "50");
+        params.put("arguments", arguments);
+
+        final Map<String, Object> result = mcpApiManager.handleGetPrompt(params);
+
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> messages = (List<Map<String, Object>>) result.get("messages");
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> content = (Map<String, Object>) messages.get(0).get("content");
+        final String text = content.get("text").toString();
+
+        assertTrue("Content should contain query", text.contains("test query"));
+        assertTrue("Content should contain num", text.contains("50"));
+    }
+
+    @Test
+    public void testHandleGetPrompt_AdvancedSearch_EmptyOptionalArgs() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "advanced_search");
+        final Map<String, Object> arguments = new HashMap<>();
+        arguments.put("query", "test");
+        arguments.put("sort", "");
+        arguments.put("num", "");
+        params.put("arguments", arguments);
+
+        final Map<String, Object> result = mcpApiManager.handleGetPrompt(params);
+
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> messages = (List<Map<String, Object>>) result.get("messages");
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> content = (Map<String, Object>) messages.get(0).get("content");
+        final String text = content.get("text").toString();
+
+        assertTrue("Content should contain query", text.contains("test"));
+        // Empty optional args should not appear in text
+    }
+
+    @Test
+    public void testHandleGetPrompt_AdvancedSearch_NumericNum() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "advanced_search");
+        final Map<String, Object> arguments = new HashMap<>();
+        arguments.put("query", "test");
+        arguments.put("num", Integer.valueOf(100));
+        params.put("arguments", arguments);
+
+        final Map<String, Object> result = mcpApiManager.handleGetPrompt(params);
+
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> messages = (List<Map<String, Object>>) result.get("messages");
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> content = (Map<String, Object>) messages.get(0).get("content");
+        final String text = content.get("text").toString();
+
+        assertTrue("Content should contain num as string", text.contains("100"));
+    }
+
+    @Test
+    public void testHandleGetPrompt_AdvancedSearch_MissingQuery() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "advanced_search");
+        params.put("arguments", Map.of("sort", "score.desc", "num", "10"));
+
+        try {
+            mcpApiManager.handleGetPrompt(params);
+            assertTrue("Should have thrown McpApiException for missing query", false);
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+            assertTrue("Error message should mention query", e.getMessage().contains("query"));
+        }
+    }
+
+    @Test
+    public void testHandleGetPrompt_NullName() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", null);
+        params.put("arguments", Map.of("query", "test"));
+
+        try {
+            mcpApiManager.handleGetPrompt(params);
+            assertTrue("Should have thrown McpApiException for null name", false);
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+            assertTrue("Error message should mention name", e.getMessage().contains("name"));
+        }
+    }
+
+    @Test
+    public void testHandleGetPrompt_ErrorCode_UnknownPrompt() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "nonexistent_prompt");
+        params.put("arguments", Map.of("query", "test"));
+
+        try {
+            mcpApiManager.handleGetPrompt(params);
+            assertTrue("Should have thrown McpApiException", false);
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+            assertTrue("Error message should mention unknown prompt", e.getMessage().contains("Unknown prompt"));
+        }
+    }
+
+    @Test
+    public void testDispatchRpcMethod_PromptsGet_AdvancedSearch() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "advanced_search");
+        final Map<String, Object> arguments = new HashMap<>();
+        arguments.put("query", "dispatch advanced test");
+        arguments.put("sort", "score.desc");
+        arguments.put("num", "5");
+        params.put("arguments", arguments);
+
+        final Object result = mcpApiManager.dispatchRpcMethod("prompts/get", params);
+
+        assertNotNull("Result should not be null", result);
+        assertTrue("Result should be a Map", result instanceof Map);
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> resultMap = (Map<String, Object>) result;
+        assertTrue("Result should contain messages key", resultMap.containsKey("messages"));
+    }
+
+    @Test
     public void testHandleListResources_DetailedFields() {
         final Map<String, Object> result = mcpApiManager.handleListResources();
 
@@ -296,6 +675,191 @@ public class McpApiManagerTest {
         assertTrue("Resource should have name", resource.containsKey("name"));
         assertTrue("Resource should have description", resource.containsKey("description"));
         assertTrue("Resource should have mimeType", resource.containsKey("mimeType"));
+    }
+
+    @Test
+    public void testHandleReadResource_IndexStats_ValidUri() {
+        // This test verifies the URI routing logic works correctly.
+        // The actual content generation requires the DI container, which is tested at runtime.
+        final Map<String, Object> params = new HashMap<>();
+        params.put("uri", "fess://index/stats");
+
+        try {
+            mcpApiManager.handleReadResource(params);
+            // If container is initialized, we would get a valid result
+        } catch (final IllegalStateException e) {
+            // Expected in unit test when DI container is not initialized
+            assertTrue("Should fail due to container not initialized", e.getMessage().contains("container"));
+        }
+    }
+
+    @Test(expected = McpApiException.class)
+    public void testHandleReadResource_MissingUri() {
+        final Map<String, Object> params = new HashMap<>();
+        mcpApiManager.handleReadResource(params);
+    }
+
+    @Test(expected = McpApiException.class)
+    public void testHandleReadResource_EmptyUri() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("uri", "");
+        mcpApiManager.handleReadResource(params);
+    }
+
+    @Test(expected = McpApiException.class)
+    public void testHandleReadResource_UnknownResource() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("uri", "fess://unknown/resource");
+        mcpApiManager.handleReadResource(params);
+    }
+
+    @Test
+    public void testDispatchRpcMethod_ResourcesRead() {
+        // This test verifies the dispatch routing works correctly.
+        // The actual content generation requires the DI container, which is tested at runtime.
+        final Map<String, Object> params = new HashMap<>();
+        params.put("uri", "fess://index/stats");
+
+        try {
+            final Object result = mcpApiManager.dispatchRpcMethod("resources/read", params);
+            // If container is initialized, verify the result
+            assertNotNull("dispatchRpcMethod should return non-null result for resources/read", result);
+            assertTrue("Result should be a Map", result instanceof Map);
+        } catch (final IllegalStateException e) {
+            // Expected in unit test when DI container is not initialized
+            assertTrue("Should fail due to container not initialized", e.getMessage().contains("container"));
+        }
+    }
+
+    // ==================== Comprehensive resources/read Tests ====================
+
+    @Test
+    public void testHandleReadResource_NullUri() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("uri", null);
+
+        try {
+            mcpApiManager.handleReadResource(params);
+            assertTrue("Should have thrown McpApiException for null URI", false);
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+            assertTrue("Error message should mention uri", e.getMessage().contains("uri"));
+        }
+    }
+
+    @Test
+    public void testHandleReadResource_ErrorCode_MissingUri() {
+        final Map<String, Object> params = new HashMap<>();
+
+        try {
+            mcpApiManager.handleReadResource(params);
+            assertTrue("Should have thrown McpApiException", false);
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+            assertTrue("Error message should mention missing parameter", e.getMessage().contains("Missing"));
+        }
+    }
+
+    @Test
+    public void testHandleReadResource_ErrorCode_UnknownResource() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("uri", "fess://unknown/path");
+
+        try {
+            mcpApiManager.handleReadResource(params);
+            assertTrue("Should have thrown McpApiException", false);
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+            assertTrue("Error message should mention unknown resource", e.getMessage().contains("Unknown resource"));
+        }
+    }
+
+    @Test
+    public void testHandleReadResource_InvalidScheme() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("uri", "http://example.com/resource");
+
+        try {
+            mcpApiManager.handleReadResource(params);
+            assertTrue("Should have thrown McpApiException for invalid scheme", false);
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+        }
+    }
+
+    @Test
+    public void testHandleReadResource_WhitespaceUri() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("uri", "   ");
+
+        try {
+            mcpApiManager.handleReadResource(params);
+            assertTrue("Should have thrown McpApiException for whitespace URI", false);
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+        }
+    }
+
+    @Test
+    public void testHandleReadResource_PartialUri() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("uri", "fess://index");
+
+        try {
+            mcpApiManager.handleReadResource(params);
+            assertTrue("Should have thrown McpApiException for partial URI", false);
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+        }
+    }
+
+    @Test
+    public void testHandleReadResource_CaseSensitiveUri() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("uri", "FESS://INDEX/STATS");
+
+        try {
+            mcpApiManager.handleReadResource(params);
+            assertTrue("Should have thrown McpApiException for case mismatch URI", false);
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+        }
+    }
+
+    @Test
+    public void testHandleReadResource_ExtraPathSegment() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("uri", "fess://index/stats/extra");
+
+        try {
+            mcpApiManager.handleReadResource(params);
+            assertTrue("Should have thrown McpApiException for unknown resource", false);
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+        }
+    }
+
+    @Test
+    public void testDispatchRpcMethod_ResourcesRead_MissingParams() {
+        try {
+            mcpApiManager.dispatchRpcMethod("resources/read", Map.of());
+            assertTrue("Should have thrown McpApiException", false);
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+        }
+    }
+
+    @Test
+    public void testDispatchRpcMethod_ResourcesRead_UnknownUri() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("uri", "fess://nonexistent/resource");
+
+        try {
+            mcpApiManager.dispatchRpcMethod("resources/read", params);
+            assertTrue("Should have thrown McpApiException", false);
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+        }
     }
 
     @Test

@@ -168,7 +168,9 @@ public class McpApiManager extends BaseApiManager {
         case "tools/list" -> handleListTools();
         case "tools/call" -> handleInvoke(params);
         case "resources/list" -> handleListResources();
+        case "resources/read" -> handleReadResource(params);
         case "prompts/list" -> handleListPrompts();
+        case "prompts/get" -> handleGetPrompt(params);
         default -> throw new McpApiException(ErrorCode.MethodNotFound, "Unknown method: " + method);
         };
     }
@@ -483,6 +485,50 @@ public class McpApiManager extends BaseApiManager {
     }
 
     /**
+     * Handles the resources/read request and returns the resource content.
+     *
+     * @param params the request parameters containing "uri"
+     * @return A map with "contents" key containing the resource content
+     * @throws McpApiException if the URI is missing or unknown
+     */
+    protected Map<String, Object> handleReadResource(final Map<String, Object> params) {
+        final String uri = (String) params.get("uri");
+        if (uri == null || uri.isEmpty()) {
+            throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: uri");
+        }
+
+        return switch (uri) {
+        case "fess://index/stats" -> buildIndexStatsResource();
+        default -> throw new McpApiException(ErrorCode.InvalidParams, "Unknown resource: " + uri);
+        };
+    }
+
+    /**
+     * Builds the index stats resource content.
+     *
+     * @return A map with "contents" key containing the index stats
+     */
+    protected Map<String, Object> buildIndexStatsResource() {
+        final Map<String, Object> stats = new HashMap<>();
+        try {
+            final FessConfig fessConfig = ComponentUtil.getFessConfig();
+            stats.put("default_page_size", 1);
+            stats.put("max_page_size", fessConfig.getPagingSearchPageMaxSizeAsInteger());
+
+            final String jsonResult = JsonXContent.contentBuilder().map(stats).toString();
+
+            final Map<String, Object> content = new HashMap<>();
+            content.put("uri", "fess://index/stats");
+            content.put("mimeType", "application/json");
+            content.put("text", jsonResult);
+
+            return Map.of("contents", List.of(content));
+        } catch (final IOException e) {
+            throw new McpApiException(ErrorCode.InternalError, "Failed to serialize index stats: " + e.getMessage());
+        }
+    }
+
+    /**
      * Handles the prompts/list request and returns available prompts.
      *
      * @return A map with "prompts" key containing a list of available prompts.
@@ -523,6 +569,89 @@ public class McpApiManager extends BaseApiManager {
         advancedSearchPrompt.put("arguments", List.of(advQueryArg, advSortArg, advNumArg));
 
         return Map.of("prompts", List.of(basicSearchPrompt, advancedSearchPrompt));
+    }
+
+    /**
+     * Handles the prompts/get request and returns the prompt messages with arguments substituted.
+     *
+     * @param params the request parameters containing "name" and optional "arguments"
+     * @return A map with "messages" key containing the prompt messages
+     * @throws McpApiException if the prompt name is missing or unknown
+     */
+    @SuppressWarnings("unchecked")
+    protected Map<String, Object> handleGetPrompt(final Map<String, Object> params) {
+        final String name = (String) params.get("name");
+        if (name == null || name.isEmpty()) {
+            throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: name");
+        }
+
+        final Map<String, Object> arguments = params.get("arguments") != null ? (Map<String, Object>) params.get("arguments") : Map.of();
+
+        return switch (name) {
+        case "basic_search" -> buildBasicSearchPrompt(arguments);
+        case "advanced_search" -> buildAdvancedSearchPrompt(arguments);
+        default -> throw new McpApiException(ErrorCode.InvalidParams, "Unknown prompt: " + name);
+        };
+    }
+
+    /**
+     * Builds the basic_search prompt messages.
+     *
+     * @param arguments the prompt arguments
+     * @return A map with "messages" key containing the prompt messages
+     */
+    protected Map<String, Object> buildBasicSearchPrompt(final Map<String, Object> arguments) {
+        final String query = (String) arguments.get("query");
+        if (query == null || query.isEmpty()) {
+            throw new McpApiException(ErrorCode.InvalidParams, "Missing required argument: query");
+        }
+
+        final Map<String, Object> content = new HashMap<>();
+        content.put("type", "text");
+        content.put("text", "Please search for: " + query);
+
+        final Map<String, Object> message = new HashMap<>();
+        message.put("role", "user");
+        message.put("content", content);
+
+        return Map.of("messages", List.of(message));
+    }
+
+    /**
+     * Builds the advanced_search prompt messages.
+     *
+     * @param arguments the prompt arguments
+     * @return A map with "messages" key containing the prompt messages
+     */
+    protected Map<String, Object> buildAdvancedSearchPrompt(final Map<String, Object> arguments) {
+        final String query = (String) arguments.get("query");
+        if (query == null || query.isEmpty()) {
+            throw new McpApiException(ErrorCode.InvalidParams, "Missing required argument: query");
+        }
+
+        final StringBuilder text = new StringBuilder();
+        text.append("Please perform an advanced search with the following parameters:\n");
+        text.append("Query: ").append(query);
+
+        final Object sort = arguments.get("sort");
+        if (sort != null && !sort.toString().isEmpty()) {
+            text.append("\nSort: ").append(sort);
+        }
+
+        final Object num = arguments.get("num");
+        if (num != null && !num.toString().isEmpty()) {
+            text.append("\nNumber of results: ").append(num);
+        }
+
+        final Map<String, Object> content = new HashMap<>();
+        content.put("type", "text");
+        content.put("text", text.toString());
+
+        final Map<String, Object> message = new HashMap<>();
+        message.put("role", "user");
+        message.put("content", content);
+
+        return Map.of("messages", List.of(message));
     }
 
     /**
