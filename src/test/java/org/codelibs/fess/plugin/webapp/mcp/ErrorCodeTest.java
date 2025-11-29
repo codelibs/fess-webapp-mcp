@@ -114,8 +114,8 @@ public class ErrorCodeTest {
         expectedCodes.put(ErrorCode.InternalError, -32603);
 
         for (final java.util.Map.Entry<ErrorCode, Integer> entry : expectedCodes.entrySet()) {
-            assertEquals("Error code " + entry.getKey().name() + " should have correct value",
-                    entry.getValue().intValue(), entry.getKey().getCode());
+            assertEquals("Error code " + entry.getKey().name() + " should have correct value", entry.getValue().intValue(),
+                    entry.getKey().getCode());
         }
     }
 }

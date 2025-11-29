@@ -78,7 +78,9 @@ public class McpApiManagerTest {
         // Check search tool
         final Map<String, Object> searchTool = tools.get(0);
         assertEquals("First tool should be search", "search", searchTool.get("name"));
-        assertEquals("Search tool description", "Search documents via Fess", searchTool.get("description"));
+        assertTrue("Search tool description should contain query syntax info",
+                ((String) searchTool.get("description")).contains("Search documents via Fess")
+                        && ((String) searchTool.get("description")).contains("AND"));
         assertNotNull("Search tool should have inputSchema", searchTool.get("inputSchema"));
 
         // Check get_index_stats tool
@@ -286,8 +288,7 @@ public class McpApiManagerTest {
         final Map<String, Object> resource = resources.get(0);
         assertEquals("URI should match", "fess://index/stats", resource.get("uri"));
         assertEquals("Name should match", "Index Statistics", resource.get("name"));
-        assertEquals("Description should not be null",
-                "Fess index statistics and configuration information", resource.get("description"));
+        assertEquals("Description should not be null", "Fess index statistics and configuration information", resource.get("description"));
         assertEquals("MimeType should be application/json", "application/json", resource.get("mimeType"));
 
         // Verify all expected keys are present
@@ -374,5 +375,215 @@ public class McpApiManagerTest {
     public void testConstructor() {
         final McpApiManager manager = new McpApiManager();
         assertNotNull("McpApiManager should be created", manager);
+    }
+
+    @Test
+    public void testCreateDocumentContent() {
+        final Map<String, Object> doc =
+                Map.of("title", "Test Document", "url", "https://example.com/test", "content", "This is test content.", "score", 10.5);
+
+        final Map<String, Object> result = mcpApiManager.createDocumentContent(doc, 1);
+
+        assertNotNull("Result should not be null", result);
+        assertEquals("Type should be text", "text", result.get("type"));
+
+        final String text = (String) result.get("text");
+        assertNotNull("Text should not be null", text);
+        assertTrue("Text should contain Title", text.contains("**Title**: Test Document"));
+        assertTrue("Text should contain URL", text.contains("**URL**: https://example.com/test"));
+        assertTrue("Text should contain Score", text.contains("**Score**: 10.5"));
+        assertTrue("Text should contain content", text.contains("This is test content."));
+    }
+
+    @Test
+    public void testCreateDocumentContent_WithoutScore() {
+        final Map<String, Object> doc =
+                Map.of("title", "Test Document", "url", "https://example.com/test", "content", "This is test content.");
+
+        final Map<String, Object> result = mcpApiManager.createDocumentContent(doc, 2);
+
+        final String text = (String) result.get("text");
+        assertTrue("Text should contain Title", text.contains("**Title**: Test Document"));
+        assertTrue("Text should not contain Score", !text.contains("**Score**:"));
+    }
+
+    @Test
+    public void testTruncateContent() {
+        // Test with null
+        assertEquals("Null should return null", null, mcpApiManager.truncateContent(null, 100));
+
+        // Test with short content
+        final String shortContent = "Short";
+        assertEquals("Short content should not be truncated", shortContent, mcpApiManager.truncateContent(shortContent, 100));
+
+        // Test with exact length content
+        final String exactContent = "12345";
+        assertEquals("Exact length content should not be truncated", exactContent, mcpApiManager.truncateContent(exactContent, 5));
+
+        // Test with long content
+        final String longContent = "This is a long content that should be truncated";
+        final String truncated = mcpApiManager.truncateContent(longContent, 10);
+        assertEquals("Truncated content should be 10 chars + ...", "This is a ...", truncated);
+    }
+
+    @Test
+    public void testGetContentMaxLength() {
+        // Default value should be 10000
+        assertEquals("Default max length should be 10000", 10000, mcpApiManager.getContentMaxLength());
+    }
+
+    @Test
+    public void testGetContentMaxLength_WithSystemProperty() {
+        final String originalValue = System.getProperty("mcp.content.max.length");
+        try {
+            System.setProperty("mcp.content.max.length", "5000");
+            assertEquals("Max length should be 5000", 5000, mcpApiManager.getContentMaxLength());
+        } finally {
+            if (originalValue != null) {
+                System.setProperty("mcp.content.max.length", originalValue);
+            } else {
+                System.clearProperty("mcp.content.max.length");
+            }
+        }
+    }
+
+    @Test
+    public void testSearchToolDescription_ContainsQuerySyntaxInfo() {
+        final Map<String, Object> result = mcpApiManager.handleListTools();
+
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> tools = (List<Map<String, Object>>) result.get("tools");
+        final Map<String, Object> searchTool = tools.get(0);
+        final String description = (String) searchTool.get("description");
+
+        assertTrue("Description should mention Lucene", description.contains("Lucene"));
+        assertTrue("Description should mention AND", description.contains("AND"));
+        assertTrue("Description should mention OR", description.contains("OR"));
+        assertTrue("Description should mention phrase search", description.contains("phrase"));
+        assertTrue("Description should mention exclusion", description.contains("exclusion") || description.contains("-"));
+    }
+
+    @Test
+    public void testProcessDocumentItems_Null() {
+        final List<Map<String, Object>> result = mcpApiManager.processDocumentItems(null);
+        assertNotNull("Result should not be null", result);
+        assertTrue("Result should be empty", result.isEmpty());
+    }
+
+    @Test
+    public void testProcessDocumentItems_EmptyList() {
+        final List<Map<String, Object>> result = mcpApiManager.processDocumentItems(List.of());
+        assertNotNull("Result should not be null", result);
+        assertTrue("Result should be empty", result.isEmpty());
+    }
+
+    @Test
+    public void testProcessDocumentItems_WithDocuments() {
+        final List<Map<String, Object>> docs =
+                List.of(Map.of("title", "Doc1", "url", "http://example.com/1"), Map.of("title", "Doc2", "url", "http://example.com/2"));
+
+        final List<Map<String, Object>> result = mcpApiManager.processDocumentItems(docs);
+
+        assertEquals("Should have 2 documents", 2, result.size());
+        assertEquals("First doc title", "Doc1", result.get(0).get("title"));
+        assertEquals("Second doc title", "Doc2", result.get(1).get("title"));
+    }
+
+    @Test
+    public void testProcessValue_Null() {
+        assertEquals("Null should return null", null, mcpApiManager.processValue(null));
+    }
+
+    @Test
+    public void testProcessValue_String() {
+        assertEquals("String should be unchanged", "test", mcpApiManager.processValue("test"));
+    }
+
+    @Test
+    public void testProcessValue_Number() {
+        assertEquals("Number should be unchanged", 123, mcpApiManager.processValue(123));
+        assertEquals("Double should be unchanged", 1.5, mcpApiManager.processValue(1.5));
+    }
+
+    @Test
+    public void testProcessValue_List() {
+        final List<Object> input = List.of("a", "b", 1);
+        @SuppressWarnings("unchecked")
+        final List<Object> result = (List<Object>) mcpApiManager.processValue(input);
+
+        assertEquals("List size should be 3", 3, result.size());
+        assertEquals("First element", "a", result.get(0));
+        assertEquals("Second element", "b", result.get(1));
+        assertEquals("Third element", 1, result.get(2));
+    }
+
+    @Test
+    public void testProcessValue_Map() {
+        final Map<String, Object> input = Map.of("key1", "value1", "key2", 123);
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> result = (Map<String, Object>) mcpApiManager.processValue(input);
+
+        assertEquals("Map size should be 2", 2, result.size());
+        assertEquals("key1 value", "value1", result.get("key1"));
+        assertEquals("key2 value", 123, result.get("key2"));
+    }
+
+    @Test
+    public void testProcessValue_Array() {
+        final Object[] input = new Object[] { "a", "b", 1 };
+        @SuppressWarnings("unchecked")
+        final List<Object> result = (List<Object>) mcpApiManager.processValue(input);
+
+        assertEquals("Array should be converted to List with size 3", 3, result.size());
+        assertEquals("First element", "a", result.get(0));
+    }
+
+    @Test
+    public void testCreateDocumentContent_EmptyDocument() {
+        final Map<String, Object> doc = Map.of();
+
+        final Map<String, Object> result = mcpApiManager.createDocumentContent(doc, 1);
+
+        assertNotNull("Result should not be null", result);
+        assertEquals("Type should be text", "text", result.get("type"));
+
+        final String text = (String) result.get("text");
+        assertTrue("Text should contain Title label", text.contains("**Title**:"));
+        assertTrue("Text should contain URL label", text.contains("**URL**:"));
+    }
+
+    @Test
+    public void testCreateDocumentContent_WithContentTruncation() {
+        final String originalValue = System.getProperty("mcp.content.max.length");
+        try {
+            System.setProperty("mcp.content.max.length", "20");
+
+            final String longContent = "This is a very long content that should be truncated";
+            final Map<String, Object> doc = Map.of("title", "Test", "url", "http://test.com", "content", longContent);
+
+            final Map<String, Object> result = mcpApiManager.createDocumentContent(doc, 1);
+            final String text = (String) result.get("text");
+
+            assertTrue("Content should be truncated with ...", text.contains("..."));
+            assertTrue("Full content should not be present", !text.contains("should be truncated"));
+        } finally {
+            if (originalValue != null) {
+                System.setProperty("mcp.content.max.length", originalValue);
+            } else {
+                System.clearProperty("mcp.content.max.length");
+            }
+        }
+    }
+
+    @Test
+    public void testTruncateContent_EmptyString() {
+        assertEquals("Empty string should return empty", "", mcpApiManager.truncateContent("", 100));
+    }
+
+    @Test
+    public void testTruncateContent_ZeroMaxLength() {
+        final String content = "test";
+        final String result = mcpApiManager.truncateContent(content, 0);
+        assertEquals("Zero max length should return ...", "...", result);
     }
 }

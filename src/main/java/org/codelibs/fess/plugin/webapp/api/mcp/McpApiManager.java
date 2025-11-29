@@ -60,13 +60,22 @@ public class McpApiManager extends BaseApiManager {
 
     private static final Logger logger = LogManager.getLogger(McpApiManager.class);
 
+    private static final int DEFAULT_CONTENT_MAX_LENGTH = 10000;
+
+    /** The MIME type for JSON responses. */
     protected String mimeType = "application/json";
 
+    /**
+     * Creates a new MCP API manager with the default path prefix "/mcp".
+     */
     public McpApiManager() {
         // JSON-RPC endpoint is /mcp/*
         setPathPrefix("/mcp");
     }
 
+    /**
+     * Registers this API manager with the WebApiManagerFactory.
+     */
     @PostConstruct
     public void register() {
         if (logger.isInfoEnabled()) {
@@ -132,12 +141,27 @@ public class McpApiManager extends BaseApiManager {
         }
     }
 
+    /**
+     * Parses the JSON-RPC request body from the HTTP request.
+     *
+     * @param request the HTTP servlet request
+     * @return a map containing the parsed JSON request body
+     * @throws IOException if an I/O error occurs while reading the request
+     */
     protected Map<String, Object> parseRequestBody(final HttpServletRequest request) throws IOException {
         return JsonXContent.jsonXContent
                 .createParser(NamedXContentRegistry.EMPTY, LoggingDeprecationHandler.INSTANCE, request.getInputStream())
                 .map();
     }
 
+    /**
+     * Dispatches a JSON-RPC method call to the appropriate handler.
+     *
+     * @param method the JSON-RPC method name
+     * @param params the method parameters
+     * @return the result of the method invocation
+     * @throws McpApiException if the method is not found
+     */
     protected Object dispatchRpcMethod(final String method, final Map<String, Object> params) {
         return switch (method) {
         case "initialize" -> handleInitialize();
@@ -203,7 +227,10 @@ public class McpApiManager extends BaseApiManager {
 
         final Map<String, Object> toolSearch = new HashMap<>();
         toolSearch.put("name", "search");
-        toolSearch.put("description", "Search documents via Fess");
+        toolSearch.put("description",
+                "Search documents via Fess. Query syntax is similar to Lucene: " + "multiple terms are combined with AND by default, "
+                        + "use OR explicitly for OR search (e.g., \"term1 OR term2\"), "
+                        + "use quotes for phrase search, use - for exclusion.");
         toolSearch.put("inputSchema", searchInputSchema);
 
         // Index stats tool
@@ -248,6 +275,12 @@ public class McpApiManager extends BaseApiManager {
         };
     }
 
+    /**
+     * Invokes the search tool with the specified parameters.
+     *
+     * @param params the search parameters including query string (q), pagination (start, num), and other options
+     * @return a map containing the search results in MCP-compliant format
+     */
     @SuppressWarnings("unchecked")
     protected Map<String, Object> invokeSearch(final Map<String, Object> params) {
         // Create and populate SearchRequestParams
@@ -388,55 +421,27 @@ public class McpApiManager extends BaseApiManager {
             public String getSimilarDocHash() {
                 return (String) paramMap.get("sdh");
             }
+
+            @Override
+            public String[] getResponseFields() {
+                return new String[] { fessConfig.getIndexFieldTitle(), fessConfig.getIndexFieldContent(), fessConfig.getIndexFieldUrl() };
+            }
         };
 
         // Execute search
         final SearchRenderData data = new SearchRenderData();
         ComponentUtil.getSearchHelper().search(reqParams, data, OptionalThing.empty());
 
-        // Build response map
-        final Map<String, Object> result = new LinkedHashMap<>();
-        result.put("q", data.getSearchQuery());
-        result.put("query_id", data.getQueryId());
-        result.put("exec_time", data.getExecTime());
-        result.put("query_time", data.getQueryTime());
-        result.put("page_size", data.getPageSize());
-        result.put("page_number", data.getCurrentPageNumber());
-        result.put("record_count", data.getAllRecordCount());
-        result.put("record_count_relation", data.getAllRecordCountRelation());
-        result.put("page_count", data.getAllPageCount());
-        result.put("next_page", data.isExistNextPage());
-        result.put("prev_page", data.isExistPrevPage());
-        result.put("data", data.getDocumentItems());
+        // Build MCP-compliant response with multiple content entries
+        final List<Map<String, Object>> contents = new java.util.ArrayList<>();
+        final List<Map<String, Object>> documentItems = processDocumentItems(data.getDocumentItems());
 
-        // Add facet information if available
-        if (data.getFacetResponse() != null && data.getFacetResponse().hasFacetResponse()) {
-            result.put("facet_field", data.getFacetResponse().getFieldList().stream().map(field -> {
-                final Map<String, Object> m = new LinkedHashMap<>();
-                m.put("name", field.getName());
-                m.put("result",
-                        field.getValueCountMap().entrySet().stream().map(e -> Map.of("value", e.getKey(), "count", e.getValue())).toList());
-                return m;
-            }).toList());
-            result.put("facet_query",
-                    data.getFacetResponse()
-                            .getQueryCountMap()
-                            .entrySet()
-                            .stream()
-                            .map(e -> Map.of("value", e.getKey(), "count", e.getValue()))
-                            .toList());
+        int index = 1;
+        for (final Map<String, Object> doc : documentItems) {
+            contents.add(createDocumentContent(doc, index++));
         }
 
-        // Return MCP-compliant response with content array
-        try {
-            final String jsonResult = JsonXContent.contentBuilder().map(result).toString();
-            final Map<String, Object> content = new HashMap<>();
-            content.put("type", "text");
-            content.put("text", jsonResult);
-            return Map.of("content", List.of(content));
-        } catch (final IOException e) {
-            throw new McpApiException(ErrorCode.InternalError, "Failed to serialize search results: " + e.getMessage());
-        }
+        return Map.of("content", contents);
     }
 
     /**
@@ -448,10 +453,8 @@ public class McpApiManager extends BaseApiManager {
         final Map<String, Object> stats = new HashMap<>();
         try {
             final FessConfig fessConfig = ComponentUtil.getFessConfig();
-            stats.put("server_name", fessConfig.getSystemProperty("fess.server.name", "Fess"));
-            stats.put("index_name", fessConfig.getIndexDocumentSearchIndex());
+            stats.put("default_page_size", 1);
             stats.put("max_page_size", fessConfig.getPagingSearchPageMaxSizeAsInteger());
-            stats.put("default_page_size", fessConfig.getPagingSearchPageSizeAsInteger());
 
             // Return MCP-compliant response with content array
             final String jsonResult = JsonXContent.contentBuilder().map(stats).toString();
@@ -520,6 +523,104 @@ public class McpApiManager extends BaseApiManager {
         advancedSearchPrompt.put("arguments", List.of(advQueryArg, advSortArg, advNumArg));
 
         return Map.of("prompts", List.of(basicSearchPrompt, advancedSearchPrompt));
+    }
+
+    /**
+     * Processes document items to convert non-serializable objects (like TextFragment) to strings.
+     *
+     * @param documentItems The list of document items from search results
+     * @return A list of processed document items with serializable values
+     */
+    @SuppressWarnings("unchecked")
+    protected List<Map<String, Object>> processDocumentItems(final List<Map<String, Object>> documentItems) {
+        if (documentItems == null) {
+            return Collections.emptyList();
+        }
+        return documentItems.stream().map(doc -> {
+            final Map<String, Object> processedDoc = new LinkedHashMap<>();
+            doc.forEach((key, value) -> processedDoc.put(key, processValue(value)));
+            return processedDoc;
+        }).collect(Collectors.toList());
+    }
+
+    /**
+     * Processes a single value, converting non-serializable objects to strings.
+     *
+     * @param value The value to process
+     * @return The processed value (String for TextFragment, recursively processed for collections)
+     */
+    @SuppressWarnings("unchecked")
+    protected Object processValue(final Object value) {
+        if (value == null) {
+            return null;
+        }
+        // Handle TextFragment by converting to string
+        if (value.getClass().getName().contains("TextFragment")) {
+            return value.toString();
+        }
+        // Handle List
+        if (value instanceof final List<?> list) {
+            return list.stream().map(this::processValue).collect(Collectors.toList());
+        }
+        // Handle Map
+        if (value instanceof final Map<?, ?> map) {
+            final Map<String, Object> processedMap = new LinkedHashMap<>();
+            map.forEach((k, v) -> processedMap.put(k.toString(), processValue(v)));
+            return processedMap;
+        }
+        // Handle arrays
+        if (value.getClass().isArray()) {
+            if (value instanceof final Object[] array) {
+                return java.util.Arrays.stream(array).map(this::processValue).collect(Collectors.toList());
+            }
+        }
+        return value;
+    }
+
+    /**
+     * Gets the maximum content length from system property.
+     *
+     * @return The maximum content length
+     */
+    protected int getContentMaxLength() {
+        return Integer.parseInt(System.getProperty("mcp.content.max.length", String.valueOf(DEFAULT_CONTENT_MAX_LENGTH)));
+    }
+
+    /**
+     * Truncates content to the specified maximum length.
+     *
+     * @param content   The content to truncate
+     * @param maxLength The maximum length
+     * @return The truncated content
+     */
+    protected String truncateContent(final String content, final int maxLength) {
+        if (content == null || content.length() <= maxLength) {
+            return content;
+        }
+        return content.substring(0, maxLength) + "...";
+    }
+
+    /**
+     * Creates a document content entry in Markdown format for MCP response.
+     *
+     * @param doc   The processed document
+     * @param index The result index (1-based)
+     * @return A map containing type and text for MCP content
+     */
+    protected Map<String, Object> createDocumentContent(final Map<String, Object> doc, final int index) {
+        final StringBuilder sb = new StringBuilder();
+        final Object score = doc.get("score");
+        sb.append("**Title**: ").append(doc.getOrDefault("title", "")).append("\n");
+        sb.append("**URL**: ").append(doc.getOrDefault("url", "")).append("\n");
+        if (score != null) {
+            sb.append("**Score**: ").append(score).append("\n");
+        }
+        sb.append("\n");
+
+        final String content = String.valueOf(doc.getOrDefault("content", ""));
+        sb.append(truncateContent(content, getContentMaxLength()));
+
+        return Map.of("type", "text", "text", sb.toString());
     }
 
     /**
