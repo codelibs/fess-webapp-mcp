@@ -19,24 +19,43 @@ import org.codelibs.fess.exception.FessSystemException;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
 
 /**
- * Exception thrown when an invalid query is encountered in the MCP API.
+ * Exception thrown when an error occurs in the MCP API.
  */
 public class McpApiException extends FessSystemException {
 
     private static final long serialVersionUID = 1L;
 
+    /** The JSON-RPC error code. */
     private ErrorCode code;
 
+    /**
+     * Creates an MCP API exception with the specified error code and message.
+     *
+     * @param code    the JSON-RPC error code
+     * @param message the error message
+     */
     public McpApiException(final ErrorCode code, final String message) {
         super(message);
         this.code = code;
     }
 
+    /**
+     * Creates an MCP API exception with the specified error code, message, and cause.
+     *
+     * @param code    the JSON-RPC error code
+     * @param message the error message
+     * @param cause   the cause of this exception
+     */
     public McpApiException(final ErrorCode code, final String message, final Throwable cause) {
         super(message, cause);
         this.code = code;
     }
 
+    /**
+     * Returns the JSON-RPC error code.
+     *
+     * @return the error code
+     */
     public ErrorCode getCode() {
         return code;
     }

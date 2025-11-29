@@ -15,16 +15,38 @@
  */
 package org.codelibs.fess.plugin.webapp.mcp;
 
+/**
+ * Standard JSON-RPC 2.0 error codes for MCP API.
+ */
 public enum ErrorCode {
-    // Standard JSON-RPC error codes
-    ParseError(-32700), InvalidRequest(-32600), MethodNotFound(-32601), InvalidParams(-32602), InternalError(-32603);
+    /** Parse error: Invalid JSON was received by the server. */
+    ParseError(-32700),
+    /** Invalid Request: The JSON sent is not a valid Request object. */
+    InvalidRequest(-32600),
+    /** Method not found: The method does not exist or is not available. */
+    MethodNotFound(-32601),
+    /** Invalid params: Invalid method parameter(s). */
+    InvalidParams(-32602),
+    /** Internal error: Internal JSON-RPC error. */
+    InternalError(-32603);
 
+    /** The numeric error code. */
     private final int code;
 
+    /**
+     * Creates an ErrorCode with the specified numeric code.
+     *
+     * @param code the numeric error code
+     */
     ErrorCode(final int code) {
         this.code = code;
     }
 
+    /**
+     * Returns the numeric error code.
+     *
+     * @return the error code
+     */
     public int getCode() {
         return code;
     }
