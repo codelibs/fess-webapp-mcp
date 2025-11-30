@@ -42,6 +42,7 @@ import org.dbflute.optional.OptionalThing;
 import org.opensearch.common.xcontent.LoggingDeprecationHandler;
 import org.opensearch.common.xcontent.json.JsonXContent;
 import org.opensearch.core.xcontent.NamedXContentRegistry;
+import org.opensearch.index.query.QueryBuilders;
 
 import jakarta.annotation.PostConstruct;
 import jakarta.servlet.FilterChain;
@@ -216,7 +217,7 @@ public class McpApiManager extends BaseApiManager {
         searchProperties.put("q", Map.of("type", "string", "description", "query string"));
         searchProperties.put("start", Map.of("type", "integer", "description", "start position"));
         searchProperties.put("offset", Map.of("type", "integer", "description", "offset (alias of start)"));
-        searchProperties.put("num", Map.of("type", "integer", "description", "number of results (default: 3)"));
+        searchProperties.put("num", Map.of("type", "integer", "description", "number of results", "default", 3));
         searchProperties.put("sort", Map.of("type", "string", "description", "sort order"));
         searchProperties.put("fields.label", Map.of("type", "array", "description", "labels to return"));
         searchProperties.put("lang", Map.of("type", "string", "description", "language"));
@@ -452,11 +453,8 @@ public class McpApiManager extends BaseApiManager {
      * @return A map containing index statistics in MCP-compliant format with "content" array.
      */
     protected Map<String, Object> invokeGetIndexStats() {
-        final Map<String, Object> stats = new HashMap<>();
         try {
-            final FessConfig fessConfig = ComponentUtil.getFessConfig();
-            stats.put("default_page_size", 1);
-            stats.put("max_page_size", fessConfig.getPagingSearchPageMaxSizeAsInteger());
+            final Map<String, Object> stats = collectIndexStats();
 
             // Return MCP-compliant response with content array
             final String jsonResult = JsonXContent.contentBuilder().map(stats).toString();
@@ -467,6 +465,53 @@ public class McpApiManager extends BaseApiManager {
         } catch (final IOException e) {
             throw new McpApiException(ErrorCode.InternalError, "Failed to serialize index stats: " + e.getMessage());
         }
+    }
+
+    /**
+     * Collects index statistics including document count, configuration, and system information.
+     *
+     * @return A map containing organized statistics data
+     */
+    protected Map<String, Object> collectIndexStats() {
+        final Map<String, Object> stats = new LinkedHashMap<>();
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+
+        // 1. Index information
+        final Map<String, Object> indexInfo = new LinkedHashMap<>();
+        try {
+            final String indexName = fessConfig.getIndexDocumentSearchIndex();
+            indexInfo.put("index_name", indexName);
+
+            final org.opensearch.action.search.SearchResponse response =
+                    ComponentUtil.getSearchEngineClient().prepareSearch(indexName).setTrackTotalHits(true).setSize(0).execute().actionGet();
+            final org.opensearch.search.SearchHits hits = response.getHits();
+            final org.apache.lucene.search.TotalHits totalHits = hits.getTotalHits();
+            final long documentCount = totalHits != null ? totalHits.value() : 0;
+            indexInfo.put("document_count", documentCount);
+        } catch (final Exception e) {
+            logger.warn("Failed to get index stats: {}", e.getMessage());
+            indexInfo.put("document_count", -1);
+            indexInfo.put("error", e.getMessage());
+        }
+        stats.put("index", indexInfo);
+
+        // 2. Configuration information
+        final Map<String, Object> configInfo = new LinkedHashMap<>();
+        configInfo.put("max_page_size", fessConfig.getPagingSearchPageMaxSizeAsInteger());
+        stats.put("config", configInfo);
+
+        // 3. System information
+        final Map<String, Object> systemInfo = new LinkedHashMap<>();
+        final Runtime runtime = Runtime.getRuntime();
+        final Map<String, Object> memoryInfo = new LinkedHashMap<>();
+        memoryInfo.put("total_bytes", runtime.totalMemory());
+        memoryInfo.put("free_bytes", runtime.freeMemory());
+        memoryInfo.put("used_bytes", runtime.totalMemory() - runtime.freeMemory());
+        memoryInfo.put("max_bytes", runtime.maxMemory());
+        systemInfo.put("memory", memoryInfo);
+        stats.put("system", systemInfo);
+
+        return stats;
     }
 
     /**
@@ -509,12 +554,8 @@ public class McpApiManager extends BaseApiManager {
      * @return A map with "contents" key containing the index stats
      */
     protected Map<String, Object> buildIndexStatsResource() {
-        final Map<String, Object> stats = new HashMap<>();
         try {
-            final FessConfig fessConfig = ComponentUtil.getFessConfig();
-            stats.put("default_page_size", 1);
-            stats.put("max_page_size", fessConfig.getPagingSearchPageMaxSizeAsInteger());
-
+            final Map<String, Object> stats = collectIndexStats();
             final String jsonResult = JsonXContent.contentBuilder().map(stats).toString();
 
             final Map<String, Object> content = new HashMap<>();
@@ -766,7 +807,7 @@ public class McpApiManager extends BaseApiManager {
         try {
             write(JsonXContent.contentBuilder().map(errorResponse).toString(), mimeType, Constants.UTF_8);
         } catch (final IOException e) {
-            logger.error("Failed to write error response", e);
+            logger.warn("Failed to write error response", e);
         }
     }
 }

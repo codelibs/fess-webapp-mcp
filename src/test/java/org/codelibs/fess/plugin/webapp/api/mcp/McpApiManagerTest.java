@@ -1153,7 +1153,7 @@ public class McpApiManagerTest {
     }
 
     @Test
-    public void testHandleListTools_NumParameterDefaultDescription() {
+    public void testHandleListTools_NumParameterDefaultValue() {
         final Map<String, Object> result = mcpApiManager.handleListTools();
 
         @SuppressWarnings("unchecked")
@@ -1172,6 +1172,128 @@ public class McpApiManagerTest {
 
         final String numDescription = (String) numProperty.get("description");
         assertNotNull("num description should not be null", numDescription);
-        assertTrue("num description should contain default value", numDescription.contains("default: 3"));
+        assertEquals("number of results", numDescription);
+
+        final Object defaultValue = numProperty.get("default");
+        assertNotNull("num default should exist in schema", defaultValue);
+        assertEquals("num default should be 3", 3, defaultValue);
+    }
+
+    // ==================== Index Stats Tests ====================
+
+    @Test
+    public void testCollectIndexStats_RequiresDIContainer() {
+        // collectIndexStats requires ComponentUtil which needs DI container
+        try {
+            mcpApiManager.collectIndexStats();
+            // If container is initialized, we would get a valid result
+            fail("Should fail due to DI container not initialized in unit test");
+        } catch (final IllegalStateException e) {
+            // Expected in unit test when DI container is not initialized
+            assertTrue("Should fail due to container not initialized", e.getMessage().contains("container"));
+        }
+    }
+
+    @Test
+    public void testInvokeGetIndexStats_RequiresDIContainer() {
+        // invokeGetIndexStats requires ComponentUtil which needs DI container
+        try {
+            mcpApiManager.invokeGetIndexStats();
+            // If container is initialized, we would get a valid result
+            fail("Should fail due to DI container not initialized in unit test");
+        } catch (final IllegalStateException e) {
+            // Expected in unit test when DI container is not initialized
+            assertTrue("Should fail due to container not initialized", e.getMessage().contains("container"));
+        }
+    }
+
+    @Test
+    public void testBuildIndexStatsResource_RequiresDIContainer() {
+        // buildIndexStatsResource requires ComponentUtil which needs DI container
+        try {
+            mcpApiManager.buildIndexStatsResource();
+            // If container is initialized, we would get a valid result
+            fail("Should fail due to DI container not initialized in unit test");
+        } catch (final IllegalStateException e) {
+            // Expected in unit test when DI container is not initialized
+            assertTrue("Should fail due to container not initialized", e.getMessage().contains("container"));
+        }
+    }
+
+    @Test
+    public void testDispatchRpcMethod_ToolsCall_GetIndexStats() {
+        // Test tools/call with get_index_stats tool
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "get_index_stats");
+        params.put("arguments", Map.of());
+
+        try {
+            mcpApiManager.dispatchRpcMethod("tools/call", params);
+            // If container is initialized, we would get a valid result
+            fail("Should fail due to DI container not initialized in unit test");
+        } catch (final IllegalStateException e) {
+            // Expected in unit test when DI container is not initialized
+            assertTrue("Should fail due to container not initialized", e.getMessage().contains("container"));
+        }
+    }
+
+    @Test
+    public void testHandleInvoke_GetIndexStats() {
+        // Test handleInvoke with get_index_stats tool
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "get_index_stats");
+        params.put("arguments", Map.of());
+
+        try {
+            mcpApiManager.handleInvoke(params);
+            // If container is initialized, we would get a valid result
+            fail("Should fail due to DI container not initialized in unit test");
+        } catch (final IllegalStateException e) {
+            // Expected in unit test when DI container is not initialized
+            assertTrue("Should fail due to container not initialized", e.getMessage().contains("container"));
+        }
+    }
+
+    @Test
+    public void testHandleListTools_GetIndexStatsTool() {
+        final Map<String, Object> result = mcpApiManager.handleListTools();
+
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> tools = (List<Map<String, Object>>) result.get("tools");
+
+        // Find get_index_stats tool
+        Map<String, Object> indexStatsTool = null;
+        for (final Map<String, Object> tool : tools) {
+            if ("get_index_stats".equals(tool.get("name"))) {
+                indexStatsTool = tool;
+                break;
+            }
+        }
+
+        assertNotNull("get_index_stats tool should exist", indexStatsTool);
+        assertEquals("Tool name should be get_index_stats", "get_index_stats", indexStatsTool.get("name"));
+        assertEquals("Tool description", "Get index statistics and information", indexStatsTool.get("description"));
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> inputSchema = (Map<String, Object>) indexStatsTool.get("inputSchema");
+        assertNotNull("inputSchema should not be null", inputSchema);
+        assertEquals("inputSchema type should be object", "object", inputSchema.get("type"));
+    }
+
+    @Test
+    public void testHandleListResources_IndexStatsResource() {
+        final Map<String, Object> result = mcpApiManager.handleListResources();
+
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> resources = (List<Map<String, Object>>) result.get("resources");
+
+        assertNotNull("resources should not be null", resources);
+        assertEquals("Should have 1 resource", 1, resources.size());
+
+        final Map<String, Object> indexStatsResource = resources.get(0);
+        assertEquals("Resource URI", "fess://index/stats", indexStatsResource.get("uri"));
+        assertEquals("Resource name", "Index Statistics", indexStatsResource.get("name"));
+        assertEquals("Resource mimeType", "application/json", indexStatsResource.get("mimeType"));
+        assertNotNull("Resource should have description", indexStatsResource.get("description"));
     }
 }
