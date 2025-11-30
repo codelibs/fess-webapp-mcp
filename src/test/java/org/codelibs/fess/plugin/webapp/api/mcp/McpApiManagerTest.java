@@ -1151,4 +1151,27 @@ public class McpApiManagerTest {
         final String result = mcpApiManager.truncateContent(content, 0);
         assertEquals("Zero max length should return ...", "...", result);
     }
+
+    @Test
+    public void testHandleListTools_NumParameterDefaultDescription() {
+        final Map<String, Object> result = mcpApiManager.handleListTools();
+
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> tools = (List<Map<String, Object>>) result.get("tools");
+        final Map<String, Object> searchTool = tools.get(0);
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> searchSchema = (Map<String, Object>) searchTool.get("inputSchema");
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> searchProperties = (Map<String, Object>) searchSchema.get("properties");
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> numProperty = (Map<String, Object>) searchProperties.get("num");
+        assertNotNull("num property should exist", numProperty);
+
+        final String numDescription = (String) numProperty.get("description");
+        assertNotNull("num description should not be null", numDescription);
+        assertTrue("num description should contain default value", numDescription.contains("default: 3"));
+    }
 }

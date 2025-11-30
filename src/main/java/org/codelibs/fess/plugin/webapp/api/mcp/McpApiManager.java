@@ -216,7 +216,7 @@ public class McpApiManager extends BaseApiManager {
         searchProperties.put("q", Map.of("type", "string", "description", "query string"));
         searchProperties.put("start", Map.of("type", "integer", "description", "start position"));
         searchProperties.put("offset", Map.of("type", "integer", "description", "offset (alias of start)"));
-        searchProperties.put("num", Map.of("type", "integer", "description", "number of results"));
+        searchProperties.put("num", Map.of("type", "integer", "description", "number of results (default: 3)"));
         searchProperties.put("sort", Map.of("type", "string", "description", "sort order"));
         searchProperties.put("fields.label", Map.of("type", "array", "description", "labels to return"));
         searchProperties.put("lang", Map.of("type", "string", "description", "language"));
@@ -381,7 +381,7 @@ public class McpApiManager extends BaseApiManager {
                 } catch (final NumberFormatException e) {
                     logger.debug("Failed to parse {}", value, e);
                 }
-                return fessConfig.getPagingSearchPageSizeAsInteger();
+                return 3;
             }
 
             @Override
