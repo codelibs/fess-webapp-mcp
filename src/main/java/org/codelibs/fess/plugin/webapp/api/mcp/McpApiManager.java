@@ -493,7 +493,7 @@ public class McpApiManager extends BaseApiManager {
      */
     protected Map<String, Object> handleReadResource(final Map<String, Object> params) {
         final String uri = (String) params.get("uri");
-        if (uri == null || uri.isEmpty()) {
+        if (uri == null || uri.isBlank()) {
             throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: uri");
         }
 

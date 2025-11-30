@@ -18,6 +18,7 @@ package org.codelibs.fess.plugin.webapp.api.mcp;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import java.util.HashMap;
 import java.util.List;
@@ -465,7 +466,7 @@ public class McpApiManagerTest {
 
         try {
             mcpApiManager.handleGetPrompt(params);
-            assertTrue("Should have thrown McpApiException", false);
+            fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
             assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
         }
@@ -479,7 +480,7 @@ public class McpApiManagerTest {
 
         try {
             mcpApiManager.handleGetPrompt(params);
-            assertTrue("Should have thrown McpApiException for empty query", false);
+            fail("Should have thrown McpApiException for empty query");
         } catch (final McpApiException e) {
             assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
             assertTrue("Error message should mention query", e.getMessage().contains("query"));
@@ -601,7 +602,7 @@ public class McpApiManagerTest {
 
         try {
             mcpApiManager.handleGetPrompt(params);
-            assertTrue("Should have thrown McpApiException for missing query", false);
+            fail("Should have thrown McpApiException for missing query");
         } catch (final McpApiException e) {
             assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
             assertTrue("Error message should mention query", e.getMessage().contains("query"));
@@ -616,7 +617,7 @@ public class McpApiManagerTest {
 
         try {
             mcpApiManager.handleGetPrompt(params);
-            assertTrue("Should have thrown McpApiException for null name", false);
+            fail("Should have thrown McpApiException for null name");
         } catch (final McpApiException e) {
             assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
             assertTrue("Error message should mention name", e.getMessage().contains("name"));
@@ -631,7 +632,7 @@ public class McpApiManagerTest {
 
         try {
             mcpApiManager.handleGetPrompt(params);
-            assertTrue("Should have thrown McpApiException", false);
+            fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
             assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
             assertTrue("Error message should mention unknown prompt", e.getMessage().contains("Unknown prompt"));
@@ -740,7 +741,7 @@ public class McpApiManagerTest {
 
         try {
             mcpApiManager.handleReadResource(params);
-            assertTrue("Should have thrown McpApiException for null URI", false);
+            fail("Should have thrown McpApiException for null URI");
         } catch (final McpApiException e) {
             assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
             assertTrue("Error message should mention uri", e.getMessage().contains("uri"));
@@ -753,7 +754,7 @@ public class McpApiManagerTest {
 
         try {
             mcpApiManager.handleReadResource(params);
-            assertTrue("Should have thrown McpApiException", false);
+            fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
             assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
             assertTrue("Error message should mention missing parameter", e.getMessage().contains("Missing"));
@@ -767,7 +768,7 @@ public class McpApiManagerTest {
 
         try {
             mcpApiManager.handleReadResource(params);
-            assertTrue("Should have thrown McpApiException", false);
+            fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
             assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
             assertTrue("Error message should mention unknown resource", e.getMessage().contains("Unknown resource"));
@@ -781,7 +782,7 @@ public class McpApiManagerTest {
 
         try {
             mcpApiManager.handleReadResource(params);
-            assertTrue("Should have thrown McpApiException for invalid scheme", false);
+            fail("Should have thrown McpApiException for invalid scheme");
         } catch (final McpApiException e) {
             assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
         }
@@ -794,7 +795,7 @@ public class McpApiManagerTest {
 
         try {
             mcpApiManager.handleReadResource(params);
-            assertTrue("Should have thrown McpApiException for whitespace URI", false);
+            fail("Should have thrown McpApiException for whitespace URI");
         } catch (final McpApiException e) {
             assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
         }
@@ -807,7 +808,7 @@ public class McpApiManagerTest {
 
         try {
             mcpApiManager.handleReadResource(params);
-            assertTrue("Should have thrown McpApiException for partial URI", false);
+            fail("Should have thrown McpApiException for partial URI");
         } catch (final McpApiException e) {
             assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
         }
@@ -820,7 +821,7 @@ public class McpApiManagerTest {
 
         try {
             mcpApiManager.handleReadResource(params);
-            assertTrue("Should have thrown McpApiException for case mismatch URI", false);
+            fail("Should have thrown McpApiException for case mismatch URI");
         } catch (final McpApiException e) {
             assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
         }
@@ -833,7 +834,7 @@ public class McpApiManagerTest {
 
         try {
             mcpApiManager.handleReadResource(params);
-            assertTrue("Should have thrown McpApiException for unknown resource", false);
+            fail("Should have thrown McpApiException for unknown resource");
         } catch (final McpApiException e) {
             assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
         }
@@ -843,7 +844,7 @@ public class McpApiManagerTest {
     public void testDispatchRpcMethod_ResourcesRead_MissingParams() {
         try {
             mcpApiManager.dispatchRpcMethod("resources/read", Map.of());
-            assertTrue("Should have thrown McpApiException", false);
+            fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
             assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
         }
@@ -856,7 +857,7 @@ public class McpApiManagerTest {
 
         try {
             mcpApiManager.dispatchRpcMethod("resources/read", params);
-            assertTrue("Should have thrown McpApiException", false);
+            fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
             assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
         }
@@ -867,7 +868,7 @@ public class McpApiManagerTest {
         // Test tools/call method with missing name parameter (should trigger error in handleInvoke)
         try {
             mcpApiManager.dispatchRpcMethod("tools/call", Map.of());
-            assertTrue("Should have thrown McpApiException", false);
+            fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
             assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
             assertTrue("Error message should mention missing name", e.getMessage().contains("name"));
@@ -922,14 +923,14 @@ public class McpApiManagerTest {
         // Test that different error codes are properly returned in exceptions
         try {
             mcpApiManager.dispatchRpcMethod("unknown_method", Map.of());
-            assertTrue("Should have thrown McpApiException", false);
+            fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
             assertEquals("Error code should be MethodNotFound", ErrorCode.MethodNotFound, e.getCode());
         }
 
         try {
             mcpApiManager.handleInvoke(Map.of());
-            assertTrue("Should have thrown McpApiException", false);
+            fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
             assertEquals("Error code should be InvalidParams", ErrorCode.InvalidParams, e.getCode());
         }
