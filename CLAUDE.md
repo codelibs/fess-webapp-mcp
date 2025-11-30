@@ -50,7 +50,9 @@ The API supports these JSON-RPC methods:
 - `tools/list` - Lists available tools (search, get_index_stats)
 - `tools/call` - Executes tools with parameters
 - `resources/list` - Lists available resources
+- `resources/read` - Reads resource content by URI
 - `prompts/list` - Lists available prompts
+- `prompts/get` - Gets prompt messages with arguments substituted
 
 ### Search Integration
 

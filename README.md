@@ -168,7 +168,11 @@ Execute a specific tool.
     "content": [
       {
         "type": "text",
-        "text": "{\"q\":\"elasticsearch\",\"query_id\":\"...\",\"exec_time\":42,\"page_size\":10,\"record_count\":25,\"data\":[...]}"
+        "text": "**Title**: Introduction to Elasticsearch\n**URL**: https://example.com/elasticsearch-intro\n**Score**: 1.234\n\nElasticsearch is a distributed, RESTful search and analytics engine..."
+      },
+      {
+        "type": "text",
+        "text": "**Title**: Elasticsearch Tutorial\n**URL**: https://example.com/es-tutorial\n**Score**: 1.123\n\nLearn how to use Elasticsearch for full-text search..."
       }
     ]
   }
@@ -220,7 +224,40 @@ List available resources.
 }
 ```
 
-### 5. prompts/list
+### 5. resources/read
+
+Read a specific resource by URI.
+
+**Request:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 6,
+  "method": "resources/read",
+  "params": {
+    "uri": "fess://index/stats"
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 6,
+  "result": {
+    "contents": [
+      {
+        "uri": "fess://index/stats",
+        "mimeType": "application/json",
+        "text": "{\"index_name\":\"fess.search\",\"document_count\":1234,\"store_size\":\"10mb\",...}"
+      }
+    ]
+  }
+}
+```
+
+### 6. prompts/list
 
 List available prompts.
 
@@ -228,9 +265,75 @@ List available prompts.
 ```json
 {
   "jsonrpc": "2.0",
-  "id": 6,
+  "id": 7,
   "method": "prompts/list",
   "params": {}
+}
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "result": {
+    "prompts": [
+      {
+        "name": "basic_search",
+        "description": "Perform a basic search with a query string",
+        "arguments": [
+          {"name": "query", "description": "The search query", "required": true}
+        ]
+      },
+      {
+        "name": "advanced_search",
+        "description": "Perform an advanced search with filters and sorting",
+        "arguments": [
+          {"name": "query", "description": "The search query", "required": true},
+          {"name": "sort", "description": "Sort order", "required": false},
+          {"name": "num", "description": "Number of results to return", "required": false}
+        ]
+      }
+    ]
+  }
+}
+```
+
+### 7. prompts/get
+
+Get a prompt with arguments substituted.
+
+**Request:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "method": "prompts/get",
+  "params": {
+    "name": "basic_search",
+    "arguments": {
+      "query": "machine learning"
+    }
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "result": {
+    "messages": [
+      {
+        "role": "user",
+        "content": {
+          "type": "text",
+          "text": "Please search for: machine learning"
+        }
+      }
+    ]
+  }
 }
 ```
 
@@ -243,7 +346,7 @@ The `search` tool supports the following parameters:
 | `q` | string | Yes | Query string for full-text search |
 | `start` | integer | No | Start position for pagination (default: 0) |
 | `offset` | integer | No | Alias for start position |
-| `num` | integer | No | Number of results to return (default: 10) |
+| `num` | integer | No | Number of results to return (default: 3) |
 | `sort` | string | No | Sort order (e.g., "score.desc", "last_modified.desc") |
 | `fields.label` | array | No | Specific labels to filter by |
 | `lang` | string | No | Language filter |
