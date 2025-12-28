@@ -4,12 +4,12 @@
 	<artifactId>fess-webapp-mcp</artifactId>
 	<packaging>jar</packaging>
 	<name>MCP Webapp Plugin</name>
-	<version>15.4.0</version>
+	<version>15.4.1-SNAPSHOT</version>
 	<scm>
 		<connection>scm:git:git@github.com:codelibs/fess-webapp-mcp.git</connection>
 		<developerConnection>scm:git:git@github.com:codelibs/fess-webapp-mcp.git</developerConnection>
 		<url>https://github.com/codelibs/fess-webapp-mcp</url>
-	  <tag>fess-webapp-mcp-15.4.0</tag>
+	  <tag>HEAD</tag>
   </scm>
 	<parent>
 		<groupId>org.codelibs.fess</groupId>
