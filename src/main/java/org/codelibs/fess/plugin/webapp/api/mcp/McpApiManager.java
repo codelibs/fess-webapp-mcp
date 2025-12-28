@@ -1,5 +1,5 @@
 /*
- * Copyright 2012-2024 CodeLibs Project and the Others.
+ * Copyright 2012-2025 CodeLibs Project and the Others.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -42,7 +42,6 @@ import org.dbflute.optional.OptionalThing;
 import org.opensearch.common.xcontent.LoggingDeprecationHandler;
 import org.opensearch.common.xcontent.json.JsonXContent;
 import org.opensearch.core.xcontent.NamedXContentRegistry;
-import org.opensearch.index.query.QueryBuilders;
 
 import jakarta.annotation.PostConstruct;
 import jakarta.servlet.FilterChain;
@@ -96,32 +95,43 @@ public class McpApiManager extends BaseApiManager {
             throws IOException, ServletException {
         writeHeaders(response);
         Object rpcId = null;
+        String method = null;
+        Map<String, Object> params = Collections.emptyMap();
         try {
+            if (logger.isDebugEnabled()) {
+                logger.debug("[MCP] Incoming request: {} {} Content-Type={} RemoteAddr={}", request.getMethod(), request.getRequestURI(),
+                        request.getContentType(), request.getRemoteAddr());
+            }
+
             final Map<String, Object> reqMap = parseRequestBody(request);
             if (logger.isDebugEnabled()) {
-                logger.debug("request: {}", reqMap);
+                logger.debug("[MCP] Parsed request body: {}", reqMap);
             }
+
             // Retrieve JSON-RPC fields
             final String jsonrpc = (String) reqMap.get("jsonrpc");
-            final String method = (String) reqMap.get("method");
+            method = (String) reqMap.get("method");
+            rpcId = reqMap.get("id");
             @SuppressWarnings("unchecked")
-            final Map<String, Object> params =
+            final Map<String, Object> paramsMap =
                     Optional.ofNullable((Map<String, Object>) reqMap.get("params")).orElse(Collections.emptyMap());
+            params = paramsMap;
             if (logger.isDebugEnabled()) {
-                logger.debug("params: {}", params);
+                logger.debug("[MCP] JSON-RPC fields: jsonrpc={}, method={}, id={}, params={}", jsonrpc, method, rpcId, params);
             }
 
             // Validate the request
             if (!"2.0".equals(jsonrpc) || method == null) {
-                throw new McpApiException(ErrorCode.InvalidRequest, "Invalid JSON-RPC request");
+                if (logger.isDebugEnabled()) {
+                    logger.debug("[MCP] Validation failed: jsonrpc='{}' (expected '2.0'), method={}", jsonrpc, method);
+                }
+                throw new McpApiException(ErrorCode.InvalidRequest, "Invalid JSON-RPC request: jsonrpc=" + jsonrpc + ", method=" + method);
             }
-
-            rpcId = reqMap.get("id");
 
             // Execute the method
             final Object result = dispatchRpcMethod(method, params);
             if (logger.isDebugEnabled()) {
-                logger.debug("result: {}", result);
+                logger.debug("[MCP] Method '{}' completed successfully", method);
             }
 
             final Map<String, Object> resMap = new LinkedHashMap<>();
@@ -130,14 +140,16 @@ public class McpApiManager extends BaseApiManager {
             resMap.put("result", result);
             write(JsonXContent.contentBuilder().map(resMap).toString(), mimeType, Constants.UTF_8);
         } catch (final McpApiException mae) {
+            // Client error - log at debug level
             if (logger.isDebugEnabled()) {
-                logger.debug("Failed to process request.", mae);
+                logger.debug("[MCP] Client error: code={}, message='{}', id={}, method={}, params={}", mae.getCode(), mae.getMessage(),
+                        rpcId, method, params);
             }
             writeError(rpcId, mae.getCode(), mae.getMessage(), response);
         } catch (final Exception e) {
-            if (logger.isDebugEnabled()) {
-                logger.debug("Failed to process request.", e);
-            }
+            // Unexpected error - log at warn level (potential system issue)
+            logger.warn("[MCP] Unexpected error processing request: id={}, method={}, params={}, error={}", rpcId, method, params,
+                    e.getMessage(), e);
             writeError(rpcId, ErrorCode.InternalError, e.getMessage(), response);
         }
     }
@@ -150,9 +162,25 @@ public class McpApiManager extends BaseApiManager {
      * @throws IOException if an I/O error occurs while reading the request
      */
     protected Map<String, Object> parseRequestBody(final HttpServletRequest request) throws IOException {
-        return JsonXContent.jsonXContent
-                .createParser(NamedXContentRegistry.EMPTY, LoggingDeprecationHandler.INSTANCE, request.getInputStream())
-                .map();
+        final String requestBody = new String(request.getInputStream().readAllBytes(), Constants.UTF_8);
+        if (logger.isDebugEnabled()) {
+            logger.debug("[MCP] Raw request body: {}", requestBody);
+        }
+        if (requestBody.isEmpty()) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("[MCP] Request body is empty");
+            }
+            return Collections.emptyMap();
+        }
+        try {
+            return JsonXContent.jsonXContent.createParser(NamedXContentRegistry.EMPTY, LoggingDeprecationHandler.INSTANCE, requestBody)
+                    .map();
+        } catch (final Exception e) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("[MCP] Failed to parse request body as JSON: body='{}', error='{}'", requestBody, e.getMessage());
+            }
+            throw e;
+        }
     }
 
     /**
@@ -164,6 +192,9 @@ public class McpApiManager extends BaseApiManager {
      * @throws McpApiException if the method is not found
      */
     protected Object dispatchRpcMethod(final String method, final Map<String, Object> params) {
+        if (logger.isDebugEnabled()) {
+            logger.debug("[MCP] Dispatching method: {}", method);
+        }
         return switch (method) {
         case "initialize" -> handleInitialize();
         case "tools/list" -> handleListTools();
@@ -172,7 +203,12 @@ public class McpApiManager extends BaseApiManager {
         case "resources/read" -> handleReadResource(params);
         case "prompts/list" -> handleListPrompts();
         case "prompts/get" -> handleGetPrompt(params);
-        default -> throw new McpApiException(ErrorCode.MethodNotFound, "Unknown method: " + method);
+        default -> {
+            if (logger.isDebugEnabled()) {
+                logger.debug("[MCP] Unknown method requested: {}", method);
+            }
+            throw new McpApiException(ErrorCode.MethodNotFound, "Unknown method: " + method);
+        }
         };
     }
 
@@ -270,11 +306,21 @@ public class McpApiManager extends BaseApiManager {
         if (toolParams == null) {
             throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: arguments");
         }
+
+        if (logger.isDebugEnabled()) {
+            logger.debug("[MCP] Invoking tool: name={}, arguments={}", tool, toolParams);
+        }
+
         return switch (tool) {
         case "search" -> invokeSearch(toolParams);
         case "get_index_stats" -> invokeGetIndexStats();
         // TODO Add more administrative tools here...
-        default -> throw new McpApiException(ErrorCode.InvalidParams, "Unknown tool: " + tool);
+        default -> {
+            if (logger.isDebugEnabled()) {
+                logger.debug("[MCP] Unknown tool requested: {}", tool);
+            }
+            throw new McpApiException(ErrorCode.InvalidParams, "Unknown tool: " + tool);
+        }
         };
     }
 
@@ -344,7 +390,9 @@ public class McpApiManager extends BaseApiManager {
 
             @Override
             public HighlightInfo getHighlightInfo() {
-                return null; // Not implemented
+                final int fragmentSize = fessConfig.getSystemPropertyAsInt("mcp.highlight.fragment.size", 500);
+                final int numOfFragments = fessConfig.getSystemPropertyAsInt("mcp.highlight.num.of.fragments", 3);
+                return new HighlightInfo().fragmentSize(fragmentSize).numOfFragments(numOfFragments);
             }
 
             @Override
@@ -382,7 +430,7 @@ public class McpApiManager extends BaseApiManager {
                 } catch (final NumberFormatException e) {
                     logger.debug("Failed to parse {}", value, e);
                 }
-                return 3;
+                return fessConfig.getSystemPropertyAsInt("mcp.default.page.size", 3);
             }
 
             @Override
@@ -427,13 +475,21 @@ public class McpApiManager extends BaseApiManager {
 
             @Override
             public String[] getResponseFields() {
-                return new String[] { fessConfig.getIndexFieldTitle(), fessConfig.getIndexFieldContent(), fessConfig.getIndexFieldUrl() };
+                return new String[] { fessConfig.getIndexFieldTitle(), fessConfig.getIndexFieldContent(), fessConfig.getIndexFieldUrl(),
+                        fessConfig.getResponseFieldContentDescription() };
             }
         };
 
         // Execute search
+        if (logger.isDebugEnabled()) {
+            logger.debug("[MCP] Executing search: query='{}', start={}, num={}, sort={}", reqParams.getQuery(),
+                    reqParams.getStartPosition(), reqParams.getPageSize(), reqParams.getSort());
+        }
         final SearchRenderData data = new SearchRenderData();
         ComponentUtil.getSearchHelper().search(reqParams, data, OptionalThing.empty());
+        if (logger.isDebugEnabled()) {
+            logger.debug("[MCP] Search completed: resultCount={}", data.getDocumentItems() != null ? data.getDocumentItems().size() : 0);
+        }
 
         // Build MCP-compliant response with multiple content entries
         final List<Map<String, Object>> contents = new java.util.ArrayList<>();
@@ -453,8 +509,14 @@ public class McpApiManager extends BaseApiManager {
      * @return A map containing index statistics in MCP-compliant format with "content" array.
      */
     protected Map<String, Object> invokeGetIndexStats() {
+        if (logger.isDebugEnabled()) {
+            logger.debug("[MCP] Retrieving index statistics");
+        }
         try {
             final Map<String, Object> stats = collectIndexStats();
+            if (logger.isDebugEnabled()) {
+                logger.debug("[MCP] Index statistics collected: {}", stats);
+            }
 
             // Return MCP-compliant response with content array
             final String jsonResult = JsonXContent.contentBuilder().map(stats).toString();
@@ -542,9 +604,18 @@ public class McpApiManager extends BaseApiManager {
             throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: uri");
         }
 
+        if (logger.isDebugEnabled()) {
+            logger.debug("[MCP] Reading resource: uri={}", uri);
+        }
+
         return switch (uri) {
         case "fess://index/stats" -> buildIndexStatsResource();
-        default -> throw new McpApiException(ErrorCode.InvalidParams, "Unknown resource: " + uri);
+        default -> {
+            if (logger.isDebugEnabled()) {
+                logger.debug("[MCP] Unknown resource requested: {}", uri);
+            }
+            throw new McpApiException(ErrorCode.InvalidParams, "Unknown resource: " + uri);
+        }
         };
     }
 
@@ -628,10 +699,19 @@ public class McpApiManager extends BaseApiManager {
 
         final Map<String, Object> arguments = params.get("arguments") != null ? (Map<String, Object>) params.get("arguments") : Map.of();
 
+        if (logger.isDebugEnabled()) {
+            logger.debug("[MCP] Getting prompt: name={}, arguments={}", name, arguments);
+        }
+
         return switch (name) {
         case "basic_search" -> buildBasicSearchPrompt(arguments);
         case "advanced_search" -> buildAdvancedSearchPrompt(arguments);
-        default -> throw new McpApiException(ErrorCode.InvalidParams, "Unknown prompt: " + name);
+        default -> {
+            if (logger.isDebugEnabled()) {
+                logger.debug("[MCP] Unknown prompt requested: {}", name);
+            }
+            throw new McpApiException(ErrorCode.InvalidParams, "Unknown prompt: " + name);
+        }
         };
     }
 
@@ -753,7 +833,7 @@ public class McpApiManager extends BaseApiManager {
      * @return The maximum content length
      */
     protected int getContentMaxLength() {
-        return Integer.parseInt(System.getProperty("mcp.content.max.length", String.valueOf(DEFAULT_CONTENT_MAX_LENGTH)));
+        return ComponentUtil.getFessConfig().getSystemPropertyAsInt("mcp.content.max.length", DEFAULT_CONTENT_MAX_LENGTH);
     }
 
     /**
@@ -768,6 +848,20 @@ public class McpApiManager extends BaseApiManager {
             return content;
         }
         return content.substring(0, maxLength) + "...";
+    }
+
+    /**
+     * Removes HTML highlight tags from the given text.
+     * Strips both &lt;em&gt; and &lt;strong&gt; tags commonly used for search highlighting.
+     *
+     * @param text The text containing HTML highlight tags
+     * @return The text with highlight tags removed, or empty string if text is null
+     */
+    protected String stripHighlightTags(final String text) {
+        if (text == null) {
+            return "";
+        }
+        return text.replaceAll("</?(?:em|strong)>", "");
     }
 
     /**
@@ -787,8 +881,18 @@ public class McpApiManager extends BaseApiManager {
         }
         sb.append("\n");
 
-        final String content = String.valueOf(doc.getOrDefault("content", ""));
-        sb.append(truncateContent(content, getContentMaxLength()));
+        // Use content_description (highlighted text) if available, fallback to content
+        final String contentDescription = String.valueOf(doc.getOrDefault("content_description", ""));
+        final String displayContent;
+        if (contentDescription.isEmpty() || "null".equals(contentDescription)) {
+            // Fallback to raw content with truncation
+            final String content = String.valueOf(doc.getOrDefault("content", ""));
+            displayContent = truncateContent(content, getContentMaxLength());
+        } else {
+            // Use highlighted content with tags stripped
+            displayContent = stripHighlightTags(contentDescription);
+        }
+        sb.append(displayContent);
 
         return Map.of("type", "text", "text", sb.toString());
     }
