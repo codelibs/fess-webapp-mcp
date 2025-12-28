@@ -14,6 +14,11 @@ This plugin transforms Fess (Enterprise Search Server) into a Model Context Prot
 
 See [Maven Repository](https://repo1.maven.org/maven2/org/codelibs/fess/fess-webapp-mcp/).
 
+## Requirements
+
+- Fess 15.x or later
+- Java 21 or later
+
 ## Installation
 
 1. Download the plugin JAR from the Maven Repository
@@ -250,7 +255,7 @@ Read a specific resource by URI.
       {
         "uri": "fess://index/stats",
         "mimeType": "application/json",
-        "text": "{\"index_name\":\"fess.search\",\"document_count\":1234,\"store_size\":\"10mb\",...}"
+        "text": "{\"index\":{\"index_name\":\"fess.search\",\"document_count\":1234},\"config\":{\"max_page_size\":100},\"system\":{\"memory\":{\"total_bytes\":1073741824,\"free_bytes\":536870912,\"used_bytes\":536870912,\"max_bytes\":2147483648}}}"
       }
     ]
   }
@@ -352,6 +357,17 @@ The `search` tool supports the following parameters:
 | `lang` | string | No | Language filter |
 | `preference` | string | No | Search preference |
 
+### Query Syntax
+
+The search tool supports Lucene-like query syntax:
+
+| Syntax | Description | Example |
+|--------|-------------|---------|
+| `term1 term2` | AND search (default) | `machine learning` |
+| `term1 OR term2` | OR search | `cat OR dog` |
+| `"phrase"` | Phrase search | `"machine learning"` |
+| `-term` | Exclude term | `python -java` |
+
 ## Usage Examples
 
 ### Using curl
@@ -425,6 +441,26 @@ result = response.json()
 print(json.dumps(result, indent=2))
 ```
 
+### Using with Claude Desktop
+
+To use this MCP server with Claude Desktop, add the following configuration to your Claude Desktop config file:
+
+**macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+**Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "fess": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://localhost:8080/mcp"]
+    }
+  }
+}
+```
+
+After adding the configuration, restart Claude Desktop to connect to the Fess MCP server.
+
 ## Error Handling
 
 The API returns standard JSON-RPC 2.0 error responses:
@@ -449,6 +485,17 @@ The API returns standard JSON-RPC 2.0 error responses:
 | -32601 | Method not found | The method does not exist |
 | -32602 | Invalid params | Invalid method parameter(s) |
 | -32603 | Internal error | Internal JSON-RPC error |
+
+## Configuration
+
+The following system properties can be configured in Fess:
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `mcp.content.max.length` | 10000 | Maximum length of search result content in characters |
+| `mcp.highlight.fragment.size` | 500 | Size of highlight fragments in characters |
+| `mcp.highlight.num.of.fragments` | 3 | Number of highlight fragments per result |
+| `mcp.default.page.size` | 3 | Default number of search results |
 
 ## Development
 

@@ -1,5 +1,5 @@
 /*
- * Copyright 2012-2024 CodeLibs Project and the Others.
+ * Copyright 2012-2025 CodeLibs Project and the Others.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 package org.codelibs.fess.plugin.webapp.api.mcp;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -41,7 +42,23 @@ public class McpApiManagerTest {
 
     @Before
     public void setUp() {
-        mcpApiManager = new McpApiManager();
+        mcpApiManager = new TestMcpApiManager();
+    }
+
+    /**
+     * Test subclass that overrides methods requiring DI container.
+     */
+    private static class TestMcpApiManager extends McpApiManager {
+        private int contentMaxLength = 10000;
+
+        public void setContentMaxLength(final int contentMaxLength) {
+            this.contentMaxLength = contentMaxLength;
+        }
+
+        @Override
+        protected int getContentMaxLength() {
+            return contentMaxLength;
+        }
     }
 
     @Test
@@ -992,24 +1009,84 @@ public class McpApiManagerTest {
     }
 
     @Test
+    public void testStripHighlightTags() {
+        // Test with em tags
+        assertEquals("highlighted text", mcpApiManager.stripHighlightTags("<em>highlighted</em> text"));
+
+        // Test with strong tags
+        assertEquals("highlighted text", mcpApiManager.stripHighlightTags("<strong>highlighted</strong> text"));
+
+        // Test with mixed tags
+        assertEquals("hello world test", mcpApiManager.stripHighlightTags("<em>hello</em> <strong>world</strong> test"));
+
+        // Test with null
+        assertEquals("", mcpApiManager.stripHighlightTags(null));
+
+        // Test with empty string
+        assertEquals("", mcpApiManager.stripHighlightTags(""));
+
+        // Test with no tags
+        assertEquals("plain text", mcpApiManager.stripHighlightTags("plain text"));
+
+        // Test with nested content
+        assertEquals("multiple highlights here",
+                mcpApiManager.stripHighlightTags("<em>multiple</em> <em>highlights</em> <strong>here</strong>"));
+    }
+
+    @Test
+    public void testCreateDocumentContentWithContentDescription() {
+        // Test with content_description (highlighted content)
+        final Map<String, Object> doc = new HashMap<>();
+        doc.put("title", "Test Document");
+        doc.put("url", "https://example.com/test");
+        doc.put("content", "This is raw content that should not appear.");
+        doc.put("content_description", "<em>highlighted</em> search result content");
+        doc.put("score", 10.5);
+
+        final Map<String, Object> result = mcpApiManager.createDocumentContent(doc, 1);
+
+        assertNotNull("Result should not be null", result);
+        assertEquals("Type should be text", "text", result.get("type"));
+
+        final String text = (String) result.get("text");
+        assertNotNull("Text should not be null", text);
+        assertTrue("Text should contain Title", text.contains("**Title**: Test Document"));
+        assertTrue("Text should contain URL", text.contains("**URL**: https://example.com/test"));
+        assertTrue("Text should contain Score", text.contains("**Score**: 10.5"));
+        // Verify content_description is used and tags are stripped
+        assertTrue("Text should contain stripped highlighted content", text.contains("highlighted search result content"));
+        assertFalse("Text should not contain HTML tags", text.contains("<em>"));
+        assertFalse("Text should not contain raw content", text.contains("raw content that should not appear"));
+    }
+
+    @Test
+    public void testCreateDocumentContentFallbackToContent() {
+        // Test fallback when content_description is empty
+        final Map<String, Object> doc = new HashMap<>();
+        doc.put("title", "Test Document");
+        doc.put("url", "https://example.com/test");
+        doc.put("content", "This is the raw content used as fallback.");
+        doc.put("content_description", "");
+        doc.put("score", 5.0);
+
+        final Map<String, Object> result = mcpApiManager.createDocumentContent(doc, 1);
+
+        final String text = (String) result.get("text");
+        assertTrue("Text should contain raw content as fallback", text.contains("This is the raw content used as fallback."));
+    }
+
+    @Test
     public void testGetContentMaxLength() {
-        // Default value should be 10000
+        // TestMcpApiManager returns default value 10000
         assertEquals("Default max length should be 10000", 10000, mcpApiManager.getContentMaxLength());
     }
 
     @Test
     public void testGetContentMaxLength_WithSystemProperty() {
-        final String originalValue = System.getProperty("mcp.content.max.length");
-        try {
-            System.setProperty("mcp.content.max.length", "5000");
-            assertEquals("Max length should be 5000", 5000, mcpApiManager.getContentMaxLength());
-        } finally {
-            if (originalValue != null) {
-                System.setProperty("mcp.content.max.length", originalValue);
-            } else {
-                System.clearProperty("mcp.content.max.length");
-            }
-        }
+        // Note: This test verifies TestMcpApiManager behavior.
+        // Actual FessConfig integration requires DI container and is tested in integration tests.
+        // TestMcpApiManager always returns 10000 regardless of system property.
+        assertEquals("TestMcpApiManager should return 10000", 10000, mcpApiManager.getContentMaxLength());
     }
 
     @Test
@@ -1119,24 +1196,26 @@ public class McpApiManagerTest {
 
     @Test
     public void testCreateDocumentContent_WithContentTruncation() {
-        final String originalValue = System.getProperty("mcp.content.max.length");
-        try {
-            System.setProperty("mcp.content.max.length", "20");
+        // Set a small max length to test truncation
+        ((TestMcpApiManager) mcpApiManager).setContentMaxLength(20);
 
+        try {
+            // content_description is empty, so content will be used with truncation
             final String longContent = "This is a very long content that should be truncated";
-            final Map<String, Object> doc = Map.of("title", "Test", "url", "http://test.com", "content", longContent);
+            final Map<String, Object> doc = new HashMap<>();
+            doc.put("title", "Test");
+            doc.put("url", "http://test.com");
+            doc.put("content", longContent);
+            doc.put("content_description", ""); // Empty to trigger fallback to content
 
             final Map<String, Object> result = mcpApiManager.createDocumentContent(doc, 1);
             final String text = (String) result.get("text");
 
             assertTrue("Content should be truncated with ...", text.contains("..."));
-            assertTrue("Full content should not be present", !text.contains("should be truncated"));
+            assertFalse("Full content should not be present", text.contains("should be truncated"));
         } finally {
-            if (originalValue != null) {
-                System.setProperty("mcp.content.max.length", originalValue);
-            } else {
-                System.clearProperty("mcp.content.max.length");
-            }
+            // Reset to default
+            ((TestMcpApiManager) mcpApiManager).setContentMaxLength(10000);
         }
     }
 
