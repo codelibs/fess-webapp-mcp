@@ -215,6 +215,7 @@ public class McpApiManager extends BaseApiManager {
         case "tools/call" -> handleInvoke(params);
         case "resources/list" -> handleListResources(params);
         case "resources/read" -> handleReadResource(params);
+        case "resources/templates/list" -> handleListResourceTemplates(params);
         case "prompts/list" -> handleListPrompts(params);
         case "prompts/get" -> handleGetPrompt(params);
         default -> {
@@ -827,6 +828,11 @@ public class McpApiManager extends BaseApiManager {
             logger.debug("[MCP] Reading resource: uri={}", uri);
         }
 
+        if (uri.startsWith("fess://document/")) {
+            final String docId = uri.substring("fess://document/".length());
+            return buildDocumentResource(docId);
+        }
+
         return switch (uri) {
         case "fess://index/stats" -> buildIndexStatsResource();
         default -> {
@@ -836,6 +842,52 @@ public class McpApiManager extends BaseApiManager {
             throw new McpApiException(ErrorCode.ResourceNotFound, "Unknown resource: " + uri);
         }
         };
+    }
+
+    /**
+     * Handles the resources/templates/list request and returns available resource templates.
+     *
+     * @param params the request parameters
+     * @return A map with "resourceTemplates" key containing a list of resource templates.
+     */
+    protected Map<String, Object> handleListResourceTemplates(final Map<String, Object> params) {
+        final Map<String, Object> docTemplate = new HashMap<>();
+        docTemplate.put("uriTemplate", "fess://document/{doc_id}");
+        docTemplate.put("name", "Document by ID");
+        docTemplate.put("description", "Retrieve a Fess document by its document ID");
+        docTemplate.put("mimeType", "application/json");
+
+        return Map.of("resourceTemplates", List.of(docTemplate));
+    }
+
+    /**
+     * Builds a document resource by fetching the document with the given ID.
+     *
+     * @param docId the document ID
+     * @return A map with "contents" key containing the document content
+     * @throws McpApiException if the document ID is empty or document is not found
+     */
+    protected Map<String, Object> buildDocumentResource(final String docId) {
+        if (docId.isEmpty()) {
+            throw new McpApiException(ErrorCode.InvalidParams, "Document ID is empty");
+        }
+
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        final String[] fields = new String[] { fessConfig.getIndexFieldTitle(), fessConfig.getIndexFieldContent(),
+                fessConfig.getIndexFieldUrl(), fessConfig.getIndexFieldDocId() };
+
+        return ComponentUtil.getSearchHelper().getDocumentByDocId(docId, fields, OptionalThing.empty()).map(doc -> {
+            try {
+                final String jsonResult = JsonXContent.contentBuilder().map(doc).toString();
+                final Map<String, Object> content = new HashMap<>();
+                content.put("uri", "fess://document/" + docId);
+                content.put("mimeType", "application/json");
+                content.put("text", jsonResult);
+                return Map.<String, Object> of("contents", List.of(content));
+            } catch (final IOException e) {
+                throw new McpApiException(ErrorCode.InternalError, "Failed to serialize document: " + e.getMessage());
+            }
+        }).orElseThrow(() -> new McpApiException(ErrorCode.ResourceNotFound, "Document not found: " + docId));
     }
 
     /**

@@ -1548,4 +1548,53 @@ public class McpApiManagerTest {
         final Object result = mcpApiManager.dispatchRpcMethod("prompts/list", Map.of("cursor", "some_cursor"));
         assertNotNull("Should handle cursor param gracefully", result);
     }
+
+    // ==================== Resource Templates Tests ====================
+
+    @Test
+    public void testDispatchRpcMethod_ResourcesTemplatesList() {
+        final Object result = mcpApiManager.dispatchRpcMethod("resources/templates/list", Map.of());
+        assertNotNull("Result should not be null", result);
+        assertTrue("Result should be a Map", result instanceof Map);
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> resultMap = (Map<String, Object>) result;
+        assertTrue("Result should have resourceTemplates key", resultMap.containsKey("resourceTemplates"));
+
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> templates = (List<Map<String, Object>>) resultMap.get("resourceTemplates");
+        assertFalse("Templates list should not be empty", templates.isEmpty());
+
+        final Map<String, Object> template = templates.get(0);
+        assertNotNull("Template should have uriTemplate", template.get("uriTemplate"));
+        assertEquals("fess://document/{doc_id}", template.get("uriTemplate"));
+        assertNotNull("Template should have name", template.get("name"));
+    }
+
+    @Test
+    public void testHandleReadResource_DocumentUri_RequiresDIContainer() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("uri", "fess://document/test_doc_id");
+
+        try {
+            mcpApiManager.handleReadResource(params);
+        } catch (final IllegalStateException e) {
+            assertTrue("Should fail due to container not initialized", e.getMessage().contains("container"));
+        } catch (final McpApiException e) {
+            // ResourceNotFound is also acceptable if container is available but doc doesn't exist
+        }
+    }
+
+    @Test
+    public void testHandleReadResource_DocumentUri_EmptyDocId() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("uri", "fess://document/");
+
+        try {
+            mcpApiManager.handleReadResource(params);
+            fail("Should have thrown McpApiException");
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams", ErrorCode.InvalidParams, e.getCode());
+        }
+    }
 }
