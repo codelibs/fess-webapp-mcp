@@ -16,6 +16,7 @@
 package org.codelibs.fess.plugin.webapp.api.mcp;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -99,16 +100,49 @@ public class McpApiManager extends BaseApiManager {
     public void process(final HttpServletRequest request, final HttpServletResponse response, final FilterChain chain)
             throws IOException, ServletException {
         writeHeaders(response);
-        Object rpcId = null;
-        String method = null;
-        Map<String, Object> params = Collections.emptyMap();
         try {
             if (logger.isDebugEnabled()) {
                 logger.debug("[MCP] Incoming request: {} {} Content-Type={} RemoteAddr={}", request.getMethod(), request.getRequestURI(),
                         request.getContentType(), request.getRemoteAddr());
             }
 
-            final Map<String, Object> reqMap = parseRequestBody(request);
+            final String requestBody = readRequestBody(request);
+            if (logger.isDebugEnabled()) {
+                logger.debug("[MCP] Raw request body: {}", requestBody);
+            }
+
+            final String trimmed = requestBody.trim();
+            if (trimmed.startsWith("[")) {
+                processBatchRequest(trimmed, response);
+            } else {
+                processSingleRequest(trimmed, response);
+            }
+        } catch (final Exception e) {
+            logger.warn("[MCP] Unexpected error reading request body: error={}", e.getMessage(), e);
+            writeError(null, ErrorCode.ParseError, e.getMessage(), response);
+        }
+    }
+
+    /**
+     * Reads the raw request body from the HTTP request.
+     *
+     * @param request the HTTP servlet request
+     * @return the request body as a string
+     * @throws IOException if an I/O error occurs while reading the request
+     */
+    protected String readRequestBody(final HttpServletRequest request) throws IOException {
+        return new String(request.getInputStream().readAllBytes(), Constants.UTF_8);
+    }
+
+    /**
+     * Processes a single JSON-RPC request.
+     */
+    protected void processSingleRequest(final String requestBody, final HttpServletResponse response) throws IOException {
+        Object rpcId = null;
+        String method = null;
+        Map<String, Object> params = Collections.emptyMap();
+        try {
+            final Map<String, Object> reqMap = parseJsonObject(requestBody);
             if (logger.isDebugEnabled()) {
                 logger.debug("[MCP] Parsed request body: {}", reqMap);
             }
@@ -173,18 +207,127 @@ public class McpApiManager extends BaseApiManager {
     }
 
     /**
-     * Parses the JSON-RPC request body from the HTTP request.
-     *
-     * @param request the HTTP servlet request
-     * @return a map containing the parsed JSON request body
-     * @throws IOException if an I/O error occurs while reading the request
+     * Processes a batch JSON-RPC request (JSON array of requests).
+     * Per JSON-RPC 2.0 specification, batch requests MUST be supported.
      */
-    protected Map<String, Object> parseRequestBody(final HttpServletRequest request) throws IOException {
-        final String requestBody = new String(request.getInputStream().readAllBytes(), Constants.UTF_8);
-        if (logger.isDebugEnabled()) {
-            logger.debug("[MCP] Raw request body: {}", requestBody);
+    @SuppressWarnings("unchecked")
+    protected void processBatchRequest(final String requestBody, final HttpServletResponse response) throws IOException {
+        final List<Object> rawList;
+        try {
+            rawList = JsonXContent.jsonXContent.createParser(NamedXContentRegistry.EMPTY, LoggingDeprecationHandler.INSTANCE, requestBody)
+                    .list();
+        } catch (final Exception e) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("[MCP] Failed to parse batch request body as JSON array: error='{}'", e.getMessage());
+            }
+            writeError(null, ErrorCode.ParseError, "Failed to parse batch request: " + e.getMessage(), response);
+            return;
         }
-        if (requestBody.isEmpty()) {
+
+        if (rawList.isEmpty()) {
+            writeError(null, ErrorCode.InvalidRequest, "Batch request must not be empty", response);
+            return;
+        }
+
+        final List<Map<String, Object>> requests = new ArrayList<>();
+        for (final Object item : rawList) {
+            if (item instanceof Map) {
+                requests.add((Map<String, Object>) item);
+            }
+        }
+
+        final List<Map<String, Object>> responses = processBatchRequests(requests);
+
+        if (responses.isEmpty()) {
+            // All were notifications - no response per JSON-RPC 2.0 spec
+            return;
+        }
+
+        final StringBuilder batchJson = new StringBuilder("[");
+        for (int i = 0; i < responses.size(); i++) {
+            if (i > 0) {
+                batchJson.append(",");
+            }
+            batchJson.append(JsonXContent.contentBuilder().map(responses.get(i)).toString());
+        }
+        batchJson.append("]");
+        write(batchJson.toString(), mimeType, Constants.UTF_8);
+    }
+
+    /**
+     * Processes a list of JSON-RPC requests and returns a list of responses.
+     * Notifications (requests without id) do not produce responses.
+     *
+     * @param requests the list of parsed JSON-RPC request maps
+     * @return the list of response maps
+     */
+    @SuppressWarnings("unchecked")
+    protected List<Map<String, Object>> processBatchRequests(final List<Map<String, Object>> requests) {
+        final List<Map<String, Object>> responses = new ArrayList<>();
+        for (final Map<String, Object> reqMap : requests) {
+            final String jsonrpc = (String) reqMap.get("jsonrpc");
+            final String method = (String) reqMap.get("method");
+            final Object rpcId = reqMap.get("id");
+            final Map<String, Object> params =
+                    Optional.ofNullable((Map<String, Object>) reqMap.get("params")).orElse(Collections.emptyMap());
+
+            if (!"2.0".equals(jsonrpc) || method == null) {
+                if (rpcId != null) {
+                    responses.add(createErrorResponse(rpcId, ErrorCode.InvalidRequest,
+                            "Invalid JSON-RPC request: jsonrpc=" + jsonrpc + ", method=" + method));
+                }
+                continue;
+            }
+
+            // Notifications (no id) do not produce responses
+            if (rpcId == null) {
+                dispatchNotification(method, params);
+                continue;
+            }
+
+            try {
+                final Object result = dispatchRpcMethod(method, params);
+                final Map<String, Object> resMap = new LinkedHashMap<>();
+                resMap.put("jsonrpc", "2.0");
+                resMap.put("id", rpcId);
+                resMap.put("result", result);
+                responses.add(resMap);
+            } catch (final McpApiException mae) {
+                responses.add(createErrorResponse(rpcId, mae.getCode(), mae.getMessage()));
+            } catch (final Exception e) {
+                logger.warn("[MCP] Batch request error: id={}, method={}, error={}", rpcId, method, e.getMessage(), e);
+                responses.add(createErrorResponse(rpcId, ErrorCode.InternalError, e.getMessage()));
+            }
+        }
+        return responses;
+    }
+
+    /**
+     * Creates a JSON-RPC 2.0 error response map.
+     *
+     * @param id the request id
+     * @param code the error code
+     * @param message the error message
+     * @return the error response map
+     */
+    protected Map<String, Object> createErrorResponse(final Object id, final ErrorCode code, final String message) {
+        final Map<String, Object> error = Map.of("code", code.getCode(), "message", message);
+        final Map<String, Object> errorResponse = new LinkedHashMap<>();
+        errorResponse.put("jsonrpc", "2.0");
+        errorResponse.put("id", id);
+        errorResponse.put("error", error);
+        return errorResponse;
+    }
+
+    /**
+     * Parses a JSON string as a map (JSON object).
+     *
+     * @param requestBody the JSON string to parse
+     * @return a map containing the parsed JSON
+     * @throws IOException if parsing fails
+     */
+    protected Map<String, Object> parseJsonObject(final String requestBody) throws IOException {
+        if (requestBody == null || requestBody.isEmpty()) {
             if (logger.isDebugEnabled()) {
                 logger.debug("[MCP] Request body is empty");
             }

@@ -21,6 +21,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -1692,5 +1693,71 @@ public class McpApiManagerTest {
         } catch (final McpApiException e) {
             assertEquals("Should be InvalidParams", ErrorCode.InvalidParams, e.getCode());
         }
+    }
+
+    // ===== Batch request tests =====
+
+    @Test
+    public void testProcessBatchRequests() {
+        final List<Map<String, Object>> requests = List.of(Map.of("jsonrpc", "2.0", "id", 1, "method", "initialize", "params", Map.of()),
+                Map.of("jsonrpc", "2.0", "id", 2, "method", "tools/list", "params", Map.of()));
+
+        final List<Map<String, Object>> responses = mcpApiManager.processBatchRequests(requests);
+
+        assertEquals("Should have 2 responses", 2, responses.size());
+        assertEquals("First response id should be 1", 1, responses.get(0).get("id"));
+        assertEquals("Second response id should be 2", 2, responses.get(1).get("id"));
+        assertNotNull("First response should have result", responses.get(0).get("result"));
+        assertNotNull("Second response should have result", responses.get(1).get("result"));
+    }
+
+    @Test
+    public void testProcessBatchRequests_WithNotification() {
+        final Map<String, Object> notification = new HashMap<>();
+        notification.put("jsonrpc", "2.0");
+        notification.put("method", "notifications/initialized");
+
+        final List<Map<String, Object>> requests = new ArrayList<>();
+        requests.add(notification);
+        requests.add(Map.of("jsonrpc", "2.0", "id", 1, "method", "initialize", "params", Map.of()));
+
+        final List<Map<String, Object>> responses = mcpApiManager.processBatchRequests(requests);
+
+        assertEquals("Should have 1 response (notification excluded)", 1, responses.size());
+        assertEquals("Response id should be 1", 1, responses.get(0).get("id"));
+    }
+
+    @Test
+    public void testProcessBatchRequests_WithError() {
+        final List<Map<String, Object>> requests =
+                List.of(Map.of("jsonrpc", "2.0", "id", 1, "method", "unknown_method", "params", Map.of()));
+
+        final List<Map<String, Object>> responses = mcpApiManager.processBatchRequests(requests);
+
+        assertEquals("Should have 1 response", 1, responses.size());
+        assertNotNull("Response should have error", responses.get(0).get("error"));
+    }
+
+    @Test
+    public void testProcessBatchRequests_WithInvalidRequest() {
+        final List<Map<String, Object>> requests = new ArrayList<>();
+        requests.add(Map.of("jsonrpc", "1.0", "id", 1, "method", "initialize"));
+
+        final List<Map<String, Object>> responses = mcpApiManager.processBatchRequests(requests);
+
+        assertEquals("Should have 1 error response", 1, responses.size());
+        assertNotNull("Response should have error", responses.get(0).get("error"));
+    }
+
+    @Test
+    public void testCreateErrorResponse() {
+        final Map<String, Object> response = mcpApiManager.createErrorResponse(1, ErrorCode.MethodNotFound, "test error");
+
+        assertEquals("2.0", response.get("jsonrpc"));
+        assertEquals(1, response.get("id"));
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> error = (Map<String, Object>) response.get("error");
+        assertEquals(-32601, error.get("code"));
+        assertEquals("test error", error.get("message"));
     }
 }
