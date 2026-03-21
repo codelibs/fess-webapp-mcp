@@ -1597,4 +1597,63 @@ public class McpApiManagerTest {
             assertEquals("Should be InvalidParams", ErrorCode.InvalidParams, e.getCode());
         }
     }
+
+    // ==================== completion/complete Tests ====================
+
+    @Test
+    public void testHandleComplete_MissingRef() {
+        try {
+            mcpApiManager.dispatchRpcMethod("completion/complete", Map.of());
+            fail("Should have thrown McpApiException");
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams", ErrorCode.InvalidParams, e.getCode());
+        }
+    }
+
+    @Test
+    public void testHandleComplete_MissingArgument() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("ref", Map.of("type", "ref/prompt", "name", "basic_search"));
+
+        try {
+            mcpApiManager.dispatchRpcMethod("completion/complete", params);
+            fail("Should have thrown McpApiException");
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams", ErrorCode.InvalidParams, e.getCode());
+        }
+    }
+
+    @Test
+    public void testHandleComplete_EmptyValue() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("ref", Map.of("type", "ref/prompt", "name", "basic_search"));
+        params.put("argument", Map.of("name", "query", "value", ""));
+
+        final Object result = mcpApiManager.dispatchRpcMethod("completion/complete", params);
+        assertNotNull("Result should not be null", result);
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> resultMap = (Map<String, Object>) result;
+        assertNotNull("Should have completion", resultMap.get("completion"));
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> completion = (Map<String, Object>) resultMap.get("completion");
+        @SuppressWarnings("unchecked")
+        final List<String> values = (List<String>) completion.get("values");
+        assertTrue("Values should be empty for empty input", values.isEmpty());
+        assertEquals("hasMore should be false", false, completion.get("hasMore"));
+    }
+
+    @Test
+    public void testHandleComplete_WithValue_RequiresDIContainer() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("ref", Map.of("type", "ref/prompt", "name", "basic_search"));
+        params.put("argument", Map.of("name", "query", "value", "test"));
+
+        try {
+            mcpApiManager.dispatchRpcMethod("completion/complete", params);
+        } catch (final IllegalStateException e) {
+            assertTrue("Should fail due to container", e.getMessage().contains("container"));
+        }
+    }
 }

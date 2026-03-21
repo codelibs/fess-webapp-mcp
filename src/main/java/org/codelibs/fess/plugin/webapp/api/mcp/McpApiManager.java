@@ -218,6 +218,7 @@ public class McpApiManager extends BaseApiManager {
         case "resources/templates/list" -> handleListResourceTemplates(params);
         case "prompts/list" -> handleListPrompts(params);
         case "prompts/get" -> handleGetPrompt(params);
+        case "completion/complete" -> handleComplete(params);
         default -> {
             if (logger.isDebugEnabled()) {
                 logger.debug("[MCP] Unknown method requested: {}", method);
@@ -1055,6 +1056,56 @@ public class McpApiManager extends BaseApiManager {
         message.put("content", content);
 
         return Map.of("messages", List.of(message));
+    }
+
+    /**
+     * Handles the completion/complete request by using Fess suggest to provide autocomplete
+     * for prompt arguments.
+     *
+     * @param params the request parameters including "ref" and "argument"
+     * @return a map containing "completion" with "values", "total", and "hasMore"
+     * @throws McpApiException if required parameters are missing
+     */
+    @SuppressWarnings("unchecked")
+    protected Map<String, Object> handleComplete(final Map<String, Object> params) {
+        final Map<String, Object> ref = (Map<String, Object>) params.get("ref");
+        if (ref == null) {
+            throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: ref");
+        }
+
+        final Map<String, Object> argument = (Map<String, Object>) params.get("argument");
+        if (argument == null) {
+            throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: argument");
+        }
+
+        final String argValue = (String) argument.get("value");
+        if (argValue == null || argValue.isEmpty()) {
+            return Map.of("completion", Map.of("values", List.of(), "hasMore", false));
+        }
+
+        // Use Fess suggest for autocomplete
+        final org.codelibs.fess.suggest.request.suggest.SuggestRequestBuilder builder =
+                ComponentUtil.getSuggestHelper().suggester().suggest();
+        builder.setQuery(argValue);
+        builder.setSize(10);
+        builder.addKind(org.codelibs.fess.suggest.entity.SuggestItem.Kind.QUERY.toString());
+        builder.addKind(org.codelibs.fess.suggest.entity.SuggestItem.Kind.DOCUMENT.toString());
+
+        final org.codelibs.fess.suggest.request.suggest.SuggestResponse suggestResponse = builder.execute().getResponse();
+
+        final List<String> values = new java.util.ArrayList<>();
+        if (suggestResponse.getItems() != null) {
+            for (final org.codelibs.fess.suggest.entity.SuggestItem item : suggestResponse.getItems()) {
+                values.add(item.getText());
+            }
+        }
+
+        final boolean hasMore = suggestResponse.getTotal() > values.size();
+        final Map<String, Object> completion = new java.util.LinkedHashMap<>();
+        completion.put("values", values);
+        completion.put("total", (int) suggestResponse.getTotal());
+        completion.put("hasMore", hasMore);
+        return Map.of("completion", completion);
     }
 
     /**
