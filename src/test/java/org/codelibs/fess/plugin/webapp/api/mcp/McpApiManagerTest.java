@@ -787,7 +787,7 @@ public class McpApiManagerTest {
             mcpApiManager.handleReadResource(params);
             fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
-            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+            assertEquals("Should be ResourceNotFound error", ErrorCode.ResourceNotFound, e.getCode());
             assertTrue("Error message should mention unknown resource", e.getMessage().contains("Unknown resource"));
         }
     }
@@ -801,7 +801,7 @@ public class McpApiManagerTest {
             mcpApiManager.handleReadResource(params);
             fail("Should have thrown McpApiException for invalid scheme");
         } catch (final McpApiException e) {
-            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+            assertEquals("Should be ResourceNotFound error", ErrorCode.ResourceNotFound, e.getCode());
         }
     }
 
@@ -827,7 +827,7 @@ public class McpApiManagerTest {
             mcpApiManager.handleReadResource(params);
             fail("Should have thrown McpApiException for partial URI");
         } catch (final McpApiException e) {
-            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+            assertEquals("Should be ResourceNotFound error", ErrorCode.ResourceNotFound, e.getCode());
         }
     }
 
@@ -840,7 +840,7 @@ public class McpApiManagerTest {
             mcpApiManager.handleReadResource(params);
             fail("Should have thrown McpApiException for case mismatch URI");
         } catch (final McpApiException e) {
-            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+            assertEquals("Should be ResourceNotFound error", ErrorCode.ResourceNotFound, e.getCode());
         }
     }
 
@@ -853,7 +853,7 @@ public class McpApiManagerTest {
             mcpApiManager.handleReadResource(params);
             fail("Should have thrown McpApiException for unknown resource");
         } catch (final McpApiException e) {
-            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+            assertEquals("Should be ResourceNotFound error", ErrorCode.ResourceNotFound, e.getCode());
         }
     }
 
@@ -876,7 +876,7 @@ public class McpApiManagerTest {
             mcpApiManager.dispatchRpcMethod("resources/read", params);
             fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
-            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+            assertEquals("Should be ResourceNotFound error", ErrorCode.ResourceNotFound, e.getCode());
         }
     }
 

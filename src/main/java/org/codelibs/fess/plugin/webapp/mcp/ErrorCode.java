@@ -28,7 +28,9 @@ public enum ErrorCode {
     /** Invalid params: Invalid method parameter(s). */
     InvalidParams(-32602),
     /** Internal error: Internal JSON-RPC error. */
-    InternalError(-32603);
+    InternalError(-32603),
+    /** Resource not found: The requested resource URI was not found. */
+    ResourceNotFound(-32002);
 
     /** The numeric error code. */
     private final int code;

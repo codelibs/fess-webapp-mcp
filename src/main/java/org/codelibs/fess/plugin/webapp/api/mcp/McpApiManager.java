@@ -128,6 +128,15 @@ public class McpApiManager extends BaseApiManager {
                 throw new McpApiException(ErrorCode.InvalidRequest, "Invalid JSON-RPC request: jsonrpc=" + jsonrpc + ", method=" + method);
             }
 
+            // JSON-RPC 2.0: requests without "id" are notifications and MUST NOT receive a response
+            if (rpcId == null) {
+                dispatchNotification(method, params);
+                if (logger.isDebugEnabled()) {
+                    logger.debug("[MCP] Notification '{}' processed (no response sent)", method);
+                }
+                return;
+            }
+
             // Execute the method
             final Object result = dispatchRpcMethod(method, params);
             if (logger.isDebugEnabled()) {
@@ -145,12 +154,16 @@ public class McpApiManager extends BaseApiManager {
                 logger.debug("[MCP] Client error: code={}, message='{}', id={}, method={}, params={}", mae.getCode(), mae.getMessage(),
                         rpcId, method, params);
             }
-            writeError(rpcId, mae.getCode(), mae.getMessage(), response);
+            if (rpcId != null) {
+                writeError(rpcId, mae.getCode(), mae.getMessage(), response);
+            }
         } catch (final Exception e) {
             // Unexpected error - log at warn level (potential system issue)
             logger.warn("[MCP] Unexpected error processing request: id={}, method={}, params={}, error={}", rpcId, method, params,
                     e.getMessage(), e);
-            writeError(rpcId, ErrorCode.InternalError, e.getMessage(), response);
+            if (rpcId != null) {
+                writeError(rpcId, ErrorCode.InternalError, e.getMessage(), response);
+            }
         }
     }
 
@@ -197,6 +210,7 @@ public class McpApiManager extends BaseApiManager {
         }
         return switch (method) {
         case "initialize" -> handleInitialize();
+        case "ping" -> handlePing();
         case "tools/list" -> handleListTools();
         case "tools/call" -> handleInvoke(params);
         case "resources/list" -> handleListResources();
@@ -212,9 +226,49 @@ public class McpApiManager extends BaseApiManager {
         };
     }
 
+    /**
+     * Dispatches a JSON-RPC notification (request without id).
+     * Notifications MUST NOT produce a response per JSON-RPC 2.0 specification.
+     *
+     * @param method the notification method name
+     * @param params the notification parameters
+     */
+    protected void dispatchNotification(final String method, final Map<String, Object> params) {
+        if (logger.isDebugEnabled()) {
+            logger.debug("[MCP] Dispatching notification: {}", method);
+        }
+        switch (method) {
+        case "notifications/initialized":
+            if (logger.isDebugEnabled()) {
+                logger.debug("[MCP] Client initialized notification received");
+            }
+            break;
+        case "notifications/cancelled":
+            if (logger.isDebugEnabled()) {
+                logger.debug("[MCP] Cancellation notification received: {}", params);
+            }
+            break;
+        default:
+            if (logger.isDebugEnabled()) {
+                logger.debug("[MCP] Unknown notification received: {}", method);
+            }
+            break;
+        }
+    }
+
     @Override
     protected void writeHeaders(final HttpServletResponse response) {
         ComponentUtil.getFessConfig().getApiJsonResponseHeaderList().forEach(e -> response.setHeader(e.getFirst(), e.getSecond()));
+    }
+
+    /**
+     * Handles the ping request per MCP specification.
+     * Returns an empty result to indicate the server is alive.
+     *
+     * @return an empty map
+     */
+    protected Map<String, Object> handlePing() {
+        return Collections.emptyMap();
     }
 
     /**
@@ -614,7 +668,7 @@ public class McpApiManager extends BaseApiManager {
             if (logger.isDebugEnabled()) {
                 logger.debug("[MCP] Unknown resource requested: {}", uri);
             }
-            throw new McpApiException(ErrorCode.InvalidParams, "Unknown resource: " + uri);
+            throw new McpApiException(ErrorCode.ResourceNotFound, "Unknown resource: " + uri);
         }
         };
     }
