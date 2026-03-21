@@ -65,6 +65,11 @@ public class McpApiManager extends BaseApiManager {
     /** The MIME type for JSON responses. */
     protected String mimeType = "application/json";
 
+    private static final java.util.Set<String> VALID_LOG_LEVELS =
+            java.util.Set.of("debug", "info", "notice", "warning", "error", "critical", "alert", "emergency");
+
+    private volatile String mcpLogLevel = "warning";
+
     /**
      * Creates a new MCP API manager with the default path prefix "/mcp".
      */
@@ -219,6 +224,7 @@ public class McpApiManager extends BaseApiManager {
         case "prompts/list" -> handleListPrompts(params);
         case "prompts/get" -> handleGetPrompt(params);
         case "completion/complete" -> handleComplete(params);
+        case "logging/setLevel" -> handleSetLogLevel(params);
         default -> {
             if (logger.isDebugEnabled()) {
                 logger.debug("[MCP] Unknown method requested: {}", method);
@@ -1228,6 +1234,41 @@ public class McpApiManager extends BaseApiManager {
         sb.append(displayContent);
 
         return Map.of("type", "text", "text", sb.toString());
+    }
+
+    /**
+     * Handles the logging/setLevel request per MCP specification.
+     * Sets the MCP log level after validating against RFC 5424 levels.
+     *
+     * @param params the method parameters containing the "level" field
+     * @return an empty map on success
+     * @throws McpApiException if the level is missing or invalid
+     */
+    protected Map<String, Object> handleSetLogLevel(final Map<String, Object> params) {
+        final String level = (String) params.get("level");
+        if (level == null || level.isEmpty()) {
+            throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: level");
+        }
+        if (!VALID_LOG_LEVELS.contains(level)) {
+            throw new McpApiException(ErrorCode.InvalidParams, "Invalid log level: " + level + ". Valid levels: " + VALID_LOG_LEVELS);
+        }
+
+        mcpLogLevel = level;
+
+        if (logger.isDebugEnabled()) {
+            logger.debug("[MCP] Log level set to: {}", level);
+        }
+
+        return Collections.emptyMap();
+    }
+
+    /**
+     * Returns the current MCP log level.
+     *
+     * @return the current log level string
+     */
+    protected String getMcpLogLevel() {
+        return mcpLogLevel;
     }
 
     /**

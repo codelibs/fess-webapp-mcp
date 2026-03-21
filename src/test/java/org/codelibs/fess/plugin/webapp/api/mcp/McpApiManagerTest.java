@@ -1656,4 +1656,41 @@ public class McpApiManagerTest {
             assertTrue("Should fail due to container", e.getMessage().contains("container"));
         }
     }
+
+    @Test
+    public void testHandleSetLogLevel() {
+        final Map<String, Object> params = Map.of("level", "debug");
+        final Object result = mcpApiManager.dispatchRpcMethod("logging/setLevel", params);
+        assertNotNull("Result should not be null", result);
+        assertTrue("Result should be an empty map", ((Map<?, ?>) result).isEmpty());
+    }
+
+    @Test
+    public void testHandleSetLogLevel_AllValidLevels() {
+        final String[] validLevels = { "debug", "info", "notice", "warning", "error", "critical", "alert", "emergency" };
+        for (final String level : validLevels) {
+            final Object result = mcpApiManager.dispatchRpcMethod("logging/setLevel", Map.of("level", level));
+            assertNotNull("Result for level '" + level + "' should not be null", result);
+        }
+    }
+
+    @Test
+    public void testHandleSetLogLevel_InvalidLevel() {
+        try {
+            mcpApiManager.dispatchRpcMethod("logging/setLevel", Map.of("level", "invalid_level"));
+            fail("Should have thrown McpApiException");
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams", ErrorCode.InvalidParams, e.getCode());
+        }
+    }
+
+    @Test
+    public void testHandleSetLogLevel_MissingLevel() {
+        try {
+            mcpApiManager.dispatchRpcMethod("logging/setLevel", Map.of());
+            fail("Should have thrown McpApiException");
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams", ErrorCode.InvalidParams, e.getCode());
+        }
+    }
 }
