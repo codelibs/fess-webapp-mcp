@@ -1436,4 +1436,22 @@ public class McpApiManagerTest {
         assertEquals("Stats should be read-only", true, annotations.get("readOnlyHint"));
         assertEquals("Stats should not be destructive", false, annotations.get("destructiveHint"));
     }
+
+    @Test
+    public void testHandleInvoke_Search_ToolLevelError_ReturnsIsError() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "search");
+        params.put("arguments", Map.of("q", "test"));
+
+        // Without DI container, search will throw IllegalStateException caught by tool-level error handling
+        final Map<String, Object> result = mcpApiManager.handleInvoke(params);
+        assertEquals("Should have isError true", true, result.get("isError"));
+
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> content = (List<Map<String, Object>>) result.get("content");
+        assertNotNull("Should have content", content);
+        assertFalse("Content should not be empty", content.isEmpty());
+        assertEquals("Content type should be text", "text", content.get(0).get("type"));
+        assertTrue("Error text should contain error info", ((String) content.get(0).get("text")).startsWith("Error:"));
+    }
 }

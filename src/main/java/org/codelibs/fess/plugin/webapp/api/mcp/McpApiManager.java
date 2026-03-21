@@ -379,17 +379,27 @@ public class McpApiManager extends BaseApiManager {
             logger.debug("[MCP] Invoking tool: name={}, arguments={}", tool, toolParams);
         }
 
-        return switch (tool) {
-        case "search" -> invokeSearch(toolParams);
-        case "get_index_stats" -> invokeGetIndexStats();
-        // TODO Add more administrative tools here...
-        default -> {
-            if (logger.isDebugEnabled()) {
-                logger.debug("[MCP] Unknown tool requested: {}", tool);
+        try {
+            return switch (tool) {
+            case "search" -> invokeSearch(toolParams);
+            case "get_index_stats" -> invokeGetIndexStats();
+            // TODO Add more administrative tools here...
+            default -> {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("[MCP] Unknown tool requested: {}", tool);
+                }
+                throw new McpApiException(ErrorCode.InvalidParams, "Unknown tool: " + tool);
             }
-            throw new McpApiException(ErrorCode.InvalidParams, "Unknown tool: " + tool);
+            };
+        } catch (final McpApiException e) {
+            throw e;
+        } catch (final Exception e) {
+            logger.warn("[MCP] Tool '{}' execution failed: {}", tool, e.getMessage(), e);
+            final Map<String, Object> result = new LinkedHashMap<>();
+            result.put("content", List.of(Map.of("type", "text", "text", "Error: " + e.getMessage())));
+            result.put("isError", true);
+            return result;
         }
-        };
     }
 
     /**
