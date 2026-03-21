@@ -366,7 +366,23 @@ public class McpApiManager extends BaseApiManager {
         toolSuggest.put("inputSchema", suggestInputSchema);
         toolSuggest.put("annotations", Map.of("title", "Suggest", "readOnlyHint", true, "destructiveHint", false, "openWorldHint", false));
 
-        return Map.of("tools", List.of(toolSearch, toolStats, toolSuggest));
+        // Get document tool
+        final Map<String, Object> getDocProperties = new HashMap<>();
+        getDocProperties.put("doc_id", Map.of("type", "string", "description", "document ID to retrieve"));
+
+        final Map<String, Object> getDocInputSchema = new HashMap<>();
+        getDocInputSchema.put("type", "object");
+        getDocInputSchema.put("properties", getDocProperties);
+        getDocInputSchema.put("required", List.of("doc_id"));
+
+        final Map<String, Object> toolGetDoc = new HashMap<>();
+        toolGetDoc.put("name", "get_document");
+        toolGetDoc.put("description", "Retrieve a document by its document ID");
+        toolGetDoc.put("inputSchema", getDocInputSchema);
+        toolGetDoc.put("annotations",
+                Map.of("title", "Get Document", "readOnlyHint", true, "destructiveHint", false, "openWorldHint", false));
+
+        return Map.of("tools", List.of(toolSearch, toolStats, toolSuggest, toolGetDoc));
     }
 
     /**
@@ -400,6 +416,7 @@ public class McpApiManager extends BaseApiManager {
             case "search" -> invokeSearch(toolParams);
             case "get_index_stats" -> invokeGetIndexStats();
             case "suggest" -> invokeSuggest(toolParams);
+            case "get_document" -> invokeGetDocument(toolParams);
             // TODO Add more administrative tools here...
             default -> {
                 if (logger.isDebugEnabled()) {
@@ -663,6 +680,47 @@ public class McpApiManager extends BaseApiManager {
         }
 
         return Map.of("content", contents);
+    }
+
+    /**
+     * Invokes the get_document tool to retrieve a single document by its doc_id.
+     *
+     * @param params the parameters including doc_id
+     * @return a map containing the document content in MCP-compliant format
+     */
+    protected Map<String, Object> invokeGetDocument(final Map<String, Object> params) {
+        final String docId = (String) params.get("doc_id");
+        if (docId == null || docId.isEmpty()) {
+            throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: doc_id");
+        }
+
+        if (logger.isDebugEnabled()) {
+            logger.debug("[MCP] Retrieving document: doc_id={}", docId);
+        }
+
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        final String[] fields = new String[] { fessConfig.getIndexFieldTitle(), fessConfig.getIndexFieldContent(),
+                fessConfig.getIndexFieldUrl(), fessConfig.getIndexFieldDocId(), fessConfig.getIndexFieldLastModified() };
+
+        return ComponentUtil.getSearchHelper().getDocumentByDocId(docId, fields, OptionalThing.empty()).map(doc -> {
+            final String title = String.valueOf(doc.getOrDefault(fessConfig.getIndexFieldTitle(), ""));
+            final String url = String.valueOf(doc.getOrDefault(fessConfig.getIndexFieldUrl(), ""));
+            final String content = String.valueOf(doc.getOrDefault(fessConfig.getIndexFieldContent(), ""));
+            final String displayContent = truncateContent(content, getContentMaxLength());
+
+            final StringBuilder sb = new StringBuilder();
+            sb.append("**Title**: ").append(title).append("\n");
+            sb.append("**URL**: ").append(url).append("\n");
+            sb.append("**Doc ID**: ").append(docId).append("\n\n");
+            sb.append(displayContent);
+
+            return Map.<String, Object> of("content", List.of(Map.of("type", "text", "text", sb.toString())));
+        }).orElseGet(() -> {
+            final Map<String, Object> result = new LinkedHashMap<>();
+            result.put("content", List.of(Map.of("type", "text", "text", "Document not found: " + docId)));
+            result.put("isError", true);
+            return result;
+        });
     }
 
     /**

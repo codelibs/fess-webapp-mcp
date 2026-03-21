@@ -116,7 +116,7 @@ public class McpApiManagerTest {
         @SuppressWarnings("unchecked")
         final List<Map<String, Object>> tools = (List<Map<String, Object>>) result.get("tools");
         assertNotNull("Tools list should not be null", tools);
-        assertEquals("Should have 3 tools", 3, tools.size());
+        assertEquals("Should have 4 tools", 4, tools.size());
 
         // Check search tool
         final Map<String, Object> searchTool = tools.get(0);
@@ -1483,6 +1483,42 @@ public class McpApiManagerTest {
     public void testHandleInvoke_Suggest_MissingQuery() {
         final Map<String, Object> params = new HashMap<>();
         params.put("name", "suggest");
+        params.put("arguments", Map.of());
+
+        try {
+            mcpApiManager.handleInvoke(params);
+            fail("Should have thrown McpApiException");
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams", ErrorCode.InvalidParams, e.getCode());
+        }
+    }
+
+    @Test
+    public void testHandleListTools_HasGetDocumentTool() {
+        final Map<String, Object> result = mcpApiManager.handleListTools();
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> tools = (List<Map<String, Object>>) result.get("tools");
+
+        Map<String, Object> getDocTool = null;
+        for (final Map<String, Object> tool : tools) {
+            if ("get_document".equals(tool.get("name"))) {
+                getDocTool = tool;
+                break;
+            }
+        }
+        assertNotNull("get_document tool should exist", getDocTool);
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> schema = (Map<String, Object>) getDocTool.get("inputSchema");
+        @SuppressWarnings("unchecked")
+        final List<String> required = (List<String>) schema.get("required");
+        assertTrue("doc_id should be required", required.contains("doc_id"));
+    }
+
+    @Test
+    public void testHandleInvoke_GetDocument_MissingDocId() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "get_document");
         params.put("arguments", Map.of());
 
         try {
