@@ -335,6 +335,8 @@ public class McpApiManager extends BaseApiManager {
                         + "use OR explicitly for OR search (e.g., \"term1 OR term2\"), "
                         + "use quotes for phrase search, use - for exclusion.");
         toolSearch.put("inputSchema", searchInputSchema);
+        toolSearch.put("annotations",
+                Map.of("title", "Search Documents", "readOnlyHint", true, "destructiveHint", false, "openWorldHint", false));
 
         // Index stats tool
         final Map<String, Object> statsInputSchema = new HashMap<>();
@@ -345,6 +347,8 @@ public class McpApiManager extends BaseApiManager {
         toolStats.put("name", "get_index_stats");
         toolStats.put("description", "Get index statistics and information");
         toolStats.put("inputSchema", statsInputSchema);
+        toolStats.put("annotations",
+                Map.of("title", "Get Index Statistics", "readOnlyHint", true, "destructiveHint", false, "openWorldHint", false));
 
         return Map.of("tools", List.of(toolSearch, toolStats));
     }

@@ -1399,4 +1399,41 @@ public class McpApiManagerTest {
         assertEquals("Resource mimeType", "application/json", indexStatsResource.get("mimeType"));
         assertNotNull("Resource should have description", indexStatsResource.get("description"));
     }
+
+    @Test
+    public void testHandleListTools_SearchToolAnnotations() {
+        final Map<String, Object> result = mcpApiManager.handleListTools();
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> tools = (List<Map<String, Object>>) result.get("tools");
+        final Map<String, Object> searchTool = tools.get(0);
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> annotations = (Map<String, Object>) searchTool.get("annotations");
+        assertNotNull("Search tool should have annotations", annotations);
+        assertEquals("Search should be read-only", true, annotations.get("readOnlyHint"));
+        assertEquals("Search should not be destructive", false, annotations.get("destructiveHint"));
+        assertEquals("Search should not be open-world", false, annotations.get("openWorldHint"));
+    }
+
+    @Test
+    public void testHandleListTools_IndexStatsToolAnnotations() {
+        final Map<String, Object> result = mcpApiManager.handleListTools();
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> tools = (List<Map<String, Object>>) result.get("tools");
+
+        Map<String, Object> statsTool = null;
+        for (final Map<String, Object> tool : tools) {
+            if ("get_index_stats".equals(tool.get("name"))) {
+                statsTool = tool;
+                break;
+            }
+        }
+        assertNotNull("get_index_stats tool should exist", statsTool);
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> annotations = (Map<String, Object>) statsTool.get("annotations");
+        assertNotNull("Stats tool should have annotations", annotations);
+        assertEquals("Stats should be read-only", true, annotations.get("readOnlyHint"));
+        assertEquals("Stats should not be destructive", false, annotations.get("destructiveHint"));
+    }
 }
