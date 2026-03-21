@@ -285,12 +285,22 @@ public class McpApiManager extends BaseApiManager {
         caps.put("tools", new HashMap<>());
         caps.put("resources", new HashMap<>());
         caps.put("prompts", new HashMap<>());
+        caps.put("logging", new HashMap<>());
+        caps.put("completions", new HashMap<>());
 
         final Map<String, Object> serverInfo = new HashMap<>();
         serverInfo.put("name", "fess-mcp-server");
         serverInfo.put("version", "1.0.0");
 
-        return Map.of("protocolVersion", "2024-11-05", "capabilities", caps, "serverInfo", serverInfo);
+        final Map<String, Object> result = new LinkedHashMap<>();
+        result.put("protocolVersion", "2024-11-05");
+        result.put("capabilities", caps);
+        result.put("serverInfo", serverInfo);
+        result.put("instructions",
+                "Fess Enterprise Search Server. Use the 'search' tool to perform full-text search with Lucene-like query syntax "
+                        + "(AND default, OR explicit, quotes for phrase, - for exclusion). "
+                        + "Use 'get_index_stats' to check index health. Use 'suggest' for query autocomplete.");
+        return result;
     }
 
     /**

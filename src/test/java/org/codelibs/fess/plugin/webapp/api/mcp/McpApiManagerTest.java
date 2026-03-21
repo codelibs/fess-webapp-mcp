@@ -83,6 +83,30 @@ public class McpApiManagerTest {
     }
 
     @Test
+    public void testHandleInitialize_HasInstructions() {
+        final Map<String, Object> result = mcpApiManager.handleInitialize();
+        assertNotNull("Should have instructions", result.get("instructions"));
+        assertTrue("Instructions should be a non-empty string",
+                result.get("instructions") instanceof String && !((String) result.get("instructions")).isEmpty());
+    }
+
+    @Test
+    public void testHandleInitialize_HasLoggingCapability() {
+        final Map<String, Object> result = mcpApiManager.handleInitialize();
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> capabilities = (Map<String, Object>) result.get("capabilities");
+        assertNotNull("Should have logging capability", capabilities.get("logging"));
+    }
+
+    @Test
+    public void testHandleInitialize_HasCompletionsCapability() {
+        final Map<String, Object> result = mcpApiManager.handleInitialize();
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> capabilities = (Map<String, Object>) result.get("capabilities");
+        assertNotNull("Should have completions capability", capabilities.get("completions"));
+    }
+
+    @Test
     public void testHandleListTools() {
         final Map<String, Object> result = mcpApiManager.handleListTools();
 
