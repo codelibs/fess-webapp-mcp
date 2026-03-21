@@ -350,7 +350,23 @@ public class McpApiManager extends BaseApiManager {
         toolStats.put("annotations",
                 Map.of("title", "Get Index Statistics", "readOnlyHint", true, "destructiveHint", false, "openWorldHint", false));
 
-        return Map.of("tools", List.of(toolSearch, toolStats));
+        // Suggest tool
+        final Map<String, Object> suggestProperties = new HashMap<>();
+        suggestProperties.put("q", Map.of("type", "string", "description", "query prefix for autocomplete"));
+        suggestProperties.put("num", Map.of("type", "integer", "description", "number of suggestions", "default", 10));
+
+        final Map<String, Object> suggestInputSchema = new HashMap<>();
+        suggestInputSchema.put("type", "object");
+        suggestInputSchema.put("properties", suggestProperties);
+        suggestInputSchema.put("required", List.of("q"));
+
+        final Map<String, Object> toolSuggest = new HashMap<>();
+        toolSuggest.put("name", "suggest");
+        toolSuggest.put("description", "Get autocomplete suggestions for a search query prefix");
+        toolSuggest.put("inputSchema", suggestInputSchema);
+        toolSuggest.put("annotations", Map.of("title", "Suggest", "readOnlyHint", true, "destructiveHint", false, "openWorldHint", false));
+
+        return Map.of("tools", List.of(toolSearch, toolStats, toolSuggest));
     }
 
     /**
@@ -383,6 +399,7 @@ public class McpApiManager extends BaseApiManager {
             return switch (tool) {
             case "search" -> invokeSearch(toolParams);
             case "get_index_stats" -> invokeGetIndexStats();
+            case "suggest" -> invokeSuggest(toolParams);
             // TODO Add more administrative tools here...
             default -> {
                 if (logger.isDebugEnabled()) {
@@ -605,6 +622,47 @@ public class McpApiManager extends BaseApiManager {
         } catch (final IOException e) {
             throw new McpApiException(ErrorCode.InternalError, "Failed to serialize index stats: " + e.getMessage());
         }
+    }
+
+    /**
+     * Invokes the suggest tool to provide query autocomplete suggestions.
+     *
+     * @param params the parameters including query prefix (q) and number of suggestions (num)
+     * @return a map containing the suggestions in MCP-compliant format
+     */
+    protected Map<String, Object> invokeSuggest(final Map<String, Object> params) {
+        final String query = (String) params.get("q");
+        if (query == null || query.isEmpty()) {
+            throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: q");
+        }
+
+        final int num = params.get("num") instanceof final Number n ? n.intValue() : 10;
+
+        if (logger.isDebugEnabled()) {
+            logger.debug("[MCP] Executing suggest: query='{}', num={}", query, num);
+        }
+
+        final org.codelibs.fess.suggest.request.suggest.SuggestRequestBuilder builder =
+                ComponentUtil.getSuggestHelper().suggester().suggest();
+        builder.setQuery(query);
+        builder.setSize(num);
+        builder.addKind(org.codelibs.fess.suggest.entity.SuggestItem.Kind.QUERY.toString());
+        builder.addKind(org.codelibs.fess.suggest.entity.SuggestItem.Kind.DOCUMENT.toString());
+
+        final org.codelibs.fess.suggest.request.suggest.SuggestResponse suggestResponse = builder.execute().getResponse();
+
+        final List<Map<String, Object>> contents = new java.util.ArrayList<>();
+        if (suggestResponse.getItems() != null) {
+            for (final org.codelibs.fess.suggest.entity.SuggestItem item : suggestResponse.getItems()) {
+                contents.add(Map.of("type", "text", "text", item.getText()));
+            }
+        }
+
+        if (contents.isEmpty()) {
+            contents.add(Map.of("type", "text", "text", "No suggestions found for: " + query));
+        }
+
+        return Map.of("content", contents);
     }
 
     /**

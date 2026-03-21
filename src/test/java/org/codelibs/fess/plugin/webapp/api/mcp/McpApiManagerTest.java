@@ -116,7 +116,7 @@ public class McpApiManagerTest {
         @SuppressWarnings("unchecked")
         final List<Map<String, Object>> tools = (List<Map<String, Object>>) result.get("tools");
         assertNotNull("Tools list should not be null", tools);
-        assertEquals("Should have 2 tools", 2, tools.size());
+        assertEquals("Should have 3 tools", 3, tools.size());
 
         // Check search tool
         final Map<String, Object> searchTool = tools.get(0);
@@ -1453,5 +1453,43 @@ public class McpApiManagerTest {
         assertFalse("Content should not be empty", content.isEmpty());
         assertEquals("Content type should be text", "text", content.get(0).get("type"));
         assertTrue("Error text should contain error info", ((String) content.get(0).get("text")).startsWith("Error:"));
+    }
+
+    @Test
+    public void testHandleListTools_HasSuggestTool() {
+        final Map<String, Object> result = mcpApiManager.handleListTools();
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> tools = (List<Map<String, Object>>) result.get("tools");
+
+        Map<String, Object> suggestTool = null;
+        for (final Map<String, Object> tool : tools) {
+            if ("suggest".equals(tool.get("name"))) {
+                suggestTool = tool;
+                break;
+            }
+        }
+        assertNotNull("suggest tool should exist", suggestTool);
+        assertNotNull("suggest tool should have inputSchema", suggestTool.get("inputSchema"));
+        assertNotNull("suggest tool should have annotations", suggestTool.get("annotations"));
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> schema = (Map<String, Object>) suggestTool.get("inputSchema");
+        @SuppressWarnings("unchecked")
+        final List<String> required = (List<String>) schema.get("required");
+        assertTrue("q should be required", required.contains("q"));
+    }
+
+    @Test
+    public void testHandleInvoke_Suggest_MissingQuery() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "suggest");
+        params.put("arguments", Map.of());
+
+        try {
+            mcpApiManager.handleInvoke(params);
+            fail("Should have thrown McpApiException");
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams", ErrorCode.InvalidParams, e.getCode());
+        }
     }
 }
