@@ -230,13 +230,22 @@ public class McpApiManager extends BaseApiManager {
         }
 
         final List<Map<String, Object>> requests = new ArrayList<>();
+        final List<Map<String, Object>> responses = new ArrayList<>();
         for (final Object item : rawList) {
             if (item instanceof Map) {
                 requests.add((Map<String, Object>) item);
+            } else {
+                // Non-object items in batch should produce InvalidRequest error per JSON-RPC 2.0
+                final Map<String, Object> errorResponse = new LinkedHashMap<>();
+                errorResponse.put("jsonrpc", "2.0");
+                errorResponse.put("id", null);
+                errorResponse.put("error",
+                        Map.of("code", ErrorCode.InvalidRequest.getCode(), "message", "Invalid request object in batch"));
+                responses.add(errorResponse);
             }
         }
 
-        final List<Map<String, Object>> responses = processBatchRequests(requests);
+        responses.addAll(processBatchRequests(requests));
 
         if (responses.isEmpty()) {
             // All were notifications - no response per JSON-RPC 2.0 spec
@@ -311,7 +320,7 @@ public class McpApiManager extends BaseApiManager {
      * @return the error response map
      */
     protected Map<String, Object> createErrorResponse(final Object id, final ErrorCode code, final String message) {
-        final Map<String, Object> error = Map.of("code", code.getCode(), "message", message);
+        final Map<String, Object> error = Map.of("code", code.getCode(), "message", message != null ? message : "Unknown error");
         final Map<String, Object> errorResponse = new LinkedHashMap<>();
         errorResponse.put("jsonrpc", "2.0");
         errorResponse.put("id", id);
@@ -331,7 +340,7 @@ public class McpApiManager extends BaseApiManager {
             if (logger.isDebugEnabled()) {
                 logger.debug("[MCP] Request body is empty");
             }
-            return Collections.emptyMap();
+            throw new McpApiException(ErrorCode.ParseError, "Empty request body");
         }
         try {
             return JsonXContent.jsonXContent.createParser(NamedXContentRegistry.EMPTY, LoggingDeprecationHandler.INSTANCE, requestBody)
@@ -594,8 +603,9 @@ public class McpApiManager extends BaseApiManager {
             throw e;
         } catch (final Exception e) {
             logger.warn("[MCP] Tool '{}' execution failed: {}", tool, e.getMessage(), e);
+            final String errorMessage = e.getMessage() != null ? e.getMessage() : "Unknown error";
             final Map<String, Object> result = new LinkedHashMap<>();
-            result.put("content", List.of(Map.of("type", "text", "text", "Error: " + e.getMessage())));
+            result.put("content", List.of(Map.of("type", "text", "text", "Error: " + errorMessage)));
             result.put("isError", true);
             return result;
         }
@@ -818,7 +828,17 @@ public class McpApiManager extends BaseApiManager {
             throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: q");
         }
 
-        final int num = params.get("num") instanceof final Number n ? n.intValue() : 10;
+        int num = 10;
+        final Object numObj = params.get("num");
+        if (numObj instanceof final Number n) {
+            num = n.intValue();
+        } else if (numObj != null) {
+            try {
+                num = Integer.parseInt(numObj.toString());
+            } catch (final NumberFormatException e) {
+                // Use default
+            }
+        }
 
         if (logger.isDebugEnabled()) {
             logger.debug("[MCP] Executing suggest: query='{}', num={}", query, num);
@@ -1392,14 +1412,15 @@ public class McpApiManager extends BaseApiManager {
         if (level == null || level.isEmpty()) {
             throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: level");
         }
-        if (!VALID_LOG_LEVELS.contains(level)) {
+        final String normalizedLevel = level.toLowerCase(java.util.Locale.ROOT);
+        if (!VALID_LOG_LEVELS.contains(normalizedLevel)) {
             throw new McpApiException(ErrorCode.InvalidParams, "Invalid log level: " + level + ". Valid levels: " + VALID_LOG_LEVELS);
         }
 
-        mcpLogLevel = level;
+        mcpLogLevel = normalizedLevel;
 
         if (logger.isDebugEnabled()) {
-            logger.debug("[MCP] Log level set to: {}", level);
+            logger.debug("[MCP] Log level set to: {}", normalizedLevel);
         }
 
         return Collections.emptyMap();
@@ -1423,8 +1444,11 @@ public class McpApiManager extends BaseApiManager {
      * @param response The {@link HttpServletResponse} object to which the error response will be written.
      */
     protected void writeError(final Object id, final ErrorCode code, final String message, final HttpServletResponse response) {
-        final Map<String, Object> error = Map.of("code", code.getCode(), "message", message);
-        final Map<String, Object> errorResponse = Map.of("jsonrpc", "2.0", "id", id, "error", error);
+        final Map<String, Object> error = Map.of("code", code.getCode(), "message", message != null ? message : "Unknown error");
+        final Map<String, Object> errorResponse = new LinkedHashMap<>();
+        errorResponse.put("jsonrpc", "2.0");
+        errorResponse.put("id", id);
+        errorResponse.put("error", error);
         try {
             write(JsonXContent.contentBuilder().map(errorResponse).toString(), mimeType, Constants.UTF_8);
         } catch (final IOException e) {
