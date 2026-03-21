@@ -211,11 +211,11 @@ public class McpApiManager extends BaseApiManager {
         return switch (method) {
         case "initialize" -> handleInitialize();
         case "ping" -> handlePing();
-        case "tools/list" -> handleListTools();
+        case "tools/list" -> handleListTools(params);
         case "tools/call" -> handleInvoke(params);
-        case "resources/list" -> handleListResources();
+        case "resources/list" -> handleListResources(params);
         case "resources/read" -> handleReadResource(params);
-        case "prompts/list" -> handleListPrompts();
+        case "prompts/list" -> handleListPrompts(params);
         case "prompts/get" -> handleGetPrompt(params);
         default -> {
             if (logger.isDebugEnabled()) {
@@ -312,6 +312,20 @@ public class McpApiManager extends BaseApiManager {
      *         - "inputSchema": A JSON Schema object defining the tool's input parameters.
      */
     protected Map<String, Object> handleListTools() {
+        return handleListTools(Collections.emptyMap());
+    }
+
+    /**
+     * Handles the creation of a list of tools with their metadata.
+     * The cursor param is accepted gracefully but ignored since item counts are small.
+     *
+     * @param params the request parameters (cursor param accepted but not required)
+     * @return A map with "tools" key containing a list of available tools. Each tool includes:
+     *         - "name": The name of the tool (e.g., "search").
+     *         - "description": A brief description of the tool (e.g., "Search documents via Fess").
+     *         - "inputSchema": A JSON Schema object defining the tool's input parameters.
+     */
+    protected Map<String, Object> handleListTools(final Map<String, Object> params) {
         // Search tool
         final Map<String, Object> searchProperties = new HashMap<>();
         searchProperties.put("q", Map.of("type", "string", "description", "query string"));
@@ -776,6 +790,17 @@ public class McpApiManager extends BaseApiManager {
      * @return A map with "resources" key containing a list of available resources.
      */
     protected Map<String, Object> handleListResources() {
+        return handleListResources(Collections.emptyMap());
+    }
+
+    /**
+     * Handles the resources/list request and returns available resources.
+     * The cursor param is accepted gracefully but ignored since item counts are small.
+     *
+     * @param params the request parameters (cursor param accepted but not required)
+     * @return A map with "resources" key containing a list of available resources.
+     */
+    protected Map<String, Object> handleListResources(final Map<String, Object> params) {
         final Map<String, Object> indexResource = new HashMap<>();
         indexResource.put("uri", "fess://index/stats");
         indexResource.put("name", "Index Statistics");
@@ -840,6 +865,17 @@ public class McpApiManager extends BaseApiManager {
      * @return A map with "prompts" key containing a list of available prompts.
      */
     protected Map<String, Object> handleListPrompts() {
+        return handleListPrompts(Collections.emptyMap());
+    }
+
+    /**
+     * Handles the prompts/list request and returns available prompts.
+     * The cursor param is accepted gracefully but ignored since item counts are small.
+     *
+     * @param params the request parameters (cursor param accepted but not required)
+     * @return A map with "prompts" key containing a list of available prompts.
+     */
+    protected Map<String, Object> handleListPrompts(final Map<String, Object> params) {
         // Basic search prompt
         final Map<String, Object> basicSearchPrompt = new HashMap<>();
         basicSearchPrompt.put("name", "basic_search");

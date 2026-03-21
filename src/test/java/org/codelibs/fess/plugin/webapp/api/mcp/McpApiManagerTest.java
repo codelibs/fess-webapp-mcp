@@ -1528,4 +1528,24 @@ public class McpApiManagerTest {
             assertEquals("Should be InvalidParams", ErrorCode.InvalidParams, e.getCode());
         }
     }
+
+    // ==================== Pagination / cursor param Tests ====================
+
+    @Test
+    public void testHandleListTools_AcceptsCursorParam() {
+        final Object result = mcpApiManager.dispatchRpcMethod("tools/list", Map.of("cursor", "some_cursor"));
+        assertNotNull("Should handle cursor param gracefully", result);
+    }
+
+    @Test
+    public void testHandleListResources_AcceptsCursorParam() {
+        final Object result = mcpApiManager.dispatchRpcMethod("resources/list", Map.of("cursor", "some_cursor"));
+        assertNotNull("Should handle cursor param gracefully", result);
+    }
+
+    @Test
+    public void testHandleListPrompts_AcceptsCursorParam() {
+        final Object result = mcpApiManager.dispatchRpcMethod("prompts/list", Map.of("cursor", "some_cursor"));
+        assertNotNull("Should handle cursor param gracefully", result);
+    }
 }
