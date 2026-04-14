@@ -63,13 +63,18 @@ public class McpApiManager extends BaseApiManager {
 
     private static final int DEFAULT_CONTENT_MAX_LENGTH = 10000;
 
+    /** The latest MCP protocol version supported by this server. */
+    protected static final String LATEST_PROTOCOL_VERSION = "2024-11-05";
+
+    /** The set of MCP protocol versions supported by this server. */
+    protected static final java.util.Set<String> SUPPORTED_PROTOCOL_VERSIONS = java.util.Set.of("2024-11-05");
+
+    /** Static sort candidate values for advanced_search.sort completion. */
+    protected static final List<String> SORT_VALUES =
+            List.of("score.desc", "score.asc", "last_modified.desc", "last_modified.asc", "create_timestamp.desc", "create_timestamp.asc");
+
     /** The MIME type for JSON responses. */
     protected String mimeType = "application/json";
-
-    private static final java.util.Set<String> VALID_LOG_LEVELS =
-            java.util.Set.of("debug", "info", "notice", "warning", "error", "critical", "alert", "emergency");
-
-    private volatile String mcpLogLevel = "warning";
 
     /**
      * Creates a new MCP API manager with the default path prefix "/mcp".
@@ -136,6 +141,10 @@ public class McpApiManager extends BaseApiManager {
 
     /**
      * Processes a single JSON-RPC request.
+     *
+     * @param requestBody the raw JSON-RPC request body
+     * @param response    the HTTP servlet response to write the result to
+     * @throws IOException if writing the response fails
      */
     protected void processSingleRequest(final String requestBody, final HttpServletResponse response) throws IOException {
         Object rpcId = null;
@@ -209,6 +218,10 @@ public class McpApiManager extends BaseApiManager {
     /**
      * Processes a batch JSON-RPC request (JSON array of requests).
      * Per JSON-RPC 2.0 specification, batch requests MUST be supported.
+     *
+     * @param requestBody the raw JSON-RPC batch request body (a JSON array)
+     * @param response    the HTTP servlet response to write the batch result to
+     * @throws IOException if writing the response fails
      */
     @SuppressWarnings("unchecked")
     protected void processBatchRequest(final String requestBody, final HttpServletResponse response) throws IOException {
@@ -366,7 +379,7 @@ public class McpApiManager extends BaseApiManager {
             logger.debug("[MCP] Dispatching method: {}", method);
         }
         return switch (method) {
-        case "initialize" -> handleInitialize();
+        case "initialize" -> handleInitialize(params != null ? params : Collections.emptyMap());
         case "ping" -> handlePing();
         case "tools/list" -> handleListTools(params);
         case "tools/call" -> handleInvoke(params);
@@ -376,7 +389,6 @@ public class McpApiManager extends BaseApiManager {
         case "prompts/list" -> handleListPrompts(params);
         case "prompts/get" -> handleGetPrompt(params);
         case "completion/complete" -> handleComplete(params);
-        case "logging/setLevel" -> handleSetLogLevel(params);
         default -> {
             if (logger.isDebugEnabled()) {
                 logger.debug("[MCP] Unknown method requested: {}", method);
@@ -441,19 +453,48 @@ public class McpApiManager extends BaseApiManager {
      *         - "serverInfo": object containing server name and version information.
      */
     protected Map<String, Object> handleInitialize() {
+        return handleInitialize(Collections.emptyMap());
+    }
+
+    /**
+     * Handles the initialization process with protocol version negotiation.
+     *
+     * @param params the request parameters (may contain "protocolVersion" and "clientInfo")
+     * @return a map with protocolVersion, capabilities, serverInfo, and instructions
+     */
+    protected Map<String, Object> handleInitialize(final Map<String, Object> params) {
         final Map<String, Object> caps = new HashMap<>();
         caps.put("tools", new HashMap<>());
         caps.put("resources", new HashMap<>());
         caps.put("prompts", new HashMap<>());
-        caps.put("logging", new HashMap<>());
         caps.put("completions", new HashMap<>());
 
         final Map<String, Object> serverInfo = new HashMap<>();
         serverInfo.put("name", "fess-mcp-server");
         serverInfo.put("version", "1.0.0");
 
+        // Protocol version negotiation.
+        // If the client requests a version we support, echo it back.
+        // Otherwise (including null), respond with the latest version we support.
+        String negotiatedVersion = LATEST_PROTOCOL_VERSION;
+        if (params != null) {
+            final Object requested = params.get("protocolVersion");
+            if (requested instanceof final String requestedStr && SUPPORTED_PROTOCOL_VERSIONS.contains(requestedStr)) {
+                negotiatedVersion = requestedStr;
+            } else if (logger.isDebugEnabled() && requested != null) {
+                logger.debug("[MCP] Client requested unsupported protocolVersion={}, falling back to {}", requested,
+                        LATEST_PROTOCOL_VERSION);
+            }
+            if (logger.isDebugEnabled()) {
+                final Object clientInfo = params.get("clientInfo");
+                if (clientInfo != null) {
+                    logger.debug("[MCP] Initialize clientInfo={}", clientInfo);
+                }
+            }
+        }
+
         final Map<String, Object> result = new LinkedHashMap<>();
-        result.put("protocolVersion", "2024-11-05");
+        result.put("protocolVersion", negotiatedVersion);
         result.put("capabilities", caps);
         result.put("serverInfo", serverInfo);
         result.put("instructions",
@@ -828,17 +869,9 @@ public class McpApiManager extends BaseApiManager {
             throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: q");
         }
 
-        int num = 10;
-        final Object numObj = params.get("num");
-        if (numObj instanceof final Number n) {
-            num = n.intValue();
-        } else if (numObj != null) {
-            try {
-                num = Integer.parseInt(numObj.toString());
-            } catch (final NumberFormatException e) {
-                // Use default
-            }
-        }
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        final int maxPageSize = fessConfig.getPagingSearchPageMaxSizeAsInteger().intValue();
+        final int num = resolveSuggestSize(params.get("num"), maxPageSize);
 
         if (logger.isDebugEnabled()) {
             logger.debug("[MCP] Executing suggest: query='{}', num={}", query, num);
@@ -865,6 +898,43 @@ public class McpApiManager extends BaseApiManager {
         }
 
         return Map.of("content", contents);
+    }
+
+    /**
+     * Resolves the requested suggest size, applying defaults and the configured page-size cap.
+     * <p>
+     * Parsing rules:
+     * <ul>
+     *   <li>{@code null} or unparseable input -&gt; default 10</li>
+     *   <li>{@code Number} -&gt; intValue</li>
+     *   <li>other -&gt; {@link Integer#parseInt}(toString())</li>
+     *   <li>result &lt;= 0 -&gt; default 10</li>
+     *   <li>result &gt; {@code maxPageSize} -&gt; capped at {@code maxPageSize}</li>
+     * </ul>
+     *
+     * @param numObj the raw {@code num} argument value
+     * @param maxPageSize the configured maximum page size (cap)
+     * @return the effective suggest size within [1, maxPageSize]
+     */
+    protected int resolveSuggestSize(final Object numObj, final int maxPageSize) {
+        int num = 10;
+        if (numObj instanceof final Number n) {
+            num = n.intValue();
+        } else if (numObj != null) {
+            try {
+                num = Integer.parseInt(numObj.toString());
+            } catch (final NumberFormatException e) {
+                num = 10;
+            }
+        }
+        // Fall back to default for non-positive values; cap at configured max.
+        if (num <= 0) {
+            num = 10;
+        }
+        if (num > maxPageSize) {
+            num = maxPageSize;
+        }
+        return num;
     }
 
     /**
@@ -1247,16 +1317,47 @@ public class McpApiManager extends BaseApiManager {
             throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: argument");
         }
 
-        final String argValue = (String) argument.get("value");
-        if (argValue == null || argValue.isEmpty()) {
-            return Map.of("completion", Map.of("values", List.of(), "hasMore", false));
+        final String refType = ref.get("type") instanceof final String s ? s : null;
+        final String argName = argument.get("name") instanceof final String s ? s : null;
+        final String argValueRaw = argument.get("value") instanceof final String s ? s : null;
+        final String argValue = argValueRaw == null ? "" : argValueRaw;
+
+        if ("ref/prompt".equals(refType)) {
+            final String promptName = ref.get("name") instanceof final String s ? s : null;
+
+            // query argument on basic_search / advanced_search -> Fess suggest
+            if (("basic_search".equals(promptName) || "advanced_search".equals(promptName)) && "query".equals(argName)) {
+                if (argValue.isEmpty()) {
+                    return buildCompletionResult(List.of(), 0, false);
+                }
+                return completeViaSuggest(argValue);
+            }
+
+            // advanced_search.sort -> static prefix filter
+            if ("advanced_search".equals(promptName) && "sort".equals(argName)) {
+                final List<String> matches = SORT_VALUES.stream().filter(v -> v.startsWith(argValue)).collect(Collectors.toList());
+                return buildCompletionResult(matches, matches.size(), false);
+            }
+
+            // advanced_search.num or unknown prompt/argument -> empty values
+            return buildCompletionResult(List.of(), 0, false);
         }
 
-        // Use Fess suggest for autocomplete
+        // ref/resource or any other ref type -> empty values
+        return buildCompletionResult(List.of(), 0, false);
+    }
+
+    /**
+     * Executes Fess suggest and returns a capped completion result.
+     *
+     * @param query the autocomplete input value to forward to Fess suggest
+     * @return the MCP completion/complete response map with {@code values}, {@code total}, and {@code hasMore}
+     */
+    protected Map<String, Object> completeViaSuggest(final String query) {
         final org.codelibs.fess.suggest.request.suggest.SuggestRequestBuilder builder =
                 ComponentUtil.getSuggestHelper().suggester().suggest();
-        builder.setQuery(argValue);
-        builder.setSize(10);
+        builder.setQuery(query);
+        builder.setSize(100);
         builder.addKind(org.codelibs.fess.suggest.entity.SuggestItem.Kind.QUERY.toString());
         builder.addKind(org.codelibs.fess.suggest.entity.SuggestItem.Kind.DOCUMENT.toString());
 
@@ -1269,11 +1370,30 @@ public class McpApiManager extends BaseApiManager {
             }
         }
 
-        final boolean hasMore = suggestResponse.getTotal() > values.size();
+        // Cap returned values at 100 per MCP completion spec.
+        final List<String> capped = values.size() > 100 ? values.subList(0, 100) : values;
+        final int total = (int) suggestResponse.getTotal();
+        final boolean hasMore = total > capped.size();
+        return buildCompletionResult(capped, total, hasMore);
+    }
+
+    /**
+     * Builds the MCP completion/complete response envelope.
+     *
+     * @param values  the candidate completion values (capped at 100)
+     * @param total   the total number of candidates known to the server
+     * @param hasMore whether more candidates exist beyond the returned values
+     * @return the MCP completion/complete response map with {@code completion.values}, {@code completion.total}, and {@code completion.hasMore}
+     */
+    protected Map<String, Object> buildCompletionResult(final List<String> values, final int total, final boolean hasMore) {
+        // Cap at 100 per MCP spec.
+        final List<String> capped = values.size() > 100 ? values.subList(0, 100) : values;
+        final int reportedTotal = Math.max(total, capped.size());
+        final boolean reportedHasMore = hasMore || reportedTotal > capped.size();
         final Map<String, Object> completion = new java.util.LinkedHashMap<>();
-        completion.put("values", values);
-        completion.put("total", (int) suggestResponse.getTotal());
-        completion.put("hasMore", hasMore);
+        completion.put("values", capped);
+        completion.put("total", reportedTotal);
+        completion.put("hasMore", reportedHasMore);
         return Map.of("completion", completion);
     }
 
@@ -1397,42 +1517,6 @@ public class McpApiManager extends BaseApiManager {
         sb.append(displayContent);
 
         return Map.of("type", "text", "text", sb.toString());
-    }
-
-    /**
-     * Handles the logging/setLevel request per MCP specification.
-     * Sets the MCP log level after validating against RFC 5424 levels.
-     *
-     * @param params the method parameters containing the "level" field
-     * @return an empty map on success
-     * @throws McpApiException if the level is missing or invalid
-     */
-    protected Map<String, Object> handleSetLogLevel(final Map<String, Object> params) {
-        final String level = (String) params.get("level");
-        if (level == null || level.isEmpty()) {
-            throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: level");
-        }
-        final String normalizedLevel = level.toLowerCase(java.util.Locale.ROOT);
-        if (!VALID_LOG_LEVELS.contains(normalizedLevel)) {
-            throw new McpApiException(ErrorCode.InvalidParams, "Invalid log level: " + level + ". Valid levels: " + VALID_LOG_LEVELS);
-        }
-
-        mcpLogLevel = normalizedLevel;
-
-        if (logger.isDebugEnabled()) {
-            logger.debug("[MCP] Log level set to: {}", normalizedLevel);
-        }
-
-        return Collections.emptyMap();
-    }
-
-    /**
-     * Returns the current MCP log level.
-     *
-     * @return the current log level string
-     */
-    protected String getMcpLogLevel() {
-        return mcpLogLevel;
     }
 
     /**

@@ -39,7 +39,6 @@ For detailed instructions, see the [Plugin Administration Guide](https://fess.co
 - **Resource Templates**: Parameterized URI templates (RFC 6570) for dynamic resource access
 - **Prompts**: Pre-defined search templates for common use cases
 - **Completion**: Argument autocomplete using Fess suggest for prompt arguments
-- **Logging Control**: Dynamically set server log level via `logging/setLevel`
 - **Ping**: Liveness check endpoint
 - **Extensible Architecture**: Easy to add new tools and capabilities
 
@@ -58,6 +57,8 @@ All requests must be sent as JSON-RPC 2.0 formatted POST requests.
 ### 1. initialize
 
 Initialize the MCP session and retrieve server capabilities.
+
+The server negotiates the protocol version based on the client's `protocolVersion` field: if the requested version is supported, the server echoes it back; otherwise it falls back to the latest supported version (`2024-11-05`).
 
 **Request:**
 ```json
@@ -87,7 +88,6 @@ Initialize the MCP session and retrieve server capabilities.
       "tools": {},
       "resources": {},
       "prompts": {},
-      "logging": {},
       "completions": {}
     },
     "serverInfo": {
@@ -475,7 +475,16 @@ List parameterized resource templates (RFC 6570 URI templates).
 
 ### 10. completion/complete
 
-Request argument autocomplete using Fess suggest.
+Request argument autocomplete. The completion source depends on the `ref.type` and argument name:
+
+- `ref.type == "ref/prompt"` — dispatched by argument name:
+  - `basic_search.query`, `advanced_search.query`: candidates are returned from the Fess suggest engine.
+  - `advanced_search.sort`: candidates are filtered by prefix match from a static enum (`score.desc`, `score.asc`, `last_modified.desc`, `last_modified.asc`, `create_timestamp.desc`, `create_timestamp.asc`).
+  - `advanced_search.num`: no completions are returned.
+- `ref.type == "ref/resource"`: no completions are returned (there is no source for `doc_id` completion).
+- Any other `ref.type`: no completions are returned.
+
+The `values` array is capped at 100 entries.
 
 **Request:**
 ```json
@@ -505,22 +514,6 @@ Request argument autocomplete using Fess suggest.
 }
 ```
 
-### 11. logging/setLevel
-
-Set the minimum log level for server-emitted log messages.
-
-**Request:**
-```json
-{"jsonrpc": "2.0", "id": 12, "method": "logging/setLevel", "params": {"level": "debug"}}
-```
-
-**Response:**
-```json
-{"jsonrpc": "2.0", "id": 12, "result": {}}
-```
-
-Valid levels: `debug`, `info`, `notice`, `warning`, `error`, `critical`, `alert`, `emergency`
-
 ## Search Tool Parameters
 
 The `search` tool supports the following parameters:
@@ -544,6 +537,8 @@ The `suggest` tool supports the following parameters:
 |-----------|------|----------|-------------|
 | `q` | string | Yes | Query prefix for autocomplete |
 | `num` | integer | No | Number of suggestions (default: 10) |
+
+> Note: `num` is capped by Fess's `paging.search.page.max.size` configuration. Requests exceeding this upper bound are clamped to the configured maximum.
 
 ## Get Document Tool Parameters
 
