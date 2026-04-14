@@ -29,12 +29,17 @@ For detailed instructions, see the [Plugin Administration Guide](https://fess.co
 
 ## Features
 
-- **JSON-RPC 2.0 Compliance**: Fully compliant with JSON-RPC 2.0 specification
+- **JSON-RPC 2.0 Compliance**: Fully compliant with JSON-RPC 2.0 specification including batch requests
 - **MCP Protocol Support**: Implements MCP protocol version 2024-11-05
 - **Search Tools**: Execute full-text search queries with advanced filtering
+- **Suggest Tool**: Autocomplete/suggestion queries via Fess suggest engine
+- **Get Document Tool**: Retrieve individual documents by ID
 - **Index Statistics**: Retrieve index and system information
 - **Resources**: Access to Fess index statistics and configuration
+- **Resource Templates**: Parameterized URI templates (RFC 6570) for dynamic resource access
 - **Prompts**: Pre-defined search templates for common use cases
+- **Completion**: Argument autocomplete using Fess suggest for prompt arguments
+- **Ping**: Liveness check endpoint
 - **Extensible Architecture**: Easy to add new tools and capabilities
 
 ## API Endpoint
@@ -53,13 +58,22 @@ All requests must be sent as JSON-RPC 2.0 formatted POST requests.
 
 Initialize the MCP session and retrieve server capabilities.
 
+The server negotiates the protocol version based on the client's `protocolVersion` field: if the requested version is supported, the server echoes it back; otherwise it falls back to the latest supported version (`2024-11-05`).
+
 **Request:**
 ```json
 {
   "jsonrpc": "2.0",
   "id": 1,
   "method": "initialize",
-  "params": {}
+  "params": {
+    "protocolVersion": "2024-11-05",
+    "capabilities": {},
+    "clientInfo": {
+      "name": "example-client",
+      "version": "1.0.0"
+    }
+  }
 }
 ```
 
@@ -73,12 +87,14 @@ Initialize the MCP session and retrieve server capabilities.
     "capabilities": {
       "tools": {},
       "resources": {},
-      "prompts": {}
+      "prompts": {},
+      "completions": {}
     },
     "serverInfo": {
       "name": "fess-mcp-server",
       "version": "1.0.0"
-    }
+    },
+    "instructions": "This MCP server provides access to Fess search capabilities. Use the search tool to query documents, suggest tool for autocomplete, and get_document to retrieve specific documents by ID."
   }
 }
 ```
@@ -107,6 +123,10 @@ List all available tools.
       {
         "name": "search",
         "description": "Search documents via Fess",
+        "annotations": {
+          "readOnlyHint": true,
+          "idempotentHint": true
+        },
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -133,9 +153,53 @@ List all available tools.
       {
         "name": "get_index_stats",
         "description": "Get index statistics and information",
+        "annotations": {
+          "readOnlyHint": true,
+          "idempotentHint": true
+        },
         "inputSchema": {
           "type": "object",
           "properties": {}
+        }
+      },
+      {
+        "name": "suggest",
+        "description": "Get search suggestions/autocomplete for a query prefix",
+        "annotations": {
+          "readOnlyHint": true,
+          "idempotentHint": true
+        },
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "q": {
+              "type": "string",
+              "description": "query prefix for autocomplete"
+            },
+            "num": {
+              "type": "integer",
+              "description": "number of suggestions"
+            }
+          },
+          "required": ["q"]
+        }
+      },
+      {
+        "name": "get_document",
+        "description": "Retrieve a Fess document by its document ID",
+        "annotations": {
+          "readOnlyHint": true,
+          "idempotentHint": true
+        },
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "doc_id": {
+              "type": "string",
+              "description": "document ID to retrieve"
+            }
+          },
+          "required": ["doc_id"]
         }
       }
     ]
@@ -193,6 +257,32 @@ Execute a specific tool.
   "params": {
     "name": "get_index_stats",
     "arguments": {}
+  }
+}
+```
+
+**Request (Suggest):**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "method": "tools/call",
+  "params": {
+    "name": "suggest",
+    "arguments": {"q": "machine", "num": 5}
+  }
+}
+```
+
+**Request (Get Document):**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 6,
+  "method": "tools/call",
+  "params": {
+    "name": "get_document",
+    "arguments": {"doc_id": "abc123"}
   }
 }
 ```
@@ -342,6 +432,88 @@ Get a prompt with arguments substituted.
 }
 ```
 
+### 8. ping
+
+Liveness check.
+
+**Request:**
+```json
+{"jsonrpc": "2.0", "id": 9, "method": "ping", "params": {}}
+```
+
+**Response:**
+```json
+{"jsonrpc": "2.0", "id": 9, "result": {}}
+```
+
+### 9. resources/templates/list
+
+List parameterized resource templates (RFC 6570 URI templates).
+
+**Request:**
+```json
+{"jsonrpc": "2.0", "id": 10, "method": "resources/templates/list", "params": {}}
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 10,
+  "result": {
+    "resourceTemplates": [
+      {
+        "uriTemplate": "fess://document/{doc_id}",
+        "name": "Document by ID",
+        "description": "Retrieve a Fess document by its document ID",
+        "mimeType": "application/json"
+      }
+    ]
+  }
+}
+```
+
+### 10. completion/complete
+
+Request argument autocomplete. The completion source depends on the `ref.type` and argument name:
+
+- `ref.type == "ref/prompt"` — dispatched by argument name:
+  - `basic_search.query`, `advanced_search.query`: candidates are returned from the Fess suggest engine.
+  - `advanced_search.sort`: candidates are filtered by prefix match from a static enum (`score.desc`, `score.asc`, `last_modified.desc`, `last_modified.asc`, `create_timestamp.desc`, `create_timestamp.asc`).
+  - `advanced_search.num`: no completions are returned.
+- `ref.type == "ref/resource"`: no completions are returned (there is no source for `doc_id` completion).
+- Any other `ref.type`: no completions are returned.
+
+The `values` array is capped at 100 entries.
+
+**Request:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 11,
+  "method": "completion/complete",
+  "params": {
+    "ref": {"type": "ref/prompt", "name": "basic_search"},
+    "argument": {"name": "query", "value": "mach"}
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 11,
+  "result": {
+    "completion": {
+      "values": ["machine learning", "machine translation"],
+      "total": 2,
+      "hasMore": false
+    }
+  }
+}
+```
+
 ## Search Tool Parameters
 
 The `search` tool supports the following parameters:
@@ -356,6 +528,25 @@ The `search` tool supports the following parameters:
 | `fields.label` | array | No | Specific labels to filter by |
 | `lang` | string | No | Language filter |
 | `preference` | string | No | Search preference |
+
+## Suggest Tool Parameters
+
+The `suggest` tool supports the following parameters:
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `q` | string | Yes | Query prefix for autocomplete |
+| `num` | integer | No | Number of suggestions (default: 10) |
+
+> Note: `num` is capped by Fess's `paging.search.page.max.size` configuration. Requests exceeding this upper bound are clamped to the configured maximum.
+
+## Get Document Tool Parameters
+
+The `get_document` tool supports the following parameters:
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `doc_id` | string | Yes | Document ID to retrieve |
 
 ### Query Syntax
 
@@ -380,7 +571,14 @@ curl -X POST http://localhost:8080/mcp \
     "jsonrpc": "2.0",
     "id": 1,
     "method": "initialize",
-    "params": {}
+    "params": {
+      "protocolVersion": "2024-11-05",
+      "capabilities": {},
+      "clientInfo": {
+        "name": "curl-test",
+        "version": "1.0.0"
+      }
+    }
   }'
 
 # Search documents
@@ -461,6 +659,19 @@ To use this MCP server with Claude Desktop, add the following configuration to y
 
 After adding the configuration, restart Claude Desktop to connect to the Fess MCP server.
 
+## Batch Requests
+
+The API supports JSON-RPC 2.0 batch requests. Send an array of requests to receive an array of responses:
+
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '[
+    {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "curl-test", "version": "1.0.0"}}},
+    {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+  ]'
+```
+
 ## Error Handling
 
 The API returns standard JSON-RPC 2.0 error responses:
@@ -485,6 +696,7 @@ The API returns standard JSON-RPC 2.0 error responses:
 | -32601 | Method not found | The method does not exist |
 | -32602 | Invalid params | Invalid method parameter(s) |
 | -32603 | Internal error | Internal JSON-RPC error |
+| -32002 | Resource not found | The requested resource does not exist |
 
 ## Configuration
 

@@ -54,9 +54,14 @@ public class ErrorCodeTest {
     }
 
     @Test
+    public void testResourceNotFoundCode() {
+        assertEquals(-32002, ErrorCode.ResourceNotFound.getCode());
+    }
+
+    @Test
     public void testEnumValues() {
         final ErrorCode[] values = ErrorCode.values();
-        assertEquals("Should have 5 error codes", 5, values.length);
+        assertEquals("Should have 6 error codes", 6, values.length);
     }
 
     @Test
@@ -67,6 +72,7 @@ public class ErrorCodeTest {
         assertEquals("valueOf MethodNotFound should work", ErrorCode.MethodNotFound, ErrorCode.valueOf("MethodNotFound"));
         assertEquals("valueOf InvalidParams should work", ErrorCode.InvalidParams, ErrorCode.valueOf("InvalidParams"));
         assertEquals("valueOf InternalError should work", ErrorCode.InternalError, ErrorCode.valueOf("InternalError"));
+        assertEquals("valueOf ResourceNotFound should work", ErrorCode.ResourceNotFound, ErrorCode.valueOf("ResourceNotFound"));
     }
 
     @Test
@@ -112,6 +118,7 @@ public class ErrorCodeTest {
         expectedCodes.put(ErrorCode.MethodNotFound, -32601);
         expectedCodes.put(ErrorCode.InvalidParams, -32602);
         expectedCodes.put(ErrorCode.InternalError, -32603);
+        expectedCodes.put(ErrorCode.ResourceNotFound, -32002);
 
         for (final java.util.Map.Entry<ErrorCode, Integer> entry : expectedCodes.entrySet()) {
             assertEquals("Error code " + entry.getKey().name() + " should have correct value", entry.getValue().intValue(),

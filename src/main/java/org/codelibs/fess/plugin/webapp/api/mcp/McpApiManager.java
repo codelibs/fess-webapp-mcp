@@ -16,6 +16,7 @@
 package org.codelibs.fess.plugin.webapp.api.mcp;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -62,6 +63,16 @@ public class McpApiManager extends BaseApiManager {
 
     private static final int DEFAULT_CONTENT_MAX_LENGTH = 10000;
 
+    /** The latest MCP protocol version supported by this server. */
+    protected static final String LATEST_PROTOCOL_VERSION = "2024-11-05";
+
+    /** The set of MCP protocol versions supported by this server. */
+    protected static final java.util.Set<String> SUPPORTED_PROTOCOL_VERSIONS = java.util.Set.of("2024-11-05");
+
+    /** Static sort candidate values for advanced_search.sort completion. */
+    protected static final List<String> SORT_VALUES =
+            List.of("score.desc", "score.asc", "last_modified.desc", "last_modified.asc", "create_timestamp.desc", "create_timestamp.asc");
+
     /** The MIME type for JSON responses. */
     protected String mimeType = "application/json";
 
@@ -94,16 +105,53 @@ public class McpApiManager extends BaseApiManager {
     public void process(final HttpServletRequest request, final HttpServletResponse response, final FilterChain chain)
             throws IOException, ServletException {
         writeHeaders(response);
-        Object rpcId = null;
-        String method = null;
-        Map<String, Object> params = Collections.emptyMap();
         try {
             if (logger.isDebugEnabled()) {
                 logger.debug("[MCP] Incoming request: {} {} Content-Type={} RemoteAddr={}", request.getMethod(), request.getRequestURI(),
                         request.getContentType(), request.getRemoteAddr());
             }
 
-            final Map<String, Object> reqMap = parseRequestBody(request);
+            final String requestBody = readRequestBody(request);
+            if (logger.isDebugEnabled()) {
+                logger.debug("[MCP] Raw request body: {}", requestBody);
+            }
+
+            final String trimmed = requestBody.trim();
+            if (trimmed.startsWith("[")) {
+                processBatchRequest(trimmed, response);
+            } else {
+                processSingleRequest(trimmed, response);
+            }
+        } catch (final Exception e) {
+            logger.warn("[MCP] Unexpected error reading request body: error={}", e.getMessage(), e);
+            writeError(null, ErrorCode.ParseError, e.getMessage(), response);
+        }
+    }
+
+    /**
+     * Reads the raw request body from the HTTP request.
+     *
+     * @param request the HTTP servlet request
+     * @return the request body as a string
+     * @throws IOException if an I/O error occurs while reading the request
+     */
+    protected String readRequestBody(final HttpServletRequest request) throws IOException {
+        return new String(request.getInputStream().readAllBytes(), Constants.UTF_8);
+    }
+
+    /**
+     * Processes a single JSON-RPC request.
+     *
+     * @param requestBody the raw JSON-RPC request body
+     * @param response    the HTTP servlet response to write the result to
+     * @throws IOException if writing the response fails
+     */
+    protected void processSingleRequest(final String requestBody, final HttpServletResponse response) throws IOException {
+        Object rpcId = null;
+        String method = null;
+        Map<String, Object> params = Collections.emptyMap();
+        try {
+            final Map<String, Object> reqMap = parseJsonObject(requestBody);
             if (logger.isDebugEnabled()) {
                 logger.debug("[MCP] Parsed request body: {}", reqMap);
             }
@@ -128,6 +176,15 @@ public class McpApiManager extends BaseApiManager {
                 throw new McpApiException(ErrorCode.InvalidRequest, "Invalid JSON-RPC request: jsonrpc=" + jsonrpc + ", method=" + method);
             }
 
+            // JSON-RPC 2.0: requests without "id" are notifications and MUST NOT receive a response
+            if (rpcId == null) {
+                dispatchNotification(method, params);
+                if (logger.isDebugEnabled()) {
+                    logger.debug("[MCP] Notification '{}' processed (no response sent)", method);
+                }
+                return;
+            }
+
             // Execute the method
             final Object result = dispatchRpcMethod(method, params);
             if (logger.isDebugEnabled()) {
@@ -145,32 +202,158 @@ public class McpApiManager extends BaseApiManager {
                 logger.debug("[MCP] Client error: code={}, message='{}', id={}, method={}, params={}", mae.getCode(), mae.getMessage(),
                         rpcId, method, params);
             }
-            writeError(rpcId, mae.getCode(), mae.getMessage(), response);
+            if (rpcId != null) {
+                writeError(rpcId, mae.getCode(), mae.getMessage(), response);
+            }
         } catch (final Exception e) {
             // Unexpected error - log at warn level (potential system issue)
             logger.warn("[MCP] Unexpected error processing request: id={}, method={}, params={}, error={}", rpcId, method, params,
                     e.getMessage(), e);
-            writeError(rpcId, ErrorCode.InternalError, e.getMessage(), response);
+            if (rpcId != null) {
+                writeError(rpcId, ErrorCode.InternalError, e.getMessage(), response);
+            }
         }
     }
 
     /**
-     * Parses the JSON-RPC request body from the HTTP request.
+     * Processes a batch JSON-RPC request (JSON array of requests).
+     * Per JSON-RPC 2.0 specification, batch requests MUST be supported.
      *
-     * @param request the HTTP servlet request
-     * @return a map containing the parsed JSON request body
-     * @throws IOException if an I/O error occurs while reading the request
+     * @param requestBody the raw JSON-RPC batch request body (a JSON array)
+     * @param response    the HTTP servlet response to write the batch result to
+     * @throws IOException if writing the response fails
      */
-    protected Map<String, Object> parseRequestBody(final HttpServletRequest request) throws IOException {
-        final String requestBody = new String(request.getInputStream().readAllBytes(), Constants.UTF_8);
-        if (logger.isDebugEnabled()) {
-            logger.debug("[MCP] Raw request body: {}", requestBody);
+    @SuppressWarnings("unchecked")
+    protected void processBatchRequest(final String requestBody, final HttpServletResponse response) throws IOException {
+        final List<Object> rawList;
+        try {
+            rawList = JsonXContent.jsonXContent.createParser(NamedXContentRegistry.EMPTY, LoggingDeprecationHandler.INSTANCE, requestBody)
+                    .list();
+        } catch (final Exception e) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("[MCP] Failed to parse batch request body as JSON array: error='{}'", e.getMessage());
+            }
+            writeError(null, ErrorCode.ParseError, "Failed to parse batch request: " + e.getMessage(), response);
+            return;
         }
-        if (requestBody.isEmpty()) {
+
+        if (rawList.isEmpty()) {
+            writeError(null, ErrorCode.InvalidRequest, "Batch request must not be empty", response);
+            return;
+        }
+
+        final List<Map<String, Object>> requests = new ArrayList<>();
+        final List<Map<String, Object>> responses = new ArrayList<>();
+        for (final Object item : rawList) {
+            if (item instanceof Map) {
+                requests.add((Map<String, Object>) item);
+            } else {
+                // Non-object items in batch should produce InvalidRequest error per JSON-RPC 2.0
+                final Map<String, Object> errorResponse = new LinkedHashMap<>();
+                errorResponse.put("jsonrpc", "2.0");
+                errorResponse.put("id", null);
+                errorResponse.put("error",
+                        Map.of("code", ErrorCode.InvalidRequest.getCode(), "message", "Invalid request object in batch"));
+                responses.add(errorResponse);
+            }
+        }
+
+        responses.addAll(processBatchRequests(requests));
+
+        if (responses.isEmpty()) {
+            // All were notifications - no response per JSON-RPC 2.0 spec
+            return;
+        }
+
+        final StringBuilder batchJson = new StringBuilder("[");
+        for (int i = 0; i < responses.size(); i++) {
+            if (i > 0) {
+                batchJson.append(",");
+            }
+            batchJson.append(JsonXContent.contentBuilder().map(responses.get(i)).toString());
+        }
+        batchJson.append("]");
+        write(batchJson.toString(), mimeType, Constants.UTF_8);
+    }
+
+    /**
+     * Processes a list of JSON-RPC requests and returns a list of responses.
+     * Notifications (requests without id) do not produce responses.
+     *
+     * @param requests the list of parsed JSON-RPC request maps
+     * @return the list of response maps
+     */
+    @SuppressWarnings("unchecked")
+    protected List<Map<String, Object>> processBatchRequests(final List<Map<String, Object>> requests) {
+        final List<Map<String, Object>> responses = new ArrayList<>();
+        for (final Map<String, Object> reqMap : requests) {
+            final String jsonrpc = (String) reqMap.get("jsonrpc");
+            final String method = (String) reqMap.get("method");
+            final Object rpcId = reqMap.get("id");
+            final Map<String, Object> params =
+                    Optional.ofNullable((Map<String, Object>) reqMap.get("params")).orElse(Collections.emptyMap());
+
+            if (!"2.0".equals(jsonrpc) || method == null) {
+                if (rpcId != null) {
+                    responses.add(createErrorResponse(rpcId, ErrorCode.InvalidRequest,
+                            "Invalid JSON-RPC request: jsonrpc=" + jsonrpc + ", method=" + method));
+                }
+                continue;
+            }
+
+            // Notifications (no id) do not produce responses
+            if (rpcId == null) {
+                dispatchNotification(method, params);
+                continue;
+            }
+
+            try {
+                final Object result = dispatchRpcMethod(method, params);
+                final Map<String, Object> resMap = new LinkedHashMap<>();
+                resMap.put("jsonrpc", "2.0");
+                resMap.put("id", rpcId);
+                resMap.put("result", result);
+                responses.add(resMap);
+            } catch (final McpApiException mae) {
+                responses.add(createErrorResponse(rpcId, mae.getCode(), mae.getMessage()));
+            } catch (final Exception e) {
+                logger.warn("[MCP] Batch request error: id={}, method={}, error={}", rpcId, method, e.getMessage(), e);
+                responses.add(createErrorResponse(rpcId, ErrorCode.InternalError, e.getMessage()));
+            }
+        }
+        return responses;
+    }
+
+    /**
+     * Creates a JSON-RPC 2.0 error response map.
+     *
+     * @param id the request id
+     * @param code the error code
+     * @param message the error message
+     * @return the error response map
+     */
+    protected Map<String, Object> createErrorResponse(final Object id, final ErrorCode code, final String message) {
+        final Map<String, Object> error = Map.of("code", code.getCode(), "message", message != null ? message : "Unknown error");
+        final Map<String, Object> errorResponse = new LinkedHashMap<>();
+        errorResponse.put("jsonrpc", "2.0");
+        errorResponse.put("id", id);
+        errorResponse.put("error", error);
+        return errorResponse;
+    }
+
+    /**
+     * Parses a JSON string as a map (JSON object).
+     *
+     * @param requestBody the JSON string to parse
+     * @return a map containing the parsed JSON
+     * @throws IOException if parsing fails
+     */
+    protected Map<String, Object> parseJsonObject(final String requestBody) throws IOException {
+        if (requestBody == null || requestBody.isEmpty()) {
             if (logger.isDebugEnabled()) {
                 logger.debug("[MCP] Request body is empty");
             }
-            return Collections.emptyMap();
+            throw new McpApiException(ErrorCode.ParseError, "Empty request body");
         }
         try {
             return JsonXContent.jsonXContent.createParser(NamedXContentRegistry.EMPTY, LoggingDeprecationHandler.INSTANCE, requestBody)
@@ -196,13 +379,16 @@ public class McpApiManager extends BaseApiManager {
             logger.debug("[MCP] Dispatching method: {}", method);
         }
         return switch (method) {
-        case "initialize" -> handleInitialize();
-        case "tools/list" -> handleListTools();
+        case "initialize" -> handleInitialize(params != null ? params : Collections.emptyMap());
+        case "ping" -> handlePing();
+        case "tools/list" -> handleListTools(params);
         case "tools/call" -> handleInvoke(params);
-        case "resources/list" -> handleListResources();
+        case "resources/list" -> handleListResources(params);
         case "resources/read" -> handleReadResource(params);
-        case "prompts/list" -> handleListPrompts();
+        case "resources/templates/list" -> handleListResourceTemplates(params);
+        case "prompts/list" -> handleListPrompts(params);
         case "prompts/get" -> handleGetPrompt(params);
+        case "completion/complete" -> handleComplete(params);
         default -> {
             if (logger.isDebugEnabled()) {
                 logger.debug("[MCP] Unknown method requested: {}", method);
@@ -212,9 +398,49 @@ public class McpApiManager extends BaseApiManager {
         };
     }
 
+    /**
+     * Dispatches a JSON-RPC notification (request without id).
+     * Notifications MUST NOT produce a response per JSON-RPC 2.0 specification.
+     *
+     * @param method the notification method name
+     * @param params the notification parameters
+     */
+    protected void dispatchNotification(final String method, final Map<String, Object> params) {
+        if (logger.isDebugEnabled()) {
+            logger.debug("[MCP] Dispatching notification: {}", method);
+        }
+        switch (method) {
+        case "notifications/initialized":
+            if (logger.isDebugEnabled()) {
+                logger.debug("[MCP] Client initialized notification received");
+            }
+            break;
+        case "notifications/cancelled":
+            if (logger.isDebugEnabled()) {
+                logger.debug("[MCP] Cancellation notification received: {}", params);
+            }
+            break;
+        default:
+            if (logger.isDebugEnabled()) {
+                logger.debug("[MCP] Unknown notification received: {}", method);
+            }
+            break;
+        }
+    }
+
     @Override
     protected void writeHeaders(final HttpServletResponse response) {
         ComponentUtil.getFessConfig().getApiJsonResponseHeaderList().forEach(e -> response.setHeader(e.getFirst(), e.getSecond()));
+    }
+
+    /**
+     * Handles the ping request per MCP specification.
+     * Returns an empty result to indicate the server is alive.
+     *
+     * @return an empty map
+     */
+    protected Map<String, Object> handlePing() {
+        return Collections.emptyMap();
     }
 
     /**
@@ -227,16 +453,55 @@ public class McpApiManager extends BaseApiManager {
      *         - "serverInfo": object containing server name and version information.
      */
     protected Map<String, Object> handleInitialize() {
+        return handleInitialize(Collections.emptyMap());
+    }
+
+    /**
+     * Handles the initialization process with protocol version negotiation.
+     *
+     * @param params the request parameters (may contain "protocolVersion" and "clientInfo")
+     * @return a map with protocolVersion, capabilities, serverInfo, and instructions
+     */
+    protected Map<String, Object> handleInitialize(final Map<String, Object> params) {
         final Map<String, Object> caps = new HashMap<>();
         caps.put("tools", new HashMap<>());
         caps.put("resources", new HashMap<>());
         caps.put("prompts", new HashMap<>());
+        caps.put("completions", new HashMap<>());
 
         final Map<String, Object> serverInfo = new HashMap<>();
         serverInfo.put("name", "fess-mcp-server");
         serverInfo.put("version", "1.0.0");
 
-        return Map.of("protocolVersion", "2024-11-05", "capabilities", caps, "serverInfo", serverInfo);
+        // Protocol version negotiation.
+        // If the client requests a version we support, echo it back.
+        // Otherwise (including null), respond with the latest version we support.
+        String negotiatedVersion = LATEST_PROTOCOL_VERSION;
+        if (params != null) {
+            final Object requested = params.get("protocolVersion");
+            if (requested instanceof final String requestedStr && SUPPORTED_PROTOCOL_VERSIONS.contains(requestedStr)) {
+                negotiatedVersion = requestedStr;
+            } else if (logger.isDebugEnabled() && requested != null) {
+                logger.debug("[MCP] Client requested unsupported protocolVersion={}, falling back to {}", requested,
+                        LATEST_PROTOCOL_VERSION);
+            }
+            if (logger.isDebugEnabled()) {
+                final Object clientInfo = params.get("clientInfo");
+                if (clientInfo != null) {
+                    logger.debug("[MCP] Initialize clientInfo={}", clientInfo);
+                }
+            }
+        }
+
+        final Map<String, Object> result = new LinkedHashMap<>();
+        result.put("protocolVersion", negotiatedVersion);
+        result.put("capabilities", caps);
+        result.put("serverInfo", serverInfo);
+        result.put("instructions",
+                "Fess Enterprise Search Server. Use the 'search' tool to perform full-text search with Lucene-like query syntax "
+                        + "(AND default, OR explicit, quotes for phrase, - for exclusion). "
+                        + "Use 'get_index_stats' to check index health. Use 'suggest' for query autocomplete.");
+        return result;
     }
 
     /**
@@ -248,6 +513,20 @@ public class McpApiManager extends BaseApiManager {
      *         - "inputSchema": A JSON Schema object defining the tool's input parameters.
      */
     protected Map<String, Object> handleListTools() {
+        return handleListTools(Collections.emptyMap());
+    }
+
+    /**
+     * Handles the creation of a list of tools with their metadata.
+     * The cursor param is accepted gracefully but ignored since item counts are small.
+     *
+     * @param params the request parameters (cursor param accepted but not required)
+     * @return A map with "tools" key containing a list of available tools. Each tool includes:
+     *         - "name": The name of the tool (e.g., "search").
+     *         - "description": A brief description of the tool (e.g., "Search documents via Fess").
+     *         - "inputSchema": A JSON Schema object defining the tool's input parameters.
+     */
+    protected Map<String, Object> handleListTools(final Map<String, Object> params) {
         // Search tool
         final Map<String, Object> searchProperties = new HashMap<>();
         searchProperties.put("q", Map.of("type", "string", "description", "query string"));
@@ -271,6 +550,8 @@ public class McpApiManager extends BaseApiManager {
                         + "use OR explicitly for OR search (e.g., \"term1 OR term2\"), "
                         + "use quotes for phrase search, use - for exclusion.");
         toolSearch.put("inputSchema", searchInputSchema);
+        toolSearch.put("annotations",
+                Map.of("title", "Search Documents", "readOnlyHint", true, "destructiveHint", false, "openWorldHint", false));
 
         // Index stats tool
         final Map<String, Object> statsInputSchema = new HashMap<>();
@@ -281,8 +562,42 @@ public class McpApiManager extends BaseApiManager {
         toolStats.put("name", "get_index_stats");
         toolStats.put("description", "Get index statistics and information");
         toolStats.put("inputSchema", statsInputSchema);
+        toolStats.put("annotations",
+                Map.of("title", "Get Index Statistics", "readOnlyHint", true, "destructiveHint", false, "openWorldHint", false));
 
-        return Map.of("tools", List.of(toolSearch, toolStats));
+        // Suggest tool
+        final Map<String, Object> suggestProperties = new HashMap<>();
+        suggestProperties.put("q", Map.of("type", "string", "description", "query prefix for autocomplete"));
+        suggestProperties.put("num", Map.of("type", "integer", "description", "number of suggestions", "default", 10));
+
+        final Map<String, Object> suggestInputSchema = new HashMap<>();
+        suggestInputSchema.put("type", "object");
+        suggestInputSchema.put("properties", suggestProperties);
+        suggestInputSchema.put("required", List.of("q"));
+
+        final Map<String, Object> toolSuggest = new HashMap<>();
+        toolSuggest.put("name", "suggest");
+        toolSuggest.put("description", "Get autocomplete suggestions for a search query prefix");
+        toolSuggest.put("inputSchema", suggestInputSchema);
+        toolSuggest.put("annotations", Map.of("title", "Suggest", "readOnlyHint", true, "destructiveHint", false, "openWorldHint", false));
+
+        // Get document tool
+        final Map<String, Object> getDocProperties = new HashMap<>();
+        getDocProperties.put("doc_id", Map.of("type", "string", "description", "document ID to retrieve"));
+
+        final Map<String, Object> getDocInputSchema = new HashMap<>();
+        getDocInputSchema.put("type", "object");
+        getDocInputSchema.put("properties", getDocProperties);
+        getDocInputSchema.put("required", List.of("doc_id"));
+
+        final Map<String, Object> toolGetDoc = new HashMap<>();
+        toolGetDoc.put("name", "get_document");
+        toolGetDoc.put("description", "Retrieve a document by its document ID");
+        toolGetDoc.put("inputSchema", getDocInputSchema);
+        toolGetDoc.put("annotations",
+                Map.of("title", "Get Document", "readOnlyHint", true, "destructiveHint", false, "openWorldHint", false));
+
+        return Map.of("tools", List.of(toolSearch, toolStats, toolSuggest, toolGetDoc));
     }
 
     /**
@@ -311,17 +626,30 @@ public class McpApiManager extends BaseApiManager {
             logger.debug("[MCP] Invoking tool: name={}, arguments={}", tool, toolParams);
         }
 
-        return switch (tool) {
-        case "search" -> invokeSearch(toolParams);
-        case "get_index_stats" -> invokeGetIndexStats();
-        // TODO Add more administrative tools here...
-        default -> {
-            if (logger.isDebugEnabled()) {
-                logger.debug("[MCP] Unknown tool requested: {}", tool);
+        try {
+            return switch (tool) {
+            case "search" -> invokeSearch(toolParams);
+            case "get_index_stats" -> invokeGetIndexStats();
+            case "suggest" -> invokeSuggest(toolParams);
+            case "get_document" -> invokeGetDocument(toolParams);
+            // TODO Add more administrative tools here...
+            default -> {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("[MCP] Unknown tool requested: {}", tool);
+                }
+                throw new McpApiException(ErrorCode.InvalidParams, "Unknown tool: " + tool);
             }
-            throw new McpApiException(ErrorCode.InvalidParams, "Unknown tool: " + tool);
+            };
+        } catch (final McpApiException e) {
+            throw e;
+        } catch (final Exception e) {
+            logger.warn("[MCP] Tool '{}' execution failed: {}", tool, e.getMessage(), e);
+            final String errorMessage = e.getMessage() != null ? e.getMessage() : "Unknown error";
+            final Map<String, Object> result = new LinkedHashMap<>();
+            result.put("content", List.of(Map.of("type", "text", "text", "Error: " + errorMessage)));
+            result.put("isError", true);
+            return result;
         }
-        };
     }
 
     /**
@@ -530,6 +858,127 @@ public class McpApiManager extends BaseApiManager {
     }
 
     /**
+     * Invokes the suggest tool to provide query autocomplete suggestions.
+     *
+     * @param params the parameters including query prefix (q) and number of suggestions (num)
+     * @return a map containing the suggestions in MCP-compliant format
+     */
+    protected Map<String, Object> invokeSuggest(final Map<String, Object> params) {
+        final String query = (String) params.get("q");
+        if (query == null || query.isEmpty()) {
+            throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: q");
+        }
+
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        final int maxPageSize = fessConfig.getPagingSearchPageMaxSizeAsInteger().intValue();
+        final int num = resolveSuggestSize(params.get("num"), maxPageSize);
+
+        if (logger.isDebugEnabled()) {
+            logger.debug("[MCP] Executing suggest: query='{}', num={}", query, num);
+        }
+
+        final org.codelibs.fess.suggest.request.suggest.SuggestRequestBuilder builder =
+                ComponentUtil.getSuggestHelper().suggester().suggest();
+        builder.setQuery(query);
+        builder.setSize(num);
+        builder.addKind(org.codelibs.fess.suggest.entity.SuggestItem.Kind.QUERY.toString());
+        builder.addKind(org.codelibs.fess.suggest.entity.SuggestItem.Kind.DOCUMENT.toString());
+
+        final org.codelibs.fess.suggest.request.suggest.SuggestResponse suggestResponse = builder.execute().getResponse();
+
+        final List<Map<String, Object>> contents = new java.util.ArrayList<>();
+        if (suggestResponse.getItems() != null) {
+            for (final org.codelibs.fess.suggest.entity.SuggestItem item : suggestResponse.getItems()) {
+                contents.add(Map.of("type", "text", "text", item.getText()));
+            }
+        }
+
+        if (contents.isEmpty()) {
+            contents.add(Map.of("type", "text", "text", "No suggestions found for: " + query));
+        }
+
+        return Map.of("content", contents);
+    }
+
+    /**
+     * Resolves the requested suggest size, applying defaults and the configured page-size cap.
+     * <p>
+     * Parsing rules:
+     * <ul>
+     *   <li>{@code null} or unparseable input -&gt; default 10</li>
+     *   <li>{@code Number} -&gt; intValue</li>
+     *   <li>other -&gt; {@link Integer#parseInt}(toString())</li>
+     *   <li>result &lt;= 0 -&gt; default 10</li>
+     *   <li>result &gt; {@code maxPageSize} -&gt; capped at {@code maxPageSize}</li>
+     * </ul>
+     *
+     * @param numObj the raw {@code num} argument value
+     * @param maxPageSize the configured maximum page size (cap)
+     * @return the effective suggest size within [1, maxPageSize]
+     */
+    protected int resolveSuggestSize(final Object numObj, final int maxPageSize) {
+        int num = 10;
+        if (numObj instanceof final Number n) {
+            num = n.intValue();
+        } else if (numObj != null) {
+            try {
+                num = Integer.parseInt(numObj.toString());
+            } catch (final NumberFormatException e) {
+                num = 10;
+            }
+        }
+        // Fall back to default for non-positive values; cap at configured max.
+        if (num <= 0) {
+            num = 10;
+        }
+        if (num > maxPageSize) {
+            num = maxPageSize;
+        }
+        return num;
+    }
+
+    /**
+     * Invokes the get_document tool to retrieve a single document by its doc_id.
+     *
+     * @param params the parameters including doc_id
+     * @return a map containing the document content in MCP-compliant format
+     */
+    protected Map<String, Object> invokeGetDocument(final Map<String, Object> params) {
+        final String docId = (String) params.get("doc_id");
+        if (docId == null || docId.isEmpty()) {
+            throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: doc_id");
+        }
+
+        if (logger.isDebugEnabled()) {
+            logger.debug("[MCP] Retrieving document: doc_id={}", docId);
+        }
+
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        final String[] fields = new String[] { fessConfig.getIndexFieldTitle(), fessConfig.getIndexFieldContent(),
+                fessConfig.getIndexFieldUrl(), fessConfig.getIndexFieldDocId(), fessConfig.getIndexFieldLastModified() };
+
+        return ComponentUtil.getSearchHelper().getDocumentByDocId(docId, fields, OptionalThing.empty()).map(doc -> {
+            final String title = String.valueOf(doc.getOrDefault(fessConfig.getIndexFieldTitle(), ""));
+            final String url = String.valueOf(doc.getOrDefault(fessConfig.getIndexFieldUrl(), ""));
+            final String content = String.valueOf(doc.getOrDefault(fessConfig.getIndexFieldContent(), ""));
+            final String displayContent = truncateContent(content, getContentMaxLength());
+
+            final StringBuilder sb = new StringBuilder();
+            sb.append("**Title**: ").append(title).append("\n");
+            sb.append("**URL**: ").append(url).append("\n");
+            sb.append("**Doc ID**: ").append(docId).append("\n\n");
+            sb.append(displayContent);
+
+            return Map.<String, Object> of("content", List.of(Map.of("type", "text", "text", sb.toString())));
+        }).orElseGet(() -> {
+            final Map<String, Object> result = new LinkedHashMap<>();
+            result.put("content", List.of(Map.of("type", "text", "text", "Document not found: " + docId)));
+            result.put("isError", true);
+            return result;
+        });
+    }
+
+    /**
      * Collects index statistics including document count, configuration, and system information.
      *
      * @return A map containing organized statistics data
@@ -582,6 +1031,17 @@ public class McpApiManager extends BaseApiManager {
      * @return A map with "resources" key containing a list of available resources.
      */
     protected Map<String, Object> handleListResources() {
+        return handleListResources(Collections.emptyMap());
+    }
+
+    /**
+     * Handles the resources/list request and returns available resources.
+     * The cursor param is accepted gracefully but ignored since item counts are small.
+     *
+     * @param params the request parameters (cursor param accepted but not required)
+     * @return A map with "resources" key containing a list of available resources.
+     */
+    protected Map<String, Object> handleListResources(final Map<String, Object> params) {
         final Map<String, Object> indexResource = new HashMap<>();
         indexResource.put("uri", "fess://index/stats");
         indexResource.put("name", "Index Statistics");
@@ -608,15 +1068,66 @@ public class McpApiManager extends BaseApiManager {
             logger.debug("[MCP] Reading resource: uri={}", uri);
         }
 
+        if (uri.startsWith("fess://document/")) {
+            final String docId = uri.substring("fess://document/".length());
+            return buildDocumentResource(docId);
+        }
+
         return switch (uri) {
         case "fess://index/stats" -> buildIndexStatsResource();
         default -> {
             if (logger.isDebugEnabled()) {
                 logger.debug("[MCP] Unknown resource requested: {}", uri);
             }
-            throw new McpApiException(ErrorCode.InvalidParams, "Unknown resource: " + uri);
+            throw new McpApiException(ErrorCode.ResourceNotFound, "Unknown resource: " + uri);
         }
         };
+    }
+
+    /**
+     * Handles the resources/templates/list request and returns available resource templates.
+     *
+     * @param params the request parameters
+     * @return A map with "resourceTemplates" key containing a list of resource templates.
+     */
+    protected Map<String, Object> handleListResourceTemplates(final Map<String, Object> params) {
+        final Map<String, Object> docTemplate = new HashMap<>();
+        docTemplate.put("uriTemplate", "fess://document/{doc_id}");
+        docTemplate.put("name", "Document by ID");
+        docTemplate.put("description", "Retrieve a Fess document by its document ID");
+        docTemplate.put("mimeType", "application/json");
+
+        return Map.of("resourceTemplates", List.of(docTemplate));
+    }
+
+    /**
+     * Builds a document resource by fetching the document with the given ID.
+     *
+     * @param docId the document ID
+     * @return A map with "contents" key containing the document content
+     * @throws McpApiException if the document ID is empty or document is not found
+     */
+    protected Map<String, Object> buildDocumentResource(final String docId) {
+        if (docId.isEmpty()) {
+            throw new McpApiException(ErrorCode.InvalidParams, "Document ID is empty");
+        }
+
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        final String[] fields = new String[] { fessConfig.getIndexFieldTitle(), fessConfig.getIndexFieldContent(),
+                fessConfig.getIndexFieldUrl(), fessConfig.getIndexFieldDocId() };
+
+        return ComponentUtil.getSearchHelper().getDocumentByDocId(docId, fields, OptionalThing.empty()).map(doc -> {
+            try {
+                final String jsonResult = JsonXContent.contentBuilder().map(doc).toString();
+                final Map<String, Object> content = new HashMap<>();
+                content.put("uri", "fess://document/" + docId);
+                content.put("mimeType", "application/json");
+                content.put("text", jsonResult);
+                return Map.<String, Object> of("contents", List.of(content));
+            } catch (final IOException e) {
+                throw new McpApiException(ErrorCode.InternalError, "Failed to serialize document: " + e.getMessage());
+            }
+        }).orElseThrow(() -> new McpApiException(ErrorCode.ResourceNotFound, "Document not found: " + docId));
     }
 
     /**
@@ -646,6 +1157,17 @@ public class McpApiManager extends BaseApiManager {
      * @return A map with "prompts" key containing a list of available prompts.
      */
     protected Map<String, Object> handleListPrompts() {
+        return handleListPrompts(Collections.emptyMap());
+    }
+
+    /**
+     * Handles the prompts/list request and returns available prompts.
+     * The cursor param is accepted gracefully but ignored since item counts are small.
+     *
+     * @param params the request parameters (cursor param accepted but not required)
+     * @return A map with "prompts" key containing a list of available prompts.
+     */
+    protected Map<String, Object> handleListPrompts(final Map<String, Object> params) {
         // Basic search prompt
         final Map<String, Object> basicSearchPrompt = new HashMap<>();
         basicSearchPrompt.put("name", "basic_search");
@@ -773,6 +1295,106 @@ public class McpApiManager extends BaseApiManager {
         message.put("content", content);
 
         return Map.of("messages", List.of(message));
+    }
+
+    /**
+     * Handles the completion/complete request by using Fess suggest to provide autocomplete
+     * for prompt arguments.
+     *
+     * @param params the request parameters including "ref" and "argument"
+     * @return a map containing "completion" with "values", "total", and "hasMore"
+     * @throws McpApiException if required parameters are missing
+     */
+    @SuppressWarnings("unchecked")
+    protected Map<String, Object> handleComplete(final Map<String, Object> params) {
+        final Map<String, Object> ref = (Map<String, Object>) params.get("ref");
+        if (ref == null) {
+            throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: ref");
+        }
+
+        final Map<String, Object> argument = (Map<String, Object>) params.get("argument");
+        if (argument == null) {
+            throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: argument");
+        }
+
+        final String refType = ref.get("type") instanceof final String s ? s : null;
+        final String argName = argument.get("name") instanceof final String s ? s : null;
+        final String argValueRaw = argument.get("value") instanceof final String s ? s : null;
+        final String argValue = argValueRaw == null ? "" : argValueRaw;
+
+        if ("ref/prompt".equals(refType)) {
+            final String promptName = ref.get("name") instanceof final String s ? s : null;
+
+            // query argument on basic_search / advanced_search -> Fess suggest
+            if (("basic_search".equals(promptName) || "advanced_search".equals(promptName)) && "query".equals(argName)) {
+                if (argValue.isEmpty()) {
+                    return buildCompletionResult(List.of(), 0, false);
+                }
+                return completeViaSuggest(argValue);
+            }
+
+            // advanced_search.sort -> static prefix filter
+            if ("advanced_search".equals(promptName) && "sort".equals(argName)) {
+                final List<String> matches = SORT_VALUES.stream().filter(v -> v.startsWith(argValue)).collect(Collectors.toList());
+                return buildCompletionResult(matches, matches.size(), false);
+            }
+
+            // advanced_search.num or unknown prompt/argument -> empty values
+            return buildCompletionResult(List.of(), 0, false);
+        }
+
+        // ref/resource or any other ref type -> empty values
+        return buildCompletionResult(List.of(), 0, false);
+    }
+
+    /**
+     * Executes Fess suggest and returns a capped completion result.
+     *
+     * @param query the autocomplete input value to forward to Fess suggest
+     * @return the MCP completion/complete response map with {@code values}, {@code total}, and {@code hasMore}
+     */
+    protected Map<String, Object> completeViaSuggest(final String query) {
+        final org.codelibs.fess.suggest.request.suggest.SuggestRequestBuilder builder =
+                ComponentUtil.getSuggestHelper().suggester().suggest();
+        builder.setQuery(query);
+        builder.setSize(100);
+        builder.addKind(org.codelibs.fess.suggest.entity.SuggestItem.Kind.QUERY.toString());
+        builder.addKind(org.codelibs.fess.suggest.entity.SuggestItem.Kind.DOCUMENT.toString());
+
+        final org.codelibs.fess.suggest.request.suggest.SuggestResponse suggestResponse = builder.execute().getResponse();
+
+        final List<String> values = new java.util.ArrayList<>();
+        if (suggestResponse.getItems() != null) {
+            for (final org.codelibs.fess.suggest.entity.SuggestItem item : suggestResponse.getItems()) {
+                values.add(item.getText());
+            }
+        }
+
+        // Cap returned values at 100 per MCP completion spec.
+        final List<String> capped = values.size() > 100 ? values.subList(0, 100) : values;
+        final int total = (int) suggestResponse.getTotal();
+        final boolean hasMore = total > capped.size();
+        return buildCompletionResult(capped, total, hasMore);
+    }
+
+    /**
+     * Builds the MCP completion/complete response envelope.
+     *
+     * @param values  the candidate completion values (capped at 100)
+     * @param total   the total number of candidates known to the server
+     * @param hasMore whether more candidates exist beyond the returned values
+     * @return the MCP completion/complete response map with {@code completion.values}, {@code completion.total}, and {@code completion.hasMore}
+     */
+    protected Map<String, Object> buildCompletionResult(final List<String> values, final int total, final boolean hasMore) {
+        // Cap at 100 per MCP spec.
+        final List<String> capped = values.size() > 100 ? values.subList(0, 100) : values;
+        final int reportedTotal = Math.max(total, capped.size());
+        final boolean reportedHasMore = hasMore || reportedTotal > capped.size();
+        final Map<String, Object> completion = new java.util.LinkedHashMap<>();
+        completion.put("values", capped);
+        completion.put("total", reportedTotal);
+        completion.put("hasMore", reportedHasMore);
+        return Map.of("completion", completion);
     }
 
     /**
@@ -906,8 +1528,11 @@ public class McpApiManager extends BaseApiManager {
      * @param response The {@link HttpServletResponse} object to which the error response will be written.
      */
     protected void writeError(final Object id, final ErrorCode code, final String message, final HttpServletResponse response) {
-        final Map<String, Object> error = Map.of("code", code.getCode(), "message", message);
-        final Map<String, Object> errorResponse = Map.of("jsonrpc", "2.0", "id", id, "error", error);
+        final Map<String, Object> error = Map.of("code", code.getCode(), "message", message != null ? message : "Unknown error");
+        final Map<String, Object> errorResponse = new LinkedHashMap<>();
+        errorResponse.put("jsonrpc", "2.0");
+        errorResponse.put("id", id);
+        errorResponse.put("error", error);
         try {
             write(JsonXContent.contentBuilder().map(errorResponse).toString(), mimeType, Constants.UTF_8);
         } catch (final IOException e) {

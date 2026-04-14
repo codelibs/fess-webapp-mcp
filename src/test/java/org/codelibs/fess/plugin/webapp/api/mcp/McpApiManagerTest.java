@@ -21,6 +21,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -83,6 +84,31 @@ public class McpApiManagerTest {
     }
 
     @Test
+    public void testHandleInitialize_HasInstructions() {
+        final Map<String, Object> result = mcpApiManager.handleInitialize();
+        assertNotNull("Should have instructions", result.get("instructions"));
+        assertTrue("Instructions should be a non-empty string",
+                result.get("instructions") instanceof String && !((String) result.get("instructions")).isEmpty());
+    }
+
+    @Test
+    public void testHandleInitialize_DoesNotAdvertiseLoggingCapability() {
+        final Map<String, Object> result = mcpApiManager.handleInitialize();
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> capabilities = (Map<String, Object>) result.get("capabilities");
+        assertFalse("Should not advertise logging capability (HTTP request/response server cannot emit notifications/message)",
+                capabilities.containsKey("logging"));
+    }
+
+    @Test
+    public void testHandleInitialize_HasCompletionsCapability() {
+        final Map<String, Object> result = mcpApiManager.handleInitialize();
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> capabilities = (Map<String, Object>) result.get("capabilities");
+        assertNotNull("Should have completions capability", capabilities.get("completions"));
+    }
+
+    @Test
     public void testHandleListTools() {
         final Map<String, Object> result = mcpApiManager.handleListTools();
 
@@ -92,7 +118,7 @@ public class McpApiManagerTest {
         @SuppressWarnings("unchecked")
         final List<Map<String, Object>> tools = (List<Map<String, Object>>) result.get("tools");
         assertNotNull("Tools list should not be null", tools);
-        assertEquals("Should have 2 tools", 2, tools.size());
+        assertEquals("Should have 4 tools", 4, tools.size());
 
         // Check search tool
         final Map<String, Object> searchTool = tools.get(0);
@@ -787,7 +813,7 @@ public class McpApiManagerTest {
             mcpApiManager.handleReadResource(params);
             fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
-            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+            assertEquals("Should be ResourceNotFound error", ErrorCode.ResourceNotFound, e.getCode());
             assertTrue("Error message should mention unknown resource", e.getMessage().contains("Unknown resource"));
         }
     }
@@ -801,7 +827,7 @@ public class McpApiManagerTest {
             mcpApiManager.handleReadResource(params);
             fail("Should have thrown McpApiException for invalid scheme");
         } catch (final McpApiException e) {
-            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+            assertEquals("Should be ResourceNotFound error", ErrorCode.ResourceNotFound, e.getCode());
         }
     }
 
@@ -827,7 +853,7 @@ public class McpApiManagerTest {
             mcpApiManager.handleReadResource(params);
             fail("Should have thrown McpApiException for partial URI");
         } catch (final McpApiException e) {
-            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+            assertEquals("Should be ResourceNotFound error", ErrorCode.ResourceNotFound, e.getCode());
         }
     }
 
@@ -840,7 +866,7 @@ public class McpApiManagerTest {
             mcpApiManager.handleReadResource(params);
             fail("Should have thrown McpApiException for case mismatch URI");
         } catch (final McpApiException e) {
-            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+            assertEquals("Should be ResourceNotFound error", ErrorCode.ResourceNotFound, e.getCode());
         }
     }
 
@@ -853,7 +879,7 @@ public class McpApiManagerTest {
             mcpApiManager.handleReadResource(params);
             fail("Should have thrown McpApiException for unknown resource");
         } catch (final McpApiException e) {
-            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+            assertEquals("Should be ResourceNotFound error", ErrorCode.ResourceNotFound, e.getCode());
         }
     }
 
@@ -876,7 +902,7 @@ public class McpApiManagerTest {
             mcpApiManager.dispatchRpcMethod("resources/read", params);
             fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
-            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+            assertEquals("Should be ResourceNotFound error", ErrorCode.ResourceNotFound, e.getCode());
         }
     }
 
@@ -1374,5 +1400,666 @@ public class McpApiManagerTest {
         assertEquals("Resource name", "Index Statistics", indexStatsResource.get("name"));
         assertEquals("Resource mimeType", "application/json", indexStatsResource.get("mimeType"));
         assertNotNull("Resource should have description", indexStatsResource.get("description"));
+    }
+
+    @Test
+    public void testHandleListTools_SearchToolAnnotations() {
+        final Map<String, Object> result = mcpApiManager.handleListTools();
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> tools = (List<Map<String, Object>>) result.get("tools");
+        final Map<String, Object> searchTool = tools.get(0);
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> annotations = (Map<String, Object>) searchTool.get("annotations");
+        assertNotNull("Search tool should have annotations", annotations);
+        assertEquals("Search should be read-only", true, annotations.get("readOnlyHint"));
+        assertEquals("Search should not be destructive", false, annotations.get("destructiveHint"));
+        assertEquals("Search should not be open-world", false, annotations.get("openWorldHint"));
+    }
+
+    @Test
+    public void testHandleListTools_IndexStatsToolAnnotations() {
+        final Map<String, Object> result = mcpApiManager.handleListTools();
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> tools = (List<Map<String, Object>>) result.get("tools");
+
+        Map<String, Object> statsTool = null;
+        for (final Map<String, Object> tool : tools) {
+            if ("get_index_stats".equals(tool.get("name"))) {
+                statsTool = tool;
+                break;
+            }
+        }
+        assertNotNull("get_index_stats tool should exist", statsTool);
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> annotations = (Map<String, Object>) statsTool.get("annotations");
+        assertNotNull("Stats tool should have annotations", annotations);
+        assertEquals("Stats should be read-only", true, annotations.get("readOnlyHint"));
+        assertEquals("Stats should not be destructive", false, annotations.get("destructiveHint"));
+    }
+
+    @Test
+    public void testHandleInvoke_Search_ToolLevelError_ReturnsIsError() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "search");
+        params.put("arguments", Map.of("q", "test"));
+
+        // Without DI container, search will throw IllegalStateException caught by tool-level error handling
+        final Map<String, Object> result = mcpApiManager.handleInvoke(params);
+        assertEquals("Should have isError true", true, result.get("isError"));
+
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> content = (List<Map<String, Object>>) result.get("content");
+        assertNotNull("Should have content", content);
+        assertFalse("Content should not be empty", content.isEmpty());
+        assertEquals("Content type should be text", "text", content.get(0).get("type"));
+        assertTrue("Error text should contain error info", ((String) content.get(0).get("text")).startsWith("Error:"));
+    }
+
+    @Test
+    public void testHandleListTools_HasSuggestTool() {
+        final Map<String, Object> result = mcpApiManager.handleListTools();
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> tools = (List<Map<String, Object>>) result.get("tools");
+
+        Map<String, Object> suggestTool = null;
+        for (final Map<String, Object> tool : tools) {
+            if ("suggest".equals(tool.get("name"))) {
+                suggestTool = tool;
+                break;
+            }
+        }
+        assertNotNull("suggest tool should exist", suggestTool);
+        assertNotNull("suggest tool should have inputSchema", suggestTool.get("inputSchema"));
+        assertNotNull("suggest tool should have annotations", suggestTool.get("annotations"));
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> schema = (Map<String, Object>) suggestTool.get("inputSchema");
+        @SuppressWarnings("unchecked")
+        final List<String> required = (List<String>) schema.get("required");
+        assertTrue("q should be required", required.contains("q"));
+    }
+
+    @Test
+    public void testHandleInvoke_Suggest_MissingQuery() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "suggest");
+        params.put("arguments", Map.of());
+
+        try {
+            mcpApiManager.handleInvoke(params);
+            fail("Should have thrown McpApiException");
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams", ErrorCode.InvalidParams, e.getCode());
+        }
+    }
+
+    @Test
+    public void testHandleListTools_HasGetDocumentTool() {
+        final Map<String, Object> result = mcpApiManager.handleListTools();
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> tools = (List<Map<String, Object>>) result.get("tools");
+
+        Map<String, Object> getDocTool = null;
+        for (final Map<String, Object> tool : tools) {
+            if ("get_document".equals(tool.get("name"))) {
+                getDocTool = tool;
+                break;
+            }
+        }
+        assertNotNull("get_document tool should exist", getDocTool);
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> schema = (Map<String, Object>) getDocTool.get("inputSchema");
+        @SuppressWarnings("unchecked")
+        final List<String> required = (List<String>) schema.get("required");
+        assertTrue("doc_id should be required", required.contains("doc_id"));
+    }
+
+    @Test
+    public void testHandleInvoke_GetDocument_MissingDocId() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "get_document");
+        params.put("arguments", Map.of());
+
+        try {
+            mcpApiManager.handleInvoke(params);
+            fail("Should have thrown McpApiException");
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams", ErrorCode.InvalidParams, e.getCode());
+        }
+    }
+
+    // ==================== Pagination / cursor param Tests ====================
+
+    @Test
+    public void testHandleListTools_AcceptsCursorParam() {
+        final Object result = mcpApiManager.dispatchRpcMethod("tools/list", Map.of("cursor", "some_cursor"));
+        assertNotNull("Should handle cursor param gracefully", result);
+    }
+
+    @Test
+    public void testHandleListResources_AcceptsCursorParam() {
+        final Object result = mcpApiManager.dispatchRpcMethod("resources/list", Map.of("cursor", "some_cursor"));
+        assertNotNull("Should handle cursor param gracefully", result);
+    }
+
+    @Test
+    public void testHandleListPrompts_AcceptsCursorParam() {
+        final Object result = mcpApiManager.dispatchRpcMethod("prompts/list", Map.of("cursor", "some_cursor"));
+        assertNotNull("Should handle cursor param gracefully", result);
+    }
+
+    // ==================== Resource Templates Tests ====================
+
+    @Test
+    public void testDispatchRpcMethod_ResourcesTemplatesList() {
+        final Object result = mcpApiManager.dispatchRpcMethod("resources/templates/list", Map.of());
+        assertNotNull("Result should not be null", result);
+        assertTrue("Result should be a Map", result instanceof Map);
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> resultMap = (Map<String, Object>) result;
+        assertTrue("Result should have resourceTemplates key", resultMap.containsKey("resourceTemplates"));
+
+        @SuppressWarnings("unchecked")
+        final List<Map<String, Object>> templates = (List<Map<String, Object>>) resultMap.get("resourceTemplates");
+        assertFalse("Templates list should not be empty", templates.isEmpty());
+
+        final Map<String, Object> template = templates.get(0);
+        assertNotNull("Template should have uriTemplate", template.get("uriTemplate"));
+        assertEquals("fess://document/{doc_id}", template.get("uriTemplate"));
+        assertNotNull("Template should have name", template.get("name"));
+    }
+
+    @Test
+    public void testHandleReadResource_DocumentUri_RequiresDIContainer() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("uri", "fess://document/test_doc_id");
+
+        try {
+            mcpApiManager.handleReadResource(params);
+        } catch (final IllegalStateException e) {
+            assertTrue("Should fail due to container not initialized", e.getMessage().contains("container"));
+        } catch (final McpApiException e) {
+            // ResourceNotFound is also acceptable if container is available but doc doesn't exist
+        }
+    }
+
+    @Test
+    public void testHandleReadResource_DocumentUri_EmptyDocId() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("uri", "fess://document/");
+
+        try {
+            mcpApiManager.handleReadResource(params);
+            fail("Should have thrown McpApiException");
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams", ErrorCode.InvalidParams, e.getCode());
+        }
+    }
+
+    // ==================== completion/complete Tests ====================
+
+    @Test
+    public void testHandleComplete_MissingRef() {
+        try {
+            mcpApiManager.dispatchRpcMethod("completion/complete", Map.of());
+            fail("Should have thrown McpApiException");
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams", ErrorCode.InvalidParams, e.getCode());
+        }
+    }
+
+    @Test
+    public void testHandleComplete_MissingArgument() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("ref", Map.of("type", "ref/prompt", "name", "basic_search"));
+
+        try {
+            mcpApiManager.dispatchRpcMethod("completion/complete", params);
+            fail("Should have thrown McpApiException");
+        } catch (final McpApiException e) {
+            assertEquals("Should be InvalidParams", ErrorCode.InvalidParams, e.getCode());
+        }
+    }
+
+    @Test
+    public void testHandleComplete_EmptyValue() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("ref", Map.of("type", "ref/prompt", "name", "basic_search"));
+        params.put("argument", Map.of("name", "query", "value", ""));
+
+        final Object result = mcpApiManager.dispatchRpcMethod("completion/complete", params);
+        assertNotNull("Result should not be null", result);
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> resultMap = (Map<String, Object>) result;
+        assertNotNull("Should have completion", resultMap.get("completion"));
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> completion = (Map<String, Object>) resultMap.get("completion");
+        @SuppressWarnings("unchecked")
+        final List<String> values = (List<String>) completion.get("values");
+        assertTrue("Values should be empty for empty input", values.isEmpty());
+        assertEquals("hasMore should be false", false, completion.get("hasMore"));
+    }
+
+    @Test
+    public void testHandleComplete_WithValue_RequiresDIContainer() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("ref", Map.of("type", "ref/prompt", "name", "basic_search"));
+        params.put("argument", Map.of("name", "query", "value", "test"));
+
+        try {
+            mcpApiManager.dispatchRpcMethod("completion/complete", params);
+        } catch (final IllegalStateException e) {
+            assertTrue("Should fail due to container", e.getMessage().contains("container"));
+        }
+    }
+
+    // ===== Batch request tests =====
+
+    @Test
+    public void testProcessBatchRequests() {
+        final List<Map<String, Object>> requests = List.of(Map.of("jsonrpc", "2.0", "id", 1, "method", "initialize", "params", Map.of()),
+                Map.of("jsonrpc", "2.0", "id", 2, "method", "tools/list", "params", Map.of()));
+
+        final List<Map<String, Object>> responses = mcpApiManager.processBatchRequests(requests);
+
+        assertEquals("Should have 2 responses", 2, responses.size());
+        assertEquals("First response id should be 1", 1, responses.get(0).get("id"));
+        assertEquals("Second response id should be 2", 2, responses.get(1).get("id"));
+        assertNotNull("First response should have result", responses.get(0).get("result"));
+        assertNotNull("Second response should have result", responses.get(1).get("result"));
+    }
+
+    @Test
+    public void testProcessBatchRequests_WithNotification() {
+        final Map<String, Object> notification = new HashMap<>();
+        notification.put("jsonrpc", "2.0");
+        notification.put("method", "notifications/initialized");
+
+        final List<Map<String, Object>> requests = new ArrayList<>();
+        requests.add(notification);
+        requests.add(Map.of("jsonrpc", "2.0", "id", 1, "method", "initialize", "params", Map.of()));
+
+        final List<Map<String, Object>> responses = mcpApiManager.processBatchRequests(requests);
+
+        assertEquals("Should have 1 response (notification excluded)", 1, responses.size());
+        assertEquals("Response id should be 1", 1, responses.get(0).get("id"));
+    }
+
+    @Test
+    public void testProcessBatchRequests_WithError() {
+        final List<Map<String, Object>> requests =
+                List.of(Map.of("jsonrpc", "2.0", "id", 1, "method", "unknown_method", "params", Map.of()));
+
+        final List<Map<String, Object>> responses = mcpApiManager.processBatchRequests(requests);
+
+        assertEquals("Should have 1 response", 1, responses.size());
+        assertNotNull("Response should have error", responses.get(0).get("error"));
+    }
+
+    @Test
+    public void testProcessBatchRequests_WithInvalidRequest() {
+        final List<Map<String, Object>> requests = new ArrayList<>();
+        requests.add(Map.of("jsonrpc", "1.0", "id", 1, "method", "initialize"));
+
+        final List<Map<String, Object>> responses = mcpApiManager.processBatchRequests(requests);
+
+        assertEquals("Should have 1 error response", 1, responses.size());
+        assertNotNull("Response should have error", responses.get(0).get("error"));
+    }
+
+    // ==================== initialize protocol negotiation tests ====================
+
+    @Test
+    public void testHandleInitialize_NegotiateSupportedVersion() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("protocolVersion", "2024-11-05");
+        final Map<String, Object> result = mcpApiManager.handleInitialize(params);
+        assertEquals("Should echo back supported version", "2024-11-05", result.get("protocolVersion"));
+    }
+
+    @Test
+    public void testHandleInitialize_FallbackUnsupportedVersion() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("protocolVersion", "2099-01-01");
+        final Map<String, Object> result = mcpApiManager.handleInitialize(params);
+        assertEquals("Should fall back to latest supported version", "2024-11-05", result.get("protocolVersion"));
+    }
+
+    @Test
+    public void testHandleInitialize_NoParamsUsesLatest() {
+        final Map<String, Object> result = mcpApiManager.handleInitialize(Map.of());
+        assertEquals("Should use latest when no protocolVersion provided", "2024-11-05", result.get("protocolVersion"));
+    }
+
+    @Test
+    public void testHandleInitialize_AcceptsClientInfo() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("protocolVersion", "2024-11-05");
+        params.put("clientInfo", Map.of("name", "test-client", "version", "0.1"));
+        final Map<String, Object> result = mcpApiManager.handleInitialize(params);
+        assertNotNull("Should still produce a result when clientInfo is present", result);
+        assertEquals("2024-11-05", result.get("protocolVersion"));
+    }
+
+    // ==================== completion/complete (Task C) tests ====================
+
+    @Test
+    public void testHandleComplete_AdvancedSearchSort_PrefixFilter() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("ref", Map.of("type", "ref/prompt", "name", "advanced_search"));
+        params.put("argument", Map.of("name", "sort", "value", "score"));
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> result = (Map<String, Object>) mcpApiManager.dispatchRpcMethod("completion/complete", params);
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> completion = (Map<String, Object>) result.get("completion");
+        @SuppressWarnings("unchecked")
+        final List<String> values = (List<String>) completion.get("values");
+        assertEquals("Should return 2 score entries", 2, values.size());
+        assertTrue(values.contains("score.desc"));
+        assertTrue(values.contains("score.asc"));
+        assertEquals(false, completion.get("hasMore"));
+    }
+
+    @Test
+    public void testHandleComplete_AdvancedSearchSort_EmptyValueReturnsAll() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("ref", Map.of("type", "ref/prompt", "name", "advanced_search"));
+        params.put("argument", Map.of("name", "sort", "value", ""));
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> result = (Map<String, Object>) mcpApiManager.dispatchRpcMethod("completion/complete", params);
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> completion = (Map<String, Object>) result.get("completion");
+        @SuppressWarnings("unchecked")
+        final List<String> values = (List<String>) completion.get("values");
+        assertEquals("Empty prefix should return all 6 sort values", 6, values.size());
+    }
+
+    @Test
+    public void testHandleComplete_AdvancedSearchNum_EmptyValues() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("ref", Map.of("type", "ref/prompt", "name", "advanced_search"));
+        params.put("argument", Map.of("name", "num", "value", "1"));
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> result = (Map<String, Object>) mcpApiManager.dispatchRpcMethod("completion/complete", params);
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> completion = (Map<String, Object>) result.get("completion");
+        @SuppressWarnings("unchecked")
+        final List<String> values = (List<String>) completion.get("values");
+        assertTrue("num argument should produce no completions", values.isEmpty());
+        assertEquals(false, completion.get("hasMore"));
+    }
+
+    @Test
+    public void testHandleComplete_UnknownPromptName() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("ref", Map.of("type", "ref/prompt", "name", "unknown_prompt"));
+        params.put("argument", Map.of("name", "query", "value", "hello"));
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> result = (Map<String, Object>) mcpApiManager.dispatchRpcMethod("completion/complete", params);
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> completion = (Map<String, Object>) result.get("completion");
+        @SuppressWarnings("unchecked")
+        final List<String> values = (List<String>) completion.get("values");
+        assertTrue("Unknown prompt should produce no completions", values.isEmpty());
+    }
+
+    @Test
+    public void testHandleComplete_RefResourceReturnsEmpty() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("ref", Map.of("type", "ref/resource", "uri", "fess://doc/123"));
+        params.put("argument", Map.of("name", "doc_id", "value", "abc"));
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> result = (Map<String, Object>) mcpApiManager.dispatchRpcMethod("completion/complete", params);
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> completion = (Map<String, Object>) result.get("completion");
+        @SuppressWarnings("unchecked")
+        final List<String> values = (List<String>) completion.get("values");
+        assertTrue("ref/resource should produce no completions", values.isEmpty());
+    }
+
+    @Test
+    public void testHandleComplete_UnknownRefTypeReturnsEmpty() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("ref", Map.of("type", "ref/unknown"));
+        params.put("argument", Map.of("name", "x", "value", "y"));
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> result = (Map<String, Object>) mcpApiManager.dispatchRpcMethod("completion/complete", params);
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> completion = (Map<String, Object>) result.get("completion");
+        @SuppressWarnings("unchecked")
+        final List<String> values = (List<String>) completion.get("values");
+        assertTrue("Unknown ref.type should produce no completions", values.isEmpty());
+    }
+
+    // ==================== Regression: logging/setLevel removed ====================
+
+    @Test
+    public void testDispatchRpcMethod_LoggingSetLevel_IsMethodNotFound() {
+        // Regression: logging capability and logging/setLevel handler were removed.
+        // The server must now reject logging/setLevel with MethodNotFound.
+        try {
+            mcpApiManager.dispatchRpcMethod("logging/setLevel", Map.of("level", "debug"));
+            fail("Should have thrown McpApiException for removed method logging/setLevel");
+        } catch (final McpApiException e) {
+            assertEquals("Should be MethodNotFound", ErrorCode.MethodNotFound, e.getCode());
+        }
+    }
+
+    // ==================== initialize protocolVersion type robustness ====================
+
+    @Test
+    public void testHandleInitialize_NonStringProtocolVersionNumberFallsBackToLatest() {
+        // Non-String protocolVersion (e.g., numeric) must be treated as unsupported
+        // and the server should fall back to the latest supported version.
+        final Map<String, Object> params = new HashMap<>();
+        params.put("protocolVersion", Integer.valueOf(20241105));
+        final Map<String, Object> result = mcpApiManager.handleInitialize(params);
+        assertEquals("Non-String protocolVersion should fall back to latest", "2024-11-05", result.get("protocolVersion"));
+    }
+
+    @Test
+    public void testHandleInitialize_NonStringProtocolVersionMapFallsBackToLatest() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("protocolVersion", Map.of("major", 2024));
+        final Map<String, Object> result = mcpApiManager.handleInitialize(params);
+        assertEquals("Map-typed protocolVersion should fall back to latest", "2024-11-05", result.get("protocolVersion"));
+    }
+
+    @Test
+    public void testHandleInitialize_EmptyStringProtocolVersionFallsBackToLatest() {
+        final Map<String, Object> params = new HashMap<>();
+        params.put("protocolVersion", "");
+        final Map<String, Object> result = mcpApiManager.handleInitialize(params);
+        assertEquals("Empty protocolVersion should fall back to latest", "2024-11-05", result.get("protocolVersion"));
+    }
+
+    @Test
+    public void testHandleInitialize_ClientInfoNotEchoed() {
+        // The server must NOT retain or echo clientInfo in the initialize response.
+        final Map<String, Object> params = new HashMap<>();
+        params.put("protocolVersion", "2024-11-05");
+        params.put("clientInfo", Map.of("name", "test-client", "version", "0.1"));
+        final Map<String, Object> result = mcpApiManager.handleInitialize(params);
+        assertFalse("Response must not include clientInfo key", result.containsKey("clientInfo"));
+        // serverInfo must be the fixed server identity, not the client's
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> serverInfo = (Map<String, Object>) result.get("serverInfo");
+        assertEquals("serverInfo.name must be server identity", "fess-mcp-server", serverInfo.get("name"));
+    }
+
+    // ==================== completion/complete robustness ====================
+
+    @Test
+    public void testHandleComplete_NullArgumentValue_TreatedAsEmpty() {
+        // When argument.value is absent (null), treat it like an empty prefix.
+        // For the sort completion this should return all static SORT_VALUES.
+        final Map<String, Object> params = new HashMap<>();
+        params.put("ref", Map.of("type", "ref/prompt", "name", "advanced_search"));
+        final Map<String, Object> arg = new HashMap<>();
+        arg.put("name", "sort");
+        // intentionally no "value" key
+        params.put("argument", arg);
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> result = (Map<String, Object>) mcpApiManager.dispatchRpcMethod("completion/complete", params);
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> completion = (Map<String, Object>) result.get("completion");
+        @SuppressWarnings("unchecked")
+        final List<String> values = (List<String>) completion.get("values");
+        assertEquals("Null value should behave like empty prefix and return all 6 sort values", 6, values.size());
+    }
+
+    @Test
+    public void testHandleComplete_EmptyArgumentMap_BasicSearchQuery() {
+        // argument is an empty map: name is null, so no handler matches for basic_search
+        // (handler branches on argName.equals("query")). Expect empty completion, no DI access.
+        final Map<String, Object> params = new HashMap<>();
+        params.put("ref", Map.of("type", "ref/prompt", "name", "basic_search"));
+        params.put("argument", Map.of());
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> result = (Map<String, Object>) mcpApiManager.dispatchRpcMethod("completion/complete", params);
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> completion = (Map<String, Object>) result.get("completion");
+        @SuppressWarnings("unchecked")
+        final List<String> values = (List<String>) completion.get("values");
+        assertTrue("Empty argument map should yield no completions without touching DI", values.isEmpty());
+        assertEquals(0, ((Number) completion.get("total")).intValue());
+        assertEquals(false, completion.get("hasMore"));
+    }
+
+    @Test
+    public void testHandleComplete_SortPrefix_NoMatch() {
+        // A prefix that matches no SORT_VALUES must yield an empty list (not all values).
+        final Map<String, Object> params = new HashMap<>();
+        params.put("ref", Map.of("type", "ref/prompt", "name", "advanced_search"));
+        params.put("argument", Map.of("name", "sort", "value", "zzz"));
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> result = (Map<String, Object>) mcpApiManager.dispatchRpcMethod("completion/complete", params);
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> completion = (Map<String, Object>) result.get("completion");
+        @SuppressWarnings("unchecked")
+        final List<String> values = (List<String>) completion.get("values");
+        assertTrue("Unknown prefix should produce empty values", values.isEmpty());
+        assertEquals(false, completion.get("hasMore"));
+    }
+
+    @Test
+    public void testBuildCompletionResult_Caps100_ValuesAndReflectsHasMore() {
+        // buildCompletionResult must cap values at 100 and ensure hasMore reflects
+        // the fact that the reported total exceeds the capped list size.
+        final List<String> over = new ArrayList<>();
+        for (int i = 0; i < 150; i++) {
+            over.add("v" + i);
+        }
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> result = (Map<String, Object>) mcpApiManager.buildCompletionResult(over, 150, false).get("completion");
+        @SuppressWarnings("unchecked")
+        final List<String> values = (List<String>) result.get("values");
+        assertEquals("Values must be capped at 100", 100, values.size());
+        assertEquals("Total should be the original total", 150, ((Number) result.get("total")).intValue());
+        assertEquals("hasMore must be true when total exceeds cap", true, result.get("hasMore"));
+    }
+
+    @Test
+    public void testBuildCompletionResult_ExactlyAtCap_HasMoreFalse() {
+        final List<String> exact = new ArrayList<>();
+        for (int i = 0; i < 100; i++) {
+            exact.add("v" + i);
+        }
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> result = (Map<String, Object>) mcpApiManager.buildCompletionResult(exact, 100, false).get("completion");
+        @SuppressWarnings("unchecked")
+        final List<String> values = (List<String>) result.get("values");
+        assertEquals("Exactly 100 values must remain 100", 100, values.size());
+        assertEquals(100, ((Number) result.get("total")).intValue());
+        assertEquals("hasMore must be false when total equals capped size", false, result.get("hasMore"));
+    }
+
+    @Test
+    public void testBuildCompletionResult_TotalLessThanValues_NormalizesTotal() {
+        // Defensive: if caller passes total < values.size(), total should be normalized
+        // to at least values.size() so the envelope remains consistent.
+        final List<String> three = List.of("a", "b", "c");
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> result = (Map<String, Object>) mcpApiManager.buildCompletionResult(three, 0, false).get("completion");
+        assertEquals("Total must be at least the number of values", 3, ((Number) result.get("total")).intValue());
+    }
+
+    // ==================== invokeSuggest num resolution / cap ====================
+
+    @Test
+    public void testResolveSuggestSize_NullUsesDefault() {
+        assertEquals("null num should default to 10", 10, mcpApiManager.resolveSuggestSize(null, 100));
+    }
+
+    @Test
+    public void testResolveSuggestSize_Zero_UsesDefault() {
+        assertEquals("num=0 should fall back to default 10", 10, mcpApiManager.resolveSuggestSize(Integer.valueOf(0), 100));
+    }
+
+    @Test
+    public void testResolveSuggestSize_Negative_UsesDefault() {
+        assertEquals("negative num should fall back to default 10", 10, mcpApiManager.resolveSuggestSize(Integer.valueOf(-5), 100));
+    }
+
+    @Test
+    public void testResolveSuggestSize_OverMax_CappedAtMax() {
+        assertEquals("num exceeding max must be capped", 100, mcpApiManager.resolveSuggestSize(Integer.valueOf(500), 100));
+    }
+
+    @Test
+    public void testResolveSuggestSize_AtMax_Preserved() {
+        assertEquals("num equal to max must be preserved", 100, mcpApiManager.resolveSuggestSize(Integer.valueOf(100), 100));
+    }
+
+    @Test
+    public void testResolveSuggestSize_WithinRange_Preserved() {
+        assertEquals("num within range must be preserved", 25, mcpApiManager.resolveSuggestSize(Integer.valueOf(25), 100));
+    }
+
+    @Test
+    public void testResolveSuggestSize_StringNumericInput_Parsed() {
+        assertEquals("numeric String must be parsed", 7, mcpApiManager.resolveSuggestSize("7", 100));
+    }
+
+    @Test
+    public void testResolveSuggestSize_StringNonNumericInput_UsesDefault() {
+        assertEquals("non-numeric String must default to 10", 10, mcpApiManager.resolveSuggestSize("abc", 100));
+    }
+
+    @Test
+    public void testResolveSuggestSize_StringOverMax_CappedAtMax() {
+        assertEquals("numeric String exceeding max must be capped", 100, mcpApiManager.resolveSuggestSize("99999", 100));
+    }
+
+    @Test
+    public void testResolveSuggestSize_LongNumber_TruncatedToInt() {
+        assertEquals("Long within range must be preserved via intValue", 42, mcpApiManager.resolveSuggestSize(Long.valueOf(42L), 100));
+    }
+
+    @Test
+    public void testCreateErrorResponse() {
+        final Map<String, Object> response = mcpApiManager.createErrorResponse(1, ErrorCode.MethodNotFound, "test error");
+
+        assertEquals("2.0", response.get("jsonrpc"));
+        assertEquals(1, response.get("id"));
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> error = (Map<String, Object>) response.get("error");
+        assertEquals(-32601, error.get("code"));
+        assertEquals("test error", error.get("message"));
     }
 }
