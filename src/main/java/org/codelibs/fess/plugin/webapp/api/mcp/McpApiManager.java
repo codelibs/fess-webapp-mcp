@@ -502,11 +502,41 @@ public class McpApiManager extends BaseApiManager {
 
     /**
      * Returns the configured authentication mode.
+     * <p>
+     * Delegates to {@link #getSystemProperty(String, String)} rather than calling
+     * {@code ComponentUtil.getFessConfig().getSystemProperty(...)} directly, so a container-free
+     * test can stub that one primitive and drive this method's real body -- including its
+     * literal {@code "mcp.auth.mode"} key and {@link #AUTH_MODE_NONE} default argument -- without
+     * needing a live DI container. Every test double in this suite otherwise overrides
+     * {@code getAuthMode()} itself, which would leave this method's own body permanently
+     * unexercised.
+     * </p>
      *
      * @return {@code mcp.auth.mode}'s value; {@link #AUTH_MODE_NONE} when unset
      */
     protected String getAuthMode() {
-        return ComponentUtil.getFessConfig().getSystemProperty("mcp.auth.mode", AUTH_MODE_NONE);
+        return getSystemProperty("mcp.auth.mode", AUTH_MODE_NONE);
+    }
+
+    /**
+     * Reads a String-valued Fess system property.
+     * <p>
+     * Isolated so {@link #getAuthMode()} itself can be exercised container-free: this is the
+     * only place in that call chain that touches {@code ComponentUtil}. Deliberately narrow --
+     * {@link #isEnabled()}, {@link #getRequestMaxBytes()}, {@link #getRateLimitPerMinute()}, and
+     * {@link #getAllowedOrigins()} each read a different-typed system property
+     * ({@code getSystemPropertyAsBoolean}/{@code getSystemPropertyAsInt}) and already have their
+     * own established, reviewed container-free test doubles (each test file overrides the
+     * higher-level method directly); routing all of them through property-level seams here would
+     * touch that already-approved test infrastructure for no benefit this task needs.
+     * </p>
+     *
+     * @param key the system property key
+     * @param defaultValue the value to return when the property is unset
+     * @return the property's value, or {@code defaultValue} when unset
+     */
+    protected String getSystemProperty(final String key, final String defaultValue) {
+        return ComponentUtil.getFessConfig().getSystemProperty(key, defaultValue);
     }
 
     /**

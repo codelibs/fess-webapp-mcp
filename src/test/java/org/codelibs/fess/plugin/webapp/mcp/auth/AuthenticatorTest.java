@@ -133,6 +133,39 @@ public class AuthenticatorTest {
         }
     }
 
+    /**
+     * Test double for {@link #testGetAuthModeRealBodyDefaultsToNoneWhenPropertyUnset}
+     * specifically: unlike {@link TestManager}, this class does <em>not</em> override
+     * {@code getAuthMode()} itself. Overriding only {@link #getSystemProperty(String, String)}
+     * -- the one primitive {@code getAuthMode()}'s real body touches {@code ComponentUtil}
+     * through -- lets that real body run container-free, so its literal key and default-value
+     * argument are actually exercised instead of permanently bypassed.
+     */
+    static class SystemPropertyCapturingManager extends McpApiManager {
+        String capturedKey;
+        String capturedDefaultValue;
+
+        @Override
+        protected String getSystemProperty(final String key, final String defaultValue) {
+            // Simulates an unset property: real FessConfig#getSystemProperty returns
+            // defaultValue precisely when the key is unset, so echoing it back here is a
+            // faithful stand-in without needing a live container.
+            capturedKey = key;
+            capturedDefaultValue = defaultValue;
+            return defaultValue;
+        }
+
+        /** Exposes the protected {@code getAuthMode()} seam, for the same reason as {@code TestManager#resolveAuthenticator()}. */
+        String resolveAuthMode() {
+            return getAuthMode();
+        }
+
+        /** Exposes the protected {@code getAuthenticator()} seam, for the same reason as above. */
+        McpAuthenticator resolveAuthenticator() {
+            return getAuthenticator();
+        }
+    }
+
     private void post(final TestManager manager, final String body, final Map<String, String> headers) throws Exception {
         manager.body = body;
         final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("POST", "/mcp");
@@ -381,6 +414,26 @@ public class AuthenticatorTest {
         // selection logic.
         final TestManager manager = new TestManager();
         manager.authMode = McpApiManager.AUTH_MODE_NONE;
+        assertTrue(manager.resolveAuthenticator() instanceof NoneAuthenticator);
+    }
+
+    @Test
+    public void testGetAuthModeRealBodyDefaultsToNoneWhenPropertyUnset() {
+        // The two tests above still don't touch the production fallback EXPRESSION --
+        // getSystemProperty("mcp.auth.mode", AUTH_MODE_NONE) -- because getAuthMode() itself is
+        // always overridden elsewhere in this file. This test overrides only the ComponentUtil-
+        // touching primitive one level below, so getAuthMode()'s real body actually runs: a
+        // regression that passes a different literal as either argument at that call site would
+        // survive every other test in this suite and flip the default every unauthenticated
+        // deployment relies on.
+        final SystemPropertyCapturingManager manager = new SystemPropertyCapturingManager();
+
+        final String authMode = manager.resolveAuthMode();
+
+        assertEquals("mcp.auth.mode", manager.capturedKey, "getAuthMode() must read this exact property key");
+        assertEquals(McpApiManager.AUTH_MODE_NONE, manager.capturedDefaultValue,
+                "getAuthMode() must pass AUTH_MODE_NONE as the default, not a different or re-typed literal");
+        assertEquals("none", authMode);
         assertTrue(manager.resolveAuthenticator() instanceof NoneAuthenticator);
     }
 
