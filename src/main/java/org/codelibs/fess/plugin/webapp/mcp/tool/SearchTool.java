@@ -103,10 +103,14 @@ public class SearchTool implements McpTool {
         hit.put("type", "object");
         hit.put("properties", Map.of("title", Map.of("type", "string"), "url", Map.of("type", "string"), "score", Map.of("type", "number"),
                 "content_description", Map.of("type", "string")));
-        // Only title and url are always present in a Fess document item; score is absent when
-        // rank fusion has no BM25 branch (e.g. kNN-only semantic search) and content_description
-        // is only populated when the document has highlightable content.
-        hit.put("required", List.of("title", "url"));
+        // No field is guaranteed present on every Fess document item: title/url can be
+        // entirely absent from _source for a malformed or partially-indexed document, and score
+        // is absent when rank fusion has no BM25 branch (e.g. kNN-only semantic search).
+        // content_description is kept optional out of the same caution, even though
+        // ViewHelper.getContentDescription() never returns null on the current single-searcher
+        // path (it falls back to StringUtil.EMPTY): that guarantee is not verified across every
+        // rank-fusion/hybrid search path.
+        hit.put("required", List.of());
         hit.put("additionalProperties", false);
 
         final Map<String, Object> schema = new LinkedHashMap<>();
@@ -181,23 +185,25 @@ public class SearchTool implements McpTool {
      * <p>
      * Only the fields declared by {@code getOutputSchema()} are copied over -- notably, the
      * (possibly large, possibly truncated) raw {@code content} field is deliberately left out,
-     * since the text block already carries a formatted view of it. {@code title} and {@code url}
-     * are the schema's {@code required} fields, so -- exactly like {@link #createDocumentContent}
-     * already does for the text block -- a missing key falls back to {@code ""} rather than being
-     * omitted: a raw Fess document can have its {@code title}/{@code url} {@code _source} field
-     * entirely unset, and {@code required} must hold regardless. {@code score} and
-     * {@code content_description} are optional and are omitted, rather than copied as
-     * {@code null}, when Fess did not populate them.
+     * since the text block already carries a formatted view of it. None of {@code title},
+     * {@code url}, {@code score}, or {@code content_description} is guaranteed present on a raw
+     * Fess document item (a document's {@code _source} can genuinely lack {@code title}/
+     * {@code url} entirely, not just be blank), so all four are copied with
+     * {@link #putIfNotNull} and omitted -- never fabricated as {@code ""} or copied as
+     * {@code null} -- when Fess did not populate them. This intentionally diverges from
+     * {@link #createDocumentContent}, which still falls back to {@code ""} for the
+     * human-readable text block: that pre-existing fallback is fine for a line of prose, but
+     * fabricating a value here would make the schema's guarantees depend on a fallback instead
+     * of on what the data actually contains.
      * </p>
      *
      * @param doc the processed document item, as returned by {@link #processDocumentItems}
-     * @return a new map with only the schema's declared fields; {@code title} and {@code url} are
-     *         always present
+     * @return a new map with only the schema's declared fields that Fess actually populated
      */
     protected Map<String, Object> buildHit(final Map<String, Object> doc) {
         final Map<String, Object> hit = new LinkedHashMap<>();
-        hit.put("title", String.valueOf(doc.getOrDefault("title", "")));
-        hit.put("url", String.valueOf(doc.getOrDefault("url", "")));
+        putIfNotNull(hit, "title", doc.get("title"));
+        putIfNotNull(hit, "url", doc.get("url"));
         putIfNotNull(hit, "score", doc.get("score"));
         putIfNotNull(hit, "content_description", doc.get("content_description"));
         return hit;

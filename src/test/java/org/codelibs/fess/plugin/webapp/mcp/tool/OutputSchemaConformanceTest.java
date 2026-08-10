@@ -132,8 +132,11 @@ public class OutputSchemaConformanceTest {
         assertTrue(properties.containsKey("hits"));
         final Map<String, Object> hit = (Map<String, Object>) ((Map<String, Object>) properties.get("hits")).get("items");
         final List<String> required = (List<String>) hit.getOrDefault("required", List.of());
+        assertFalse(required.contains("title"), "title can be entirely absent from a Fess document's _source");
+        assertFalse(required.contains("url"), "url can be entirely absent from a Fess document's _source");
         assertFalse(required.contains("score"), "score is absent for some Fess results (e.g. non-finite relevance scores)");
-        assertFalse(required.contains("content_description"), "content_description is not guaranteed by every search path");
+        assertFalse(required.contains("content_description"),
+                "content_description is kept optional out of caution across rank-fusion/hybrid search paths");
         assertFalse(required.contains("doc_id"), "search's own responseFields never requests doc_id");
     }
 
@@ -155,7 +158,7 @@ public class OutputSchemaConformanceTest {
     @Test
     @SuppressWarnings("unchecked")
     public void testSearchResultConformsToItsOwnSchema_MinimalHit() {
-        // A hit with only the mandatory fields must still validate.
+        // A hit carrying only title and url (no score/content_description) must still validate.
         final Map<String, Object> result = searchToolReturning(List.of(Map.of("title", "t", "url", "https://example.com/")))
                 .call(Map.of("q", "x"), new McpCallContext());
 
@@ -168,7 +171,27 @@ public class OutputSchemaConformanceTest {
         assertEquals(1, hits.size());
         assertFalse(hits.get(0).containsValue(null), "nulls must be stripped before serialization");
         assertEquals(Map.of("title", "t", "url", "https://example.com/"), hits.get(0),
-                "no additional properties beyond the two mandatory fields");
+                "no additional properties beyond the two present fields");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testSearchResultOmitsGenuinelyAbsentTitleAndUrl() {
+        // A raw Fess document item can lack the title/url keys entirely (not merely carry a
+        // null or blank value) -- e.g. a malformed or partially-indexed document. The schema
+        // does not require them, so buildHit() must omit the keys rather than fabricate "".
+        final Map<String, Object> doc = new HashMap<>();
+        doc.put("score", 3.0f);
+        // Deliberately no "title" or "url" key at all.
+
+        final Map<String, Object> result = searchToolReturning(List.of(doc)).call(Map.of("q", "x"), new McpCallContext());
+
+        assertConforms(new SearchTool().getOutputSchema(), result.get("structuredContent"), "structuredContent");
+        final Map<String, Object> structured = (Map<String, Object>) result.get("structuredContent");
+        final Map<String, Object> hit = ((List<Map<String, Object>>) structured.get("hits")).get(0);
+        assertFalse(hit.containsKey("title"), "an absent title must not be fabricated as \"\"");
+        assertFalse(hit.containsKey("url"), "an absent url must not be fabricated as \"\"");
+        assertEquals(Map.of("score", 3.0f), hit, "only the field Fess actually provided is present");
     }
 
     @Test
