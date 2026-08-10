@@ -102,4 +102,23 @@ public class RateLimiterTest {
         assertEquals(1, limiter.buckets.size(), "the sweep triggered by exceeding the bound must drop every stale-window entry");
         assertTrue(limiter.buckets.containsKey("new-key"));
     }
+
+    @Test
+    public void testSweepRunsAtMostOncePerWindowEvenWhenThresholdStaysCrossed() {
+        // Reviewer finding (Important 1): once genuine cardinality exceeds the bound within a
+        // single window, a stale-window sweep evicts nothing (nothing is stale yet), so without
+        // a last-swept-window guard every subsequent call in that same window would still pay
+        // the full O(n) scan for zero benefit -- a self-amplifying cost under exactly the load a
+        // rate limiter exists to survive.
+        final FakeClockRateLimiter limiter = new FakeClockRateLimiter(1);
+        limiter.minute = 0L;
+        // Every key here is distinct and stays in the same window, so a sweep would never find
+        // anything stale to evict; several of these calls still cross the MAX_TRACKED_KEYS
+        // threshold (the last 5), which is exactly the repeated-crossing scenario the guard
+        // must collapse to a single sweep.
+        for (int i = 0; i < RateLimiter.MAX_TRACKED_KEYS + 5; i++) {
+            limiter.tryAcquire("key-" + i);
+        }
+        assertEquals(1, limiter.sweepCount, "the sweep must run at most once per window, not once per call once the threshold is crossed");
+    }
 }

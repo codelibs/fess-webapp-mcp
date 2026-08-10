@@ -157,6 +157,20 @@ public class McpResponseWriterTest {
     }
 
     @Test
+    public void testRetryAfterHeaderIsAbsentWhenDataLacksRetryAfterSecondsKey() {
+        // Distinct from testRetryAfterHeaderIsAbsentWithoutRetryAfterSecondsData: that test's
+        // error carries no data at all (error.getData() == null), so it never reaches the
+        // Retry-After branch's own guard. This one uses the exact shape
+        // testErrorDataIsEmitted does -- data IS present, but as {supported, requested}, with no
+        // retryAfterSeconds key -- to pin the inner guard specifically.
+        final MockletHttpServletResponseImpl response = response();
+        writer.writeError(response, 3, true, new McpError(400, ErrorCode.UnsupportedProtocolVersion, "unsupported",
+                Map.of("supported", java.util.List.of("2026-07-28"), "requested", "2025-06-18")));
+
+        assertNull(response.getHeader("Retry-After"), "data present without a retryAfterSeconds key must not set the header");
+    }
+
+    @Test
     public void testNotificationGets202WithNoBody() {
         final MockletHttpServletResponseImpl response = response();
         writer.writeAccepted(response);
