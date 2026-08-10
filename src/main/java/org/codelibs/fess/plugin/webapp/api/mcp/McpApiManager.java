@@ -215,8 +215,10 @@ public class McpApiManager extends BaseApiManager {
         final boolean oauthRequestedButUnusable = AUTH_MODE_OAUTH.equals(authMode) && !getOAuthAuthenticator().isUsable();
         if (oauthRequestedButUnusable && logger.isErrorEnabled()) {
             logger.error("[MCP] mcp.auth.mode=oauth but the configuration is not usable - falling back to none. "
-                    + "mcp.oauth.issuer must be set to the authorization server's issuer URL, and mcp.oauth.audience, "
-                    + "if set, must end in /mcp (the only resource path this server's metadata endpoint serves).");
+                    + "mcp.oauth.issuer must be set to the authorization server's issuer URL; mcp.oauth.audience must be "
+                    + "set (it is REQUIRED for oauth mode -- it is never derived from the request's Host header) and must "
+                    + "end in /mcp (the only resource path this server's metadata endpoint serves); and mcp.oauth.jwks.uri "
+                    + "must be set to the authorization server's JWKS endpoint.");
         }
         final boolean authenticated =
                 AUTH_MODE_FESS_TOKEN.equals(authMode) || (AUTH_MODE_OAUTH.equals(authMode) && !oauthRequestedButUnusable);
@@ -478,7 +480,7 @@ public class McpApiManager extends BaseApiManager {
      *         may make per minute; {@code 0} disables the limiter
      */
     protected int getRateLimitPerMinute() {
-        return ComponentUtil.getFessConfig().getSystemPropertyAsInt("mcp.rate.limit.per.minute", 60);
+        return getSystemPropertyAsInt("mcp.rate.limit.per.minute", 60);
     }
 
     /**
@@ -582,13 +584,15 @@ public class McpApiManager extends BaseApiManager {
      * Reads a String-valued Fess system property.
      * <p>
      * Isolated so {@link #getAuthMode()} itself can be exercised container-free: this is the
-     * only place in that call chain that touches {@code ComponentUtil}. Deliberately narrow --
-     * {@link #isEnabled()}, {@link #getRequestMaxBytes()}, {@link #getRateLimitPerMinute()}, and
-     * {@link #getAllowedOrigins()} each read a different-typed system property
-     * ({@code getSystemPropertyAsBoolean}/{@code getSystemPropertyAsInt}) and already have their
-     * own established, reviewed container-free test doubles (each test file overrides the
-     * higher-level method directly); routing all of them through property-level seams here would
-     * touch that already-approved test infrastructure for no benefit this task needs.
+     * only place in that call chain that touches {@code ComponentUtil}. {@link #getAllowedOrigins()}
+     * is the one remaining consumer of a different-typed system property that is not routed
+     * through a property-level seam ({@link #getSystemPropertyAsBoolean(String, boolean)} and
+     * {@link #getSystemPropertyAsInt(String, int)} cover the rest -- see those seams' own
+     * Javadoc); it already has its own established, reviewed container-free test double (each
+     * test file overrides {@code getAllowedOrigins()} directly), and its parsing (comma-split,
+     * trim, filter blanks) is more than a bare default-value passthrough, so routing it through
+     * {@link #getSystemProperty(String, String)} here would not exercise anything {@code
+     * getAllowedOrigins()}'s own test does not already cover.
      * </p>
      *
      * @param key the system property key
@@ -597,6 +601,43 @@ public class McpApiManager extends BaseApiManager {
      */
     protected String getSystemProperty(final String key, final String defaultValue) {
         return ComponentUtil.getFessConfig().getSystemProperty(key, defaultValue);
+    }
+
+    /**
+     * Reads a boolean-valued Fess system property.
+     * <p>
+     * Isolated the same way {@link #getSystemProperty(String, String)} is for {@link
+     * #getAuthMode()}: {@link #isEnabled()}'s real (non-overridden) body is otherwise never
+     * exercised by this suite (every test double overrides {@code isEnabled()} wholesale), so
+     * neither its literal {@code "mcp.enabled"} key nor its {@code true} default is ever actually
+     * executed -- a typo in the key, or a flipped default, would silently disable the endpoint
+     * everywhere and pass every test.
+     * </p>
+     *
+     * @param key the system property key
+     * @param defaultValue the value to return when the property is unset
+     * @return the property's value, or {@code defaultValue} when unset
+     */
+    protected boolean getSystemPropertyAsBoolean(final String key, final boolean defaultValue) {
+        return ComponentUtil.getFessConfig().getSystemPropertyAsBoolean(key, defaultValue);
+    }
+
+    /**
+     * Reads an int-valued Fess system property.
+     * <p>
+     * Isolated the same way {@link #getSystemProperty(String, String)} is for {@link
+     * #getAuthMode()}, closing the same gap for {@link #getRequestMaxBytes()} and {@link
+     * #getRateLimitPerMinute()}: each test double in this suite otherwise overrides the
+     * higher-level method directly, so this is the only seam that lets either method's real body
+     * -- including its literal key and default-value argument -- actually run container-free.
+     * </p>
+     *
+     * @param key the system property key
+     * @param defaultValue the value to return when the property is unset
+     * @return the property's value, or {@code defaultValue} when unset
+     */
+    protected int getSystemPropertyAsInt(final String key, final int defaultValue) {
+        return ComponentUtil.getFessConfig().getSystemPropertyAsInt(key, defaultValue);
     }
 
     /**
@@ -659,7 +700,7 @@ public class McpApiManager extends BaseApiManager {
      */
     protected boolean isEnabled() {
         // getSystemPropertyAsBoolean treats anything other than "true" as false.
-        return ComponentUtil.getFessConfig().getSystemPropertyAsBoolean("mcp.enabled", true);
+        return getSystemPropertyAsBoolean("mcp.enabled", true);
     }
 
     /**
@@ -668,7 +709,7 @@ public class McpApiManager extends BaseApiManager {
      * @return the limit in bytes
      */
     protected int getRequestMaxBytes() {
-        return ComponentUtil.getFessConfig().getSystemPropertyAsInt("mcp.request.max.bytes", 1048576);
+        return getSystemPropertyAsInt("mcp.request.max.bytes", 1048576);
     }
 
     /**

@@ -186,14 +186,25 @@ public class McpMetadataApiManagerTest {
     }
 
     // ------------------------------------------------------------------
-    // Canonical URI: same derivation as OAuthResourceServerAuthenticator, respects trusted proxies.
+    // Canonical URI: mcp.oauth.audience is now REQUIRED (C1) -- this manager must refuse to
+    // derive the served "resource" field from the request at all, the same way
+    // OAuthResourceServerAuthenticator#isUsable() now refuses to select this mode without an
+    // explicit audience. Before C1, these two scenarios were pinned as 200-with-a-derived-
+    // resource-field; that was itself part of the vulnerability (an unauthenticated caller could
+    // make this document reflect an attacker-chosen Host), so the fix changes what these tests
+    // assert, not the production code that would keep them passing.
     // ------------------------------------------------------------------
 
     @Test
-    public void testResourceFieldDerivedFromRequestWhenNoAudienceConfigured() throws Exception {
+    public void testMetadataIs404WhenOauthModeHasNoAudienceConfigured() throws Exception {
+        // C1: was testResourceFieldDerivedFromRequestWhenNoAudienceConfigured, which pinned the
+        // Host-derived "resource" field as correct behaviour -- exactly the hole C1 closed. This
+        // manager reads mcp.oauth.audience independently of OAuthResourceServerAuthenticator, so
+        // it must independently refuse here too (see McpMetadataApiManager#process).
         final TestManager manager = new TestManager();
         manager.properties.put("mcp.auth.mode", "oauth");
         manager.properties.put("mcp.oauth.issuer", "https://idp.example.com");
+        // mcp.oauth.audience intentionally left unset.
         final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("GET", "/.well-known/oauth-protected-resource/mcp");
         request.setScheme("https");
         request.setServerName("derived.example.com");
@@ -202,12 +213,15 @@ public class McpMetadataApiManagerTest {
 
         manager.process(request, response, null);
 
-        final Map<String, Object> body = Json.parseObject(McpHttpTestSupport.bodyOf(response));
-        assertEquals("https://derived.example.com/mcp", body.get("resource"));
+        assertEquals(404, response.getStatus());
     }
 
     @Test
-    public void testUntrustedForwardedHostDoesNotChangeTheServedResourceField() throws Exception {
+    public void testMetadataIs404WhenNoAudienceConfiguredEvenWithForwardedHostHeaders() throws Exception {
+        // C1: was testUntrustedForwardedHostDoesNotChangeTheServedResourceField, which asserted
+        // the served "resource" field fell back to the internal (non-forwarded) host. That is no
+        // longer reachable at all: with mcp.oauth.audience unset, this manager now refuses before
+        // ever calling resolveCanonicalUri, regardless of what any header (forwarded or not) says.
         final TestManager manager = new TestManager();
         manager.properties.put("mcp.auth.mode", "oauth");
         manager.properties.put("mcp.oauth.issuer", "https://idp.example.com");
@@ -223,7 +237,27 @@ public class McpMetadataApiManagerTest {
 
         manager.process(request, response, null);
 
+        assertEquals(404, response.getStatus());
+    }
+
+    @Test
+    public void testConfiguredAudienceResourceFieldIgnoresForeignHostHeader() throws Exception {
+        // C1 positive control / regression guard for this manager's own call to
+        // CanonicalResourceUri.resolve(): once an operator has pinned mcp.oauth.audience, the
+        // served "resource" field must be exactly that value, with zero influence from Host --
+        // not even a direct (non-forwarded) Host claiming to be a completely different resource.
+        final TestManager manager = oauthManager(); // issuer + audience=https://fess.example.com/mcp
+        final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("GET", "/.well-known/oauth-protected-resource/mcp");
+        request.setScheme("https");
+        request.setServerName("attacker.example.com");
+        request.setServerPort(443);
+        final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
+
+        manager.process(request, response, null);
+
+        assertEquals(200, response.getStatus());
         final Map<String, Object> body = Json.parseObject(McpHttpTestSupport.bodyOf(response));
-        assertEquals("http://internal-host/mcp", body.get("resource"));
+        assertEquals("https://fess.example.com/mcp", body.get("resource"),
+                "the configured audience must win regardless of what Host the caller sends");
     }
 }

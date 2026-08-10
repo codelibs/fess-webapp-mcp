@@ -17,6 +17,7 @@ package org.codelibs.fess.plugin.webapp.api.mcp;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
@@ -422,6 +423,98 @@ public class McpApiManagerHttpTest {
         assertTrue(manager.matches(McpHttpTestSupport.newRequest("POST", "/mcp")));
         assertTrue(manager.matches(McpHttpTestSupport.newRequest("POST", "/mcp/x")));
         assertFalse(manager.matches(McpHttpTestSupport.newRequest("POST", "/mcpfoo")), "startsWith would have matched this");
+    }
+
+    // ------------------------------------------------------------------
+    // I6: isEnabled()/getRequestMaxBytes()/getRateLimitPerMinute()'s real (non-overridden)
+    // bodies. Every test double above overrides these methods wholesale, so neither their
+    // literal system-property key nor their default value is ever actually executed by this
+    // suite -- a typo in a key, or a flipped default, would pass all of them. Mirrors
+    // AuthenticatorTest's SystemPropertyCapturingManager for McpApiManager#getAuthMode(): only
+    // the lowest-level ComponentUtil-touching primitives are overridden, so the real bodies run.
+    // ------------------------------------------------------------------
+
+    /** Test double: overrides only {@code getSystemPropertyAsBoolean}/{@code getSystemPropertyAsInt}, not the higher-level methods. */
+    static class SystemPropertyCapturingManager extends McpApiManager {
+        String capturedBooleanKey;
+        boolean capturedBooleanDefault;
+        String capturedIntKey;
+        int capturedIntDefault;
+
+        @Override
+        protected boolean getSystemPropertyAsBoolean(final String key, final boolean defaultValue) {
+            // Simulates an unset property: real FessConfig#getSystemPropertyAsBoolean returns
+            // defaultValue precisely when the key is unset, so echoing it back here is a
+            // faithful stand-in without needing a live container.
+            capturedBooleanKey = key;
+            capturedBooleanDefault = defaultValue;
+            return defaultValue;
+        }
+
+        @Override
+        protected int getSystemPropertyAsInt(final String key, final int defaultValue) {
+            capturedIntKey = key;
+            capturedIntDefault = defaultValue;
+            return defaultValue;
+        }
+    }
+
+    @Test
+    public void testIsEnabledRealBodyDefaultsToTrueWhenPropertyUnset() {
+        final SystemPropertyCapturingManager manager = new SystemPropertyCapturingManager();
+
+        final boolean enabled = manager.isEnabled();
+
+        assertEquals("mcp.enabled", manager.capturedBooleanKey, "isEnabled() must read this exact property key");
+        assertTrue(manager.capturedBooleanDefault,
+                "isEnabled() must default to true, or a config typo would silently disable the endpoint everywhere");
+        assertTrue(enabled);
+    }
+
+    @Test
+    public void testGetRequestMaxBytesRealBodyReadsExpectedKeyAndDefault() {
+        final SystemPropertyCapturingManager manager = new SystemPropertyCapturingManager();
+
+        final int maxBytes = manager.getRequestMaxBytes();
+
+        assertEquals("mcp.request.max.bytes", manager.capturedIntKey);
+        assertEquals(1_048_576, manager.capturedIntDefault);
+        assertEquals(1_048_576, maxBytes);
+    }
+
+    @Test
+    public void testGetRateLimitPerMinuteRealBodyReadsExpectedKeyAndDefault() {
+        final SystemPropertyCapturingManager manager = new SystemPropertyCapturingManager();
+
+        final int perMinute = manager.getRateLimitPerMinute();
+
+        assertEquals("mcp.rate.limit.per.minute", manager.capturedIntKey);
+        assertEquals(60, manager.capturedIntDefault);
+        assertEquals(60, perMinute);
+    }
+
+    // ------------------------------------------------------------------
+    // I7: getRateLimiter() must cache the built instance on the field, or every request gets a
+    // fresh, un-shared counter and rate limiting is silently disabled. The TestManager double
+    // above overrides getRateLimiter() itself to return a pre-built field, so it never exercises
+    // the real synchronized-lazy-init body this test targets.
+    // ------------------------------------------------------------------
+
+    /** Test double: overrides only getRateLimitPerMinute(), leaving getRateLimiter()'s real caching body to run. */
+    static class RealRateLimiterManager extends McpApiManager {
+        @Override
+        protected int getRateLimitPerMinute() {
+            return 5;
+        }
+    }
+
+    @Test
+    public void testGetRateLimiterCachesTheSameInstanceAcrossCalls() {
+        final RealRateLimiterManager manager = new RealRateLimiterManager();
+
+        assertSame(manager.getRateLimiter(), manager.getRateLimiter(),
+                "getRateLimiter() must cache the built instance on the field -- returning a fresh RateLimiter per call would "
+                        + "silently disable rate limiting, since every caller would always see an empty, unshared counter");
     }
 
     // NOTE: do NOT assert assertNull(response.getHeader("Location")) as a sendError guard.

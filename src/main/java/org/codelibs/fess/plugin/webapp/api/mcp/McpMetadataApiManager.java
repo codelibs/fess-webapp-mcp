@@ -124,7 +124,21 @@ public class McpMetadataApiManager implements WebApiManager {
             response.setStatus(HttpServletResponse.SC_NOT_FOUND);
             return;
         }
-        if (!CanonicalResourceUri.isCompatibleAudience(getConfiguredAudience())) {
+        final String configuredAudience = getConfiguredAudience();
+        if (StringUtil.isBlank(configuredAudience)) {
+            // C1 defence in depth, mirroring OAuthResourceServerAuthenticator#isUsable()'s own
+            // now-mandatory audience check: without an explicitly configured audience,
+            // resolveCanonicalUri would derive the served "resource" field from the request's
+            // caller-controlled Host header (or, from a trusted proxy, X-Forwarded-Host) instead.
+            // That value also becomes the resource_metadata URL's own basis, so an unauthenticated
+            // caller could make this very document reflect an attacker-chosen resource identifier.
+            // This manager reads mcp.auth.mode/mcp.oauth.* independently of
+            // OAuthResourceServerAuthenticator, so it must independently refuse here too, rather
+            // than trusting that authenticator's own guard is the only caller of resolve().
+            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
+            return;
+        }
+        if (!CanonicalResourceUri.isCompatibleAudience(configuredAudience)) {
             // Same defence-in-depth rationale, for the other half of OAuthResourceServerAuthenticator
             // #isUsable(): a configured mcp.oauth.audience whose path is not /mcp would make this
             // document's own resource field point at a resource_metadata URL matches() does not

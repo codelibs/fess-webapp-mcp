@@ -54,6 +54,31 @@ import jakarta.servlet.http.HttpServletRequest;
  * and any {@code /mcp/*} sub-path, so a path-derived audience would differ per sub-path and a
  * token bound to {@code https://host/mcp} would be rejected at {@code https://host/mcp/x}.
  * </p>
+ * <p>
+ * <b>Item 2 (the request-derived branch) is retained, but is unreachable-by-contract from either
+ * production caller (C1).</b> Deriving a security-critical resource identifier from {@code
+ * request.getServerName()} -- the {@code Host} header, caller-controlled on any direct request --
+ * is unsound for an RFC 8707 audience decision no matter how carefully the trusted-proxy overlay
+ * above is scoped: an attacker who simply sends the {@code Host} of a <em>different</em> resource
+ * served by the same authorization server, while holding a token legitimately minted for that
+ * other resource, would make this branch derive an audience that matches the token's real {@code
+ * aud} -- the confused-deputy case audience binding exists to prevent. Both current callers now
+ * refuse to reach this branch with a blank {@code configuredAudience}, each with its own
+ * independent guard rather than relying on the other's: {@code
+ * OAuthResourceServerAuthenticator#authenticate} refuses before ever calling {@link #resolve},
+ * and {@code OAuthResourceServerAuthenticator#isUsable} (consulted by {@code
+ * McpApiManager#getAuthenticator} before this authenticator is even selected) requires a
+ * non-blank audience too; {@code McpMetadataApiManager#process} independently refuses the same
+ * way before its own call to {@link #resolve}. This branch is kept, rather than deleted, because
+ * it remains a directly and thoroughly tested (see {@code CanonicalResourceUriTest}), pure,
+ * well-isolated piece of the trust-boundary logic Fess's own {@code TargetOriginResolver} also
+ * needs for the same {@code X-Forwarded-*} headers -- deleting it would not make the codebase any
+ * safer (the vulnerability was never in this method; it was in calling it without first requiring
+ * a configured audience), only harder to directly verify in isolation. Any future caller of
+ * {@link #resolve} with a blank {@code configuredAudience} for a security decision must
+ * independently justify why deriving from the request is safe in its context -- the answer for
+ * an OAuth audience check is that it is not.
+ * </p>
  */
 public final class CanonicalResourceUri {
 

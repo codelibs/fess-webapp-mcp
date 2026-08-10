@@ -221,39 +221,68 @@ public class OAuthAuthenticatorTest {
     }
 
     // ------------------------------------------------------------------
-    // Unusable configuration: an unset issuer falls back to none (checked by McpApiManager).
+    // Unusable configuration: isUsable() requires issuer, audience, and jwks.uri, each checked
+    // in isolation (every other requirement is satisfied by usableConfig() so each negative test
+    // below fails for exactly one reason, not possibly two at once).
     // ------------------------------------------------------------------
+
+    /** A fully usable oauth configuration: issuer, a /mcp-compatible audience, and a jwks.uri all set. */
+    private static TestAuthenticator usableConfig() {
+        final TestAuthenticator auth = new TestAuthenticator();
+        auth.properties.put("mcp.oauth.issuer", ISSUER);
+        auth.properties.put("mcp.oauth.audience", AUDIENCE);
+        auth.properties.put("mcp.oauth.jwks.uri", "https://idp.example.com/jwks");
+        return auth;
+    }
 
     @Test
     public void testOauthModeWithoutAnIssuerFallsBackToNone() {
         // The PRM document MUST list at least one authorization server. Serving an empty
         // one is worse than not enabling authorization at all.
-        assertFalse(newAuthenticatorWithIssuer("").isUsable());
+        final TestAuthenticator auth = usableConfig();
+        auth.properties.put("mcp.oauth.issuer", "");
+        assertFalse(auth.isUsable());
     }
 
     @Test
-    public void testOauthModeWithAnIssuerIsUsable() {
-        // Non-tautological companion: isUsable() is not simply always false.
-        assertTrue(newAuthenticatorWithIssuer(ISSUER).isUsable());
+    public void testOauthModeWithoutAnAudienceFallsBackToNone() {
+        // C1: mcp.oauth.audience is now REQUIRED, not merely validated-if-present. Without it,
+        // OAuthResourceServerAuthenticator#resolveCanonicalUri would derive the RFC 8707 audience
+        // from the request's caller-controlled Host header instead -- exactly the confused-deputy
+        // hole audience binding exists to close. This is the direct regression guard for isUsable()
+        // itself; testForeignHostHeaderCannotMintATrustedAudienceWhenAudienceIsNotConfigured below
+        // is the end-to-end guard for the same requirement.
+        final TestAuthenticator auth = usableConfig();
+        auth.properties.remove("mcp.oauth.audience");
+        assertFalse(auth.isUsable());
     }
 
     @Test
     public void testOauthModeWithAnAudienceNotEndingInMcpFallsBackToNone() {
-        // The other half of isUsable(): a configured mcp.oauth.audience whose path is not /mcp
-        // would make every challenge advertise a resource_metadata URL nothing serves.
-        final TestAuthenticator auth = new TestAuthenticator();
-        auth.properties.put("mcp.oauth.issuer", ISSUER);
+        // The other half of the audience check: a configured mcp.oauth.audience whose path is not
+        // /mcp would make every challenge advertise a resource_metadata URL nothing serves.
+        final TestAuthenticator auth = usableConfig();
         auth.properties.put("mcp.oauth.audience", "https://fess.example.com/api/mcp2");
         assertFalse(auth.isUsable());
     }
 
     @Test
-    public void testOauthModeWithAnAudienceEndingInMcpIsUsable() {
-        // Non-tautological companion to the above.
-        final TestAuthenticator auth = new TestAuthenticator();
-        auth.properties.put("mcp.oauth.issuer", ISSUER);
-        auth.properties.put("mcp.oauth.audience", "https://fess.example.com/api/mcp");
-        assertTrue(auth.isUsable());
+    public void testOauthModeWithoutAJwksUriFallsBackToNone() {
+        // I1: without this, this authenticator would still be selected, and the first
+        // token-bearing request would fail inside getProcessor() -> new URL("") with a generic,
+        // misleading 401 -- and, unlike the two checks above, previously fired NO startup
+        // diagnostic at all (isUsable() ignored jwks.uri entirely, so the ERROR that fires only
+        // when isUsable() is false never ran).
+        final TestAuthenticator auth = usableConfig();
+        auth.properties.remove("mcp.oauth.jwks.uri");
+        assertFalse(auth.isUsable());
+    }
+
+    @Test
+    public void testOauthModeWithIssuerAudienceAndJwksUriIsUsable() {
+        // Positive control for all three negative tests above: isUsable() is not simply always
+        // false, only false when one of its three requirements is actually missing.
+        assertTrue(usableConfig().isUsable());
     }
 
     // ------------------------------------------------------------------
@@ -319,8 +348,21 @@ public class OAuthAuthenticatorTest {
         // The attack this guards against: a token legitimately minted (by the SAME issuer) for a
         // different resource must not become acceptable here just because an untrusted client
         // claims (via X-Forwarded-Host) to be talking to that other resource's hostname.
+        //
+        // I2: this MUST use newAuthenticatorWithIssuer (mcp.oauth.audience deliberately left
+        // unset), not newAuthenticator("") -- that helper SETS mcp.oauth.audience, which made the
+        // original version of this test vacuous: authenticate() returned at its configured-
+        // audience branch and never read a header, getRemoteAddr(), or getServerName() at all, so
+        // the X-Forwarded-Host this test plants was never actually looked at, and the 401 came
+        // from an unrelated audience mismatch against the *configured* value. With the audience
+        // left unset, this now takes the SAME path as C1's fix: audienceNotConfigured() (see
+        // OAuthResourceServerAuthenticator#authenticate) refuses before any header is read, which
+        // is *also* a correct way to guarantee an untrusted X-Forwarded-Host can never widen the
+        // accepted audience -- if it were removed, resolveCanonicalUri's trusted-proxy check
+        // (proven separately by CanonicalResourceUriTest) would still catch this specific
+        // scenario, since 203.0.113.9 is not the configured trusted proxy.
         final String token = sign(validClaims().audience("https://attacker.example.com/mcp"), signingKey);
-        final TestAuthenticator auth = newAuthenticator("");
+        final TestAuthenticator auth = newAuthenticatorWithIssuer(ISSUER);
         auth.trustedProxies = Set.of("10.0.0.1"); // configured, but this caller is not it
         final MockletHttpServletRequestImpl request = bearerRequest(token);
         request.setRemoteAddr("203.0.113.9");
@@ -331,6 +373,32 @@ public class OAuthAuthenticatorTest {
         final McpError error = assertThrows(McpError.class, () -> auth.authenticate(request, response));
         assertEquals(401, error.getHttpStatus(),
                 "an untrusted X-Forwarded-Host must not be able to rewrite the audience this server checks against");
+    }
+
+    @Test
+    public void testForeignHostHeaderCannotMintATrustedAudienceWhenAudienceIsNotConfigured() throws Exception {
+        // C1's regression guard. The attack: with mcp.oauth.audience unset (its documented
+        // default) and NO forwarding/proxy involved at all, the raw, directly-observed Host
+        // header IS request.getServerName() -- a caller sending a direct request fully controls
+        // it. An attacker holding a token legitimately minted (by the SAME issuer) for a
+        // DIFFERENT resource simply sends that resource's own hostname as Host: the pre-C1
+        // resolveCanonicalUri would derive exactly that hostname as the canonical audience, which
+        // then trivially equals the token's real aud, and the attacker is admitted. No trusted-
+        // proxy misconfiguration is needed for this -- unlike
+        // testUntrustedForwardedHostCannotWidenTheAudienceAccepted above, this does not touch
+        // X-Forwarded-* at all, so no trusted-proxy check could ever have caught it; only
+        // requiring a configured audience (this test's own regression guard) can.
+        final MockletHttpServletRequestImpl request = request();
+        request.setServerName("other-mcp.example.com");
+        final String token = sign(validClaims().audience("https://other-mcp.example.com/mcp"), signingKey);
+        request.addHeader("Authorization", "Bearer " + token);
+        final TestAuthenticator auth = newAuthenticatorWithIssuer(ISSUER); // mcp.oauth.audience deliberately unset
+        final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
+
+        final McpError error = assertThrows(McpError.class, () -> auth.authenticate(request, response),
+                "a Host-header-spoofed audience must never be accepted, even though the token's iss/sig/exp are all "
+                        + "genuinely valid for that spoofed resource");
+        assertEquals(401, error.getHttpStatus());
     }
 
     // ------------------------------------------------------------------

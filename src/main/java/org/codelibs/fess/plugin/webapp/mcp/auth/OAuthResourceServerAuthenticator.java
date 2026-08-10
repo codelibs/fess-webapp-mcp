@@ -119,9 +119,10 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
     }
 
     /**
-     * Returns whether this authenticator is usable: {@code mcp.oauth.issuer} is configured, and
-     * a configured {@code mcp.oauth.audience} (if any) is compatible with the fixed
-     * {@code resource_metadata} shape this server actually serves.
+     * Returns whether this authenticator is usable: {@code mcp.oauth.issuer} is configured,
+     * {@code mcp.oauth.audience} is configured and compatible with the fixed
+     * {@code resource_metadata} shape this server actually serves, and {@code mcp.oauth.jwks.uri}
+     * is configured.
      * <p>
      * RFC 9728 requires a protected-resource metadata document's {@code authorization_servers}
      * to be non-empty; serving one with none would be worse than not enabling authorization at
@@ -129,24 +130,60 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
      * path insertion for a resource path of exactly {@code /mcp}: an audience configured with a
      * different path (e.g. {@code https://host/api/mcp}) would make every challenge advertise a
      * {@code resource_metadata} URL {@code McpMetadataApiManager}'s exact-match {@code matches()}
-     * does not serve. Both are treated as "not usable" rather than serving a broken deployment.
+     * does not serve.
+     * </p>
+     * <p>
+     * <b>{@code mcp.oauth.audience} is required, not merely validated when present (C1).</b>
+     * Without an explicitly configured audience, {@link #resolveCanonicalUri} would derive the
+     * RFC 8707 resource identifier {@link #requireAudience} checks a token's {@code aud} against
+     * from the request's {@code Host} header (or, from a trusted proxy, {@code
+     * X-Forwarded-Host}) -- a value the caller controls on any direct request. An attacker
+     * holding a token legitimately issued by the same authorization server, but minted for a
+     * <em>different</em> resource, could then simply send that resource's hostname as {@code
+     * Host} and be admitted: the derived audience would equal the token's real {@code aud},
+     * satisfying {@link #requireAudience} for a resource this deployment never intended to
+     * accept it for. This is exactly the confused-deputy scenario RFC 8707 audience binding
+     * exists to prevent. Requiring an operator-pinned audience keeps that derivation out of the
+     * trust decision entirely -- see {@link CanonicalResourceUri}'s class Javadoc for the
+     * resulting reachability of its derived-URI branch.
+     * </p>
+     * <p>
+     * <b>{@code mcp.oauth.jwks.uri} is required too (I1).</b> Without it, this authenticator
+     * would still be selected, and the first token-bearing request would reach {@link
+     * #getProcessor()} -&gt; {@link #newProcessor(String)} -&gt; {@code new URL("")} -&gt; a
+     * caught {@link java.net.MalformedURLException} reshaped into an {@link IllegalStateException}
+     * -&gt; {@link #authenticate}'s generic catch clause, which reports it as an ordinary invalid
+     * token. That 401 is misleading (nothing about the caller's token is wrong) and, unlike the
+     * two checks above, would previously fire with <em>no</em> startup diagnostic at all -- ERROR
+     * fires only when this method returns {@code false}, and a blank {@code jwks.uri} did not
+     * make it do so.
+     * </p>
+     * <p>
      * {@code McpApiManager#getAuthenticator} and {@code McpMetadataApiManager} both consult this
      * before selecting this class, falling back to {@code none}-mode behaviour (and, for the
      * metadata endpoint, HTTP 404) when it returns {@code false}.
      * </p>
      *
-     * @return {@code true} when {@link #getIssuer()} is non-blank and
-     *         {@link CanonicalResourceUri#isCompatibleAudience} accepts {@link #getConfiguredAudience()}
+     * @return {@code true} when {@link #getIssuer()}, {@link #getConfiguredAudience()}, and
+     *         {@link #getJwksUri()} are all non-blank and
+     *         {@link CanonicalResourceUri#isCompatibleAudience} accepts
+     *         {@link #getConfiguredAudience()}
      */
     public boolean isUsable() {
-        return StringUtil.isNotBlank(getIssuer()) && CanonicalResourceUri.isCompatibleAudience(getConfiguredAudience());
+        return StringUtil.isNotBlank(getIssuer()) && StringUtil.isNotBlank(getConfiguredAudience())
+                && CanonicalResourceUri.isCompatibleAudience(getConfiguredAudience()) && StringUtil.isNotBlank(getJwksUri());
     }
 
     @Override
     public McpPrincipal authenticate(final HttpServletRequest request, final HttpServletResponse response) {
+        final Set<String> requiredScopes = getRequiredScopes();
+        if (StringUtil.isBlank(getConfiguredAudience())) {
+            // C1 defence in depth: never reach resolveCanonicalUri's request-derived branch for
+            // an oauth-mode authentication decision. See #audienceNotConfigured.
+            throw audienceNotConfigured(response, requiredScopes);
+        }
         final String canonicalUri = resolveCanonicalUri(request);
         final String metadataUrl = CanonicalResourceUri.metadataUrl(canonicalUri);
-        final Set<String> requiredScopes = getRequiredScopes();
         final String token = FessTokenAuthenticator.extractBearerToken(request.getHeader(AUTHORIZATION_HEADER));
         if (token == null) {
             throw missingCredential(response, requiredScopes, metadataUrl);
@@ -302,6 +339,38 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
      */
     private static Set<String> splitOnWhitespace(final String text) {
         return Arrays.stream(text.trim().split("\\s+")).filter(s -> !s.isEmpty()).collect(Collectors.toCollection(LinkedHashSet::new));
+    }
+
+    /**
+     * Builds the 401 to throw when this authenticator is invoked with no configured
+     * {@code mcp.oauth.audience}.
+     * <p>
+     * C1: without a configured audience, {@link #resolveCanonicalUri} would derive the RFC 8707
+     * resource identifier from the request's caller-controlled {@code Host} header (or, from a
+     * trusted proxy, {@code X-Forwarded-Host}) instead -- exactly the value audience binding
+     * exists to keep out of this decision. Refusing here, before {@link #resolveCanonicalUri} is
+     * even called, keeps that derivation (and the {@code resource_metadata} hint it would
+     * otherwise feed into the challenge below) out of the response entirely: {@code
+     * metadataUrl} is passed as {@code null} deliberately, not derived and then discarded.
+     * </p>
+     * <p>
+     * In production this method is only ever reached on an instance {@code
+     * McpApiManager#getAuthenticator} has already confirmed {@link #isUsable()} for -- and
+     * {@link #isUsable()} now requires a non-blank audience too -- so this check is a redundant,
+     * fail-closed backstop against a future or test caller that invokes {@link #authenticate}
+     * directly, bypassing that selection gate.
+     * </p>
+     *
+     * @param response the servlet response to attach the challenge header to
+     * @param requiredScopes the configured {@code mcp.oauth.required.scopes}
+     * @return the error to throw; never returns normally
+     */
+    private McpError audienceNotConfigured(final HttpServletResponse response, final Set<String> requiredScopes) {
+        if (logger.isDebugEnabled()) {
+            logger.debug("[MCP] oauth authentication refused: mcp.oauth.audience is not configured");
+        }
+        setChallenge(response, "invalid_token", "This server's OAuth configuration is incomplete.", requiredScopes, null);
+        return new McpError(HttpServletResponse.SC_UNAUTHORIZED, ErrorCode.InvalidRequest, "The access token is invalid or expired.");
     }
 
     /**
