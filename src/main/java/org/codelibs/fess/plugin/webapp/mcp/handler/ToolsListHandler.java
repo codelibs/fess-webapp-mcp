@@ -21,11 +21,7 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
-import org.codelibs.fess.plugin.webapp.mcp.tool.GetDocumentTool;
-import org.codelibs.fess.plugin.webapp.mcp.tool.IndexStatsTool;
 import org.codelibs.fess.plugin.webapp.mcp.tool.McpTool;
-import org.codelibs.fess.plugin.webapp.mcp.tool.SearchTool;
-import org.codelibs.fess.plugin.webapp.mcp.tool.SuggestTool;
 
 /**
  * The {@code tools/list} handler.
@@ -45,7 +41,7 @@ public class ToolsListHandler extends AbstractCacheableHandler {
      * Creates a {@code tools/list} handler backed by this server's standard tool set.
      */
     public ToolsListHandler() {
-        this(List.of(new SearchTool(), new IndexStatsTool(), new SuggestTool(), new GetDocumentTool()));
+        this(McpTool.defaultTools());
     }
 
     /**

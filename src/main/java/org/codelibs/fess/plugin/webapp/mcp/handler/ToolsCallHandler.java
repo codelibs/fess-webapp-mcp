@@ -27,11 +27,7 @@ import org.codelibs.fess.plugin.webapp.exception.McpApiException;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpError;
-import org.codelibs.fess.plugin.webapp.mcp.tool.GetDocumentTool;
-import org.codelibs.fess.plugin.webapp.mcp.tool.IndexStatsTool;
 import org.codelibs.fess.plugin.webapp.mcp.tool.McpTool;
-import org.codelibs.fess.plugin.webapp.mcp.tool.SearchTool;
-import org.codelibs.fess.plugin.webapp.mcp.tool.SuggestTool;
 
 /**
  * The {@code tools/call} handler.
@@ -52,7 +48,7 @@ public class ToolsCallHandler implements McpMethodHandler {
      * Creates a {@code tools/call} handler backed by this server's standard tool set.
      */
     public ToolsCallHandler() {
-        this(List.of(new SearchTool(), new IndexStatsTool(), new SuggestTool(), new GetDocumentTool()));
+        this(McpTool.defaultTools());
     }
 
     /**
@@ -104,6 +100,11 @@ public class ToolsCallHandler implements McpMethodHandler {
             // it into the handler-level McpError contract -- same ErrorCode, HTTP 200 because
             // this is an application-level failure -- without changing the tool itself.
             throw new McpError(HttpServletResponse.SC_OK, e.getCode(), e.getMessage());
+        } catch (final McpError e) {
+            // No McpTool throws this today, but McpError is the go-forward contract; letting it
+            // fall into the catch-all below would silently convert a deliberate protocol error
+            // into an isError:true CallToolResult. Propagate it unchanged instead.
+            throw e;
         } catch (final Exception e) {
             logger.warn("[MCP] Tool '{}' execution failed: {}", name, e.getMessage(), e);
             final String message = e.getMessage() != null ? e.getMessage() : "Unknown error";

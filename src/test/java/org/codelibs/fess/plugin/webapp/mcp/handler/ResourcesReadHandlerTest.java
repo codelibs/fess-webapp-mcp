@@ -19,6 +19,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
@@ -131,16 +133,26 @@ public class ResourcesReadHandlerTest {
 
     @Test
     public void testTtlIsClampedToZeroWhenNegative() {
+        // A not-found path never reaches putCacheHints, so it cannot prove the clamp is applied
+        // there; buildIndexStatsResource is stubbed so handle() takes the real success path.
         final ResourcesReadHandler negative = new ResourcesReadHandler() {
             @Override
             protected long getTtlMs() {
                 return -1L;
             }
+
+            @Override
+            protected Map<String, Object> buildIndexStatsResource() {
+                final Map<String, Object> stub = new LinkedHashMap<>();
+                stub.put("contents", List.of(Map.of("uri", STATS_URI)));
+                return stub;
+            }
         };
-        final McpError error = assertThrows(McpError.class, () -> negative.handle(contextWithUri("fess://unknown")));
-        // Even the not-found path never reaches ttlMs, so assert the clamp directly.
-        assertTrue(error.getMessage().contains("fess://unknown"));
-        assertEquals(0L, Math.max(0L, negative.getTtlMs()));
+
+        final Map<String, Object> result = negative.handle(contextWithUri("fess://index/stats"));
+
+        assertEquals(0L, result.get("ttlMs"), "the spec requires ttlMs >= 0");
+        assertEquals("private", result.get("cacheScope"));
     }
 
     @Test

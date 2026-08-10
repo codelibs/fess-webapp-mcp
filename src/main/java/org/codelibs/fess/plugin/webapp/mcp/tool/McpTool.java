@@ -15,6 +15,7 @@
  */
 package org.codelibs.fess.plugin.webapp.mcp.tool;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -94,4 +95,22 @@ public interface McpTool {
      *         and optional {@code isError}
      */
     Map<String, Object> call(Map<String, Object> arguments, McpCallContext context);
+
+    /**
+     * Returns the standard tool set this server exposes by default.
+     *
+     * <p>
+     * The single source of truth for "which tools does this server have, in what order" for the
+     * {@code mcp.handler} package's {@code ToolsListHandler} and {@code ToolsCallHandler}, which
+     * both need it and must not drift against each other. {@code McpApiManager#getTools()} keeps
+     * its own copy for now -- it backs the legacy {@code dispatchRpcMethod} switch that a later
+     * task retires along with the rest of that switch -- so it is deliberately not routed through
+     * this method.
+     * </p>
+     *
+     * @return a new list of freshly constructed default tools, in {@code tools/list} order
+     */
+    static List<McpTool> defaultTools() {
+        return List.of(new SearchTool(), new IndexStatsTool(), new SuggestTool(), new GetDocumentTool());
+    }
 }

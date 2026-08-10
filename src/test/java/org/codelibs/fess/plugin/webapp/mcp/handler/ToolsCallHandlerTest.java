@@ -25,6 +25,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import jakarta.servlet.http.HttpServletResponse;
+
 import org.codelibs.fess.plugin.webapp.exception.McpApiException;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
@@ -101,6 +103,21 @@ public class ToolsCallHandlerTest {
         }
     }
 
+    private static final class ThrowingMcpErrorTool extends StubTool {
+
+        @Override
+        public String getName() {
+            return "already_modern";
+        }
+
+        @Override
+        public Map<String, Object> call(final Map<String, Object> arguments, final McpCallContext context) {
+            // No shipped McpTool does this today (Task 7 scope predates McpError), but McpError
+            // is the go-forward contract; a future/replacement tool may throw it directly.
+            throw new McpError(HttpServletResponse.SC_OK, ErrorCode.InvalidParams, "already an McpError");
+        }
+    }
+
     private McpCallContext contextWithParams(final Map<String, Object> params) {
         return new McpCallContext(null, null, params);
     }
@@ -156,6 +173,21 @@ public class ToolsCallHandlerTest {
         assertEquals(ErrorCode.InvalidParams, error.getErrorCode());
         assertEquals(200, error.getHttpStatus());
         assertEquals("bad argument", error.getMessage());
+    }
+
+    @Test
+    public void testToolLevelMcpErrorPropagatesUnchangedNotAsIsErrorResult() {
+        // McpError extends RuntimeException, so without a dedicated catch clause ahead of the
+        // generic Exception catch-all it would be silently converted into an isError:true
+        // CallToolResult instead of propagating as the protocol error it already is.
+        final ToolsCallHandler handler = new ToolsCallHandler(List.of(new ThrowingMcpErrorTool()));
+
+        final McpError error = assertThrows(McpError.class,
+                () -> handler.handle(contextWithParams(Map.of("name", "already_modern", "arguments", Map.of()))));
+
+        assertEquals(ErrorCode.InvalidParams, error.getErrorCode());
+        assertEquals(200, error.getHttpStatus());
+        assertEquals("already an McpError", error.getMessage());
     }
 
     @SuppressWarnings("unchecked")
