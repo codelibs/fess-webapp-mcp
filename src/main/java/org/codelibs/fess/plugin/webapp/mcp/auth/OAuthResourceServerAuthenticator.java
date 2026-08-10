@@ -105,8 +105,8 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
      * The lazily-built, cached JWT processor. Built at most once per instance, on the first
      * request that actually presents a bearer token -- never at construction, so a
      * container-free test that never calls {@link #authenticate} (or that overrides
-     * {@link #getProcessor()} directly) never touches {@link #newProcessor}, network I/O, or
-     * {@code ComponentUtil}.
+     * {@link #getProcessor()} directly) never touches {@link #newProcessor(String)}, network
+     * I/O, or {@code ComponentUtil}.
      */
     private volatile ConfigurableJWTProcessor<SecurityContext> cachedProcessor;
 
@@ -119,20 +119,27 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
     }
 
     /**
-     * Returns whether this authenticator is usable, i.e. whether {@code mcp.oauth.issuer} is
-     * configured.
+     * Returns whether this authenticator is usable: {@code mcp.oauth.issuer} is configured, and
+     * a configured {@code mcp.oauth.audience} (if any) is compatible with the fixed
+     * {@code resource_metadata} shape this server actually serves.
      * <p>
      * RFC 9728 requires a protected-resource metadata document's {@code authorization_servers}
      * to be non-empty; serving one with none would be worse than not enabling authorization at
-     * all. {@code McpApiManager#getAuthenticator} and {@code McpMetadataApiManager} both consult
-     * this before selecting this class, falling back to {@code none}-mode behaviour (and, for
-     * the metadata endpoint, HTTP 404) when it returns {@code false}.
+     * all. Separately, {@link CanonicalResourceUri#metadataUrl} only implements the well-known
+     * path insertion for a resource path of exactly {@code /mcp}: an audience configured with a
+     * different path (e.g. {@code https://host/api/mcp}) would make every challenge advertise a
+     * {@code resource_metadata} URL {@code McpMetadataApiManager}'s exact-match {@code matches()}
+     * does not serve. Both are treated as "not usable" rather than serving a broken deployment.
+     * {@code McpApiManager#getAuthenticator} and {@code McpMetadataApiManager} both consult this
+     * before selecting this class, falling back to {@code none}-mode behaviour (and, for the
+     * metadata endpoint, HTTP 404) when it returns {@code false}.
      * </p>
      *
-     * @return {@code true} when {@link #getIssuer()} is non-blank
+     * @return {@code true} when {@link #getIssuer()} is non-blank and
+     *         {@link CanonicalResourceUri#isCompatibleAudience} accepts {@link #getConfiguredAudience()}
      */
     public boolean isUsable() {
-        return StringUtil.isNotBlank(getIssuer());
+        return StringUtil.isNotBlank(getIssuer()) && CanonicalResourceUri.isCompatibleAudience(getConfiguredAudience());
     }
 
     @Override
@@ -375,12 +382,20 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
     }
 
     /**
-     * Builds the JWT processor once per JWKS URI.
+     * Builds the JWKS-backed source once per JWKS URI, then delegates to
+     * {@link #newProcessor(JWKSource)} for the actual processor assembly.
+     * <p>
+     * This split exists specifically so a test can exercise the <em>real</em> assembly logic
+     * (key selector, algorithm restriction, claims verifier) without ever needing a real JWKS
+     * URL: {@link #newProcessor(JWKSource)} takes the source as a parameter, so a test can pass
+     * an in-process {@code ImmutableJWKSet} straight to it. Before this split, every test
+     * replaced this class's {@link #getProcessor()} wholesale with a hand-maintained duplicate
+     * of this method's configuration, which meant this method itself -- the one that ships --
+     * was never executed by anything.
+     * </p>
      *
      * @param jwksUri the JWKS endpoint
-     * @return a configured processor: RS256 signature verification against {@code jwksUri} (with
-     *         a caching, refresh-ahead {@link JWKSource}), and a claims verifier that requires
-     *         (and, if present, time-checks) {@code exp}
+     * @return a configured processor, per {@link #newProcessor(JWKSource)}
      * @throws MalformedURLException if {@code jwksUri} is not a valid URL
      */
     protected ConfigurableJWTProcessor<SecurityContext> newProcessor(final String jwksUri) throws MalformedURLException {
@@ -388,6 +403,25 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
                 .cache(getJwksCacheSeconds() * 1000L, JWKS_CACHE_REFRESH_TIMEOUT_MILLIS)
                 .refreshAheadCache(true)
                 .build();
+        return newProcessor(source);
+    }
+
+    /**
+     * Assembles a JWT processor from an already-built {@link JWKSource}.
+     * <p>
+     * The real assembly logic: restricts signature verification to RS256 against {@code source},
+     * and attaches {@link #newClaimsVerifier()}. Deliberately independent of how {@code source}
+     * was obtained -- {@link #newProcessor(String)} builds a network-backed one via
+     * {@link JWKSourceBuilder}, a test builds an in-process {@code ImmutableJWKSet} -- so this
+     * method itself, the one place the key selector, the RS256 restriction, and the claims
+     * verifier are actually wired together, is exercised identically by both.
+     * </p>
+     *
+     * @param source the JWK source to verify signatures against
+     * @return a configured processor: RS256-only signature verification against {@code source},
+     *         and a claims verifier that requires (and, if present, time-checks) {@code exp}
+     */
+    protected ConfigurableJWTProcessor<SecurityContext> newProcessor(final JWKSource<SecurityContext> source) {
         final ConfigurableJWTProcessor<SecurityContext> processor = new DefaultJWTProcessor<>();
         processor.setJWSKeySelector(new JWSVerificationKeySelector<>(JWSAlgorithm.RS256, source));
         processor.setJWTClaimsSetVerifier(newClaimsVerifier());
@@ -395,15 +429,13 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
     }
 
     /**
-     * Builds the {@code exp}/{@code nbf} claims verifier {@link #newProcessor} attaches to the
-     * processor.
+     * Builds the {@code exp}/{@code nbf} claims verifier {@link #newProcessor(JWKSource)}
+     * attaches to the processor.
      * <p>
-     * Extracted into its own method -- rather than inlined at the one call site above -- so it
-     * can be unit-tested directly against a bare {@link JWTClaimsSet}, with no {@link JWKSource}
-     * or network involved: {@link #newProcessor} itself is never reached from this class's test
-     * suite (its {@link JWKSourceBuilder} call would need a real JWKS URL), so without this
-     * extraction, nothing here would exercise the actual production line that requires
-     * {@code exp}.
+     * Extracted into its own method -- rather than inlined at its one call site -- so it can
+     * also be unit-tested directly against a bare {@link JWTClaimsSet}, with no {@link JWKSource}
+     * or network involved, independent of whichever {@link #newProcessor(JWKSource)} caller is
+     * under test.
      * </p>
      *
      * @return a verifier that requires {@code exp} to be present (and, per
@@ -416,12 +448,15 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
     }
 
     /**
-     * Returns the JWT processor, building and caching it on first use via {@link #newProcessor}.
+     * Returns the JWT processor, building and caching it on first use via
+     * {@link #newProcessor(String)}.
      * <p>
-     * This is the seam a container-free test overrides to supply an in-process key source (e.g.
-     * {@code ImmutableJWKSet}) instead of {@link #newProcessor}'s real, network-backed
-     * {@link JWKSourceBuilder}: overriding here means neither {@link #newProcessor} nor any
-     * network call is ever reached from a test.
+     * This is the seam a container-free test overrides to reach {@link #newProcessor(JWKSource)}
+     * -- the real assembly logic (key selector, RS256 restriction, claims verifier) -- with an
+     * in-process key source (e.g. {@code ImmutableJWKSet}), instead of
+     * {@link #newProcessor(String)}'s network-backed {@link JWKSourceBuilder}. Only the source's
+     * origin differs between a test and production; the assembly a test exercises is the same
+     * method production runs.
      * </p>
      *
      * @return the JWT processor, shared across every request this instance authenticates
@@ -497,7 +532,7 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
      *         is required
      */
     protected Set<String> getRequiredScopes() {
-        return parseCommaSeparated(getSystemProperty("mcp.oauth.required.scopes", StringUtil.EMPTY));
+        return parseScopeList(getSystemProperty("mcp.oauth.required.scopes", StringUtil.EMPTY));
     }
 
     /**
@@ -548,12 +583,21 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
     }
 
     /**
-     * Parses a comma-separated configuration value into a trimmed, order-preserving set.
+     * Parses a comma-separated scope-list configuration value into a trimmed, order-preserving
+     * set.
+     * <p>
+     * {@code public static} -- rather than a {@code private} helper duplicated wherever a
+     * comma-separated scope list needs parsing -- specifically so {@code McpMetadataApiManager
+     * #getScopesSupported()} can parse {@code mcp.oauth.required.scopes} through this exact
+     * method too: that property is read by both classes (this one to enforce it, that one to
+     * advertise it), and a single parser is the only way to guarantee they can never silently
+     * diverge on what counts as a valid scope token.
+     * </p>
      *
      * @param raw the raw value
      * @return the parsed set; empty when {@code raw} is blank
      */
-    private static Set<String> parseCommaSeparated(final String raw) {
+    public static Set<String> parseScopeList(final String raw) {
         if (StringUtil.isBlank(raw)) {
             return Set.of();
         }

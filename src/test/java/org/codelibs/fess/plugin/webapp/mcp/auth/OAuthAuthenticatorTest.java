@@ -40,14 +40,11 @@ import com.nimbusds.jose.crypto.RSASSASigner;
 import com.nimbusds.jose.jwk.RSAKey;
 import com.nimbusds.jose.jwk.gen.RSAKeyGenerator;
 import com.nimbusds.jose.jwk.source.ImmutableJWKSet;
-import com.nimbusds.jose.proc.JWSVerificationKeySelector;
+import com.nimbusds.jose.jwk.source.JWKSource;
 import com.nimbusds.jose.proc.SecurityContext;
-import com.nimbusds.jwt.JWTClaimNames;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
 import com.nimbusds.jwt.proc.ConfigurableJWTProcessor;
-import com.nimbusds.jwt.proc.DefaultJWTClaimsVerifier;
-import com.nimbusds.jwt.proc.DefaultJWTProcessor;
 
 /**
  * Tests for {@link OAuthResourceServerAuthenticator} and {@link ProtectedResourceMetadata}.
@@ -73,7 +70,9 @@ public class OAuthAuthenticatorTest {
     @BeforeAll
     public static void generateKeys() throws JOSEException {
         signingKey = new RSAKeyGenerator(2048).keyID("test-key-1").generate();
-        otherKey = new RSAKeyGenerator(2048).keyID("other-key").generate();
+        // Deliberately the SAME kid as signingKey: testWrongSignatureIsRejected must fail on
+        // signature verification itself, not on key SELECTION never finding a matching kid.
+        otherKey = new RSAKeyGenerator(2048).keyID("test-key-1").generate();
     }
 
     /**
@@ -83,8 +82,11 @@ public class OAuthAuthenticatorTest {
      * (comma-split required scopes, the scope-permission-map grammar, ...) is actually exercised
      * -- the same lesson this plugin's {@code McpApiManager} test suite already applies to
      * {@code getAuthMode()}. {@link #getProcessor()} is the one deliberate exception: it is the
-     * seam that would otherwise reach a real JWKS URL over HTTP, so it is replaced with an
-     * in-memory key source instead.
+     * seam that would otherwise reach a real JWKS URL over HTTP. Even there, it delegates to the
+     * real {@link OAuthResourceServerAuthenticator#newProcessor(JWKSource)} with an in-memory
+     * key source, rather than re-implementing that assembly here -- a hand-maintained duplicate
+     * would verify only itself, never the production wiring (key selector, RS256 restriction,
+     * claims verifier) that actually ships.
      */
     static class TestAuthenticator extends OAuthResourceServerAuthenticator {
         final Map<String, String> properties = new HashMap<>();
@@ -109,11 +111,9 @@ public class OAuthAuthenticatorTest {
 
         @Override
         protected ConfigurableJWTProcessor<SecurityContext> getProcessor() {
-            final ConfigurableJWTProcessor<SecurityContext> processor = new DefaultJWTProcessor<>();
-            processor.setJWSKeySelector(new JWSVerificationKeySelector<>(JWSAlgorithm.RS256,
-                    new ImmutableJWKSet<>(new com.nimbusds.jose.jwk.JWKSet(verificationKey.toPublicJWK()))));
-            processor.setJWTClaimsSetVerifier(new DefaultJWTClaimsVerifier<>(null, Set.of(JWTClaimNames.EXPIRATION_TIME)));
-            return processor;
+            final JWKSource<SecurityContext> inMemorySource =
+                    new ImmutableJWKSet<>(new com.nimbusds.jose.jwk.JWKSet(verificationKey.toPublicJWK()));
+            return newProcessor(inMemorySource);
         }
     }
 
@@ -141,7 +141,11 @@ public class OAuthAuthenticatorTest {
     }
 
     private static String sign(final JWTClaimsSet.Builder claims, final RSAKey key) throws JOSEException {
-        final SignedJWT jwt = new SignedJWT(new JWSHeader.Builder(JWSAlgorithm.RS256).keyID(key.getKeyID()).build(), claims.build());
+        return sign(claims, key, JWSAlgorithm.RS256);
+    }
+
+    private static String sign(final JWTClaimsSet.Builder claims, final RSAKey key, final JWSAlgorithm algorithm) throws JOSEException {
+        final SignedJWT jwt = new SignedJWT(new JWSHeader.Builder(algorithm).keyID(key.getKeyID()).build(), claims.build());
         jwt.sign(new RSASSASigner(key));
         return jwt.serialize();
     }
@@ -233,6 +237,25 @@ public class OAuthAuthenticatorTest {
         assertTrue(newAuthenticatorWithIssuer(ISSUER).isUsable());
     }
 
+    @Test
+    public void testOauthModeWithAnAudienceNotEndingInMcpFallsBackToNone() {
+        // The other half of isUsable(): a configured mcp.oauth.audience whose path is not /mcp
+        // would make every challenge advertise a resource_metadata URL nothing serves.
+        final TestAuthenticator auth = new TestAuthenticator();
+        auth.properties.put("mcp.oauth.issuer", ISSUER);
+        auth.properties.put("mcp.oauth.audience", "https://fess.example.com/api/mcp2");
+        assertFalse(auth.isUsable());
+    }
+
+    @Test
+    public void testOauthModeWithAnAudienceEndingInMcpIsUsable() {
+        // Non-tautological companion to the above.
+        final TestAuthenticator auth = new TestAuthenticator();
+        auth.properties.put("mcp.oauth.issuer", ISSUER);
+        auth.properties.put("mcp.oauth.audience", "https://fess.example.com/api/mcp");
+        assertTrue(auth.isUsable());
+    }
+
     // ------------------------------------------------------------------
     // PRM document shape.
     // ------------------------------------------------------------------
@@ -316,8 +339,29 @@ public class OAuthAuthenticatorTest {
 
     @Test
     public void testWrongSignatureIsRejected() throws Exception {
-        // Signed with a key that is NOT in the verifier's JWKSet.
+        // Signed with a DIFFERENT private key that happens to share the same kid as the key in
+        // the verifier's JWKSet: the key selector will pick the right JWKSet entry by kid, so
+        // this genuinely exercises RSA signature verification math, not just key lookup -- a
+        // mismatched-kid token would fail at selection and never reach the crypto check at all.
         final String token = sign(validClaims(), otherKey);
+        final TestAuthenticator auth = newAuthenticator("");
+        final MockletHttpServletRequestImpl request = bearerRequest(token);
+        final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
+
+        final McpError error = assertThrows(McpError.class, () -> auth.authenticate(request, response));
+        assertEquals(401, error.getHttpStatus());
+    }
+
+    @Test
+    public void testTokenSignedWithADifferentRsaAlgorithmIsRejected() throws Exception {
+        // Signed with the CORRECT key but RS384, not RS256. The test JWK carries no "alg"
+        // constraint of its own, so nimbus's key selector would happily match this key for any
+        // RSA-family algorithm unless newProcessor's single-algorithm JWSVerificationKeySelector
+        // constructor genuinely restricts acceptance to RS256. This is a stronger check than
+        // testWrongSignatureIsRejected: signing with a different key (same kid) fails on
+        // signature verification math; this one uses the SAME key but a different algorithm, so
+        // it fails only if the algorithm restriction itself is enforced.
+        final String token = sign(validClaims(), signingKey, JWSAlgorithm.RS384);
         final TestAuthenticator auth = newAuthenticator("");
         final MockletHttpServletRequestImpl request = bearerRequest(token);
         final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
@@ -333,12 +377,21 @@ public class OAuthAuthenticatorTest {
     @Test
     public void testWrongIssuerIsRejected() throws Exception {
         final String token = sign(validClaims().issuer("https://not-the-configured-issuer.example.com"), signingKey);
-        final TestAuthenticator auth = newAuthenticator("");
+        // Non-empty required scopes (unlike every other bad-token test in this file): proves the
+        // invalid_token challenge itself still carries scope and resource_metadata, not just the
+        // error code. This is the challenge a live client hits most often (e.g. an expired
+        // token), and resource_metadata is exactly what it needs to re-discover the AS.
+        final TestAuthenticator auth = newAuthenticator("fess:search");
         final MockletHttpServletRequestImpl request = bearerRequest(token);
         final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
 
         final McpError error = assertThrows(McpError.class, () -> auth.authenticate(request, response));
         assertEquals(401, error.getHttpStatus());
+        final String challenge = response.getHeader("WWW-Authenticate");
+        assertTrue(challenge.contains("error=\"invalid_token\""), challenge);
+        assertTrue(challenge.contains("scope=\"fess:search\""), "the invalid_token challenge must still carry scope: " + challenge);
+        assertTrue(challenge.contains("resource_metadata=\"https://fess.example.com/.well-known/oauth-protected-resource/mcp\""),
+                challenge);
     }
 
     // ------------------------------------------------------------------

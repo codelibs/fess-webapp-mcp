@@ -214,8 +214,9 @@ public class McpApiManager extends BaseApiManager {
         final String authMode = getAuthMode();
         final boolean oauthRequestedButUnusable = AUTH_MODE_OAUTH.equals(authMode) && !getOAuthAuthenticator().isUsable();
         if (oauthRequestedButUnusable && logger.isErrorEnabled()) {
-            logger.error("[MCP] mcp.auth.mode=oauth but mcp.oauth.issuer is not set - falling back to none. "
-                    + "Set mcp.oauth.issuer to the authorization server's issuer URL to enable OAuth 2.1 protection.");
+            logger.error("[MCP] mcp.auth.mode=oauth but the configuration is not usable - falling back to none. "
+                    + "mcp.oauth.issuer must be set to the authorization server's issuer URL, and mcp.oauth.audience, "
+                    + "if set, must end in /mcp (the only resource path this server's metadata endpoint serves).");
         }
         final boolean authenticated =
                 AUTH_MODE_FESS_TOKEN.equals(authMode) || (AUTH_MODE_OAUTH.equals(authMode) && !oauthRequestedButUnusable);

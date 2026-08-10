@@ -117,6 +117,22 @@ public class McpMetadataApiManagerTest {
         assertEquals(404, response.getStatus());
     }
 
+    @Test
+    public void testMetadataIs404WhenConfiguredAudienceDoesNotEndInMcp() throws Exception {
+        // The bug a reviewer found: an audience whose path is not /mcp would make this
+        // document's own "resource" field advertise a resource_metadata URL matches() never
+        // serves. Refusing to serve the document at all is safer than serving a self-inconsistent
+        // one.
+        final TestManager manager = new TestManager();
+        manager.properties.put("mcp.auth.mode", "oauth");
+        manager.properties.put("mcp.oauth.issuer", "https://idp.example.com");
+        manager.properties.put("mcp.oauth.audience", "https://fess.example.com/api/mcp2");
+        final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("GET", "/.well-known/oauth-protected-resource/mcp");
+        final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
+        manager.process(request, response, null);
+        assertEquals(404, response.getStatus());
+    }
+
     // ------------------------------------------------------------------
     // 200: oauth mode usable -- the positive control proving the 404 above is not unconditional.
     // ------------------------------------------------------------------

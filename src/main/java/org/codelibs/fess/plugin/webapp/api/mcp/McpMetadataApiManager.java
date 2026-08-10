@@ -18,17 +18,15 @@ package org.codelibs.fess.plugin.webapp.api.mcp;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
-import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codelibs.core.lang.StringUtil;
 import org.codelibs.fess.api.WebApiManager;
 import org.codelibs.fess.plugin.webapp.mcp.auth.CanonicalResourceUri;
+import org.codelibs.fess.plugin.webapp.mcp.auth.OAuthResourceServerAuthenticator;
 import org.codelibs.fess.plugin.webapp.mcp.auth.ProtectedResourceMetadata;
 import org.codelibs.fess.plugin.webapp.mcp.json.Json;
 import org.codelibs.fess.util.ComponentUtil;
@@ -126,6 +124,14 @@ public class McpMetadataApiManager implements WebApiManager {
             response.setStatus(HttpServletResponse.SC_NOT_FOUND);
             return;
         }
+        if (!CanonicalResourceUri.isCompatibleAudience(getConfiguredAudience())) {
+            // Same defence-in-depth rationale, for the other half of OAuthResourceServerAuthenticator
+            // #isUsable(): a configured mcp.oauth.audience whose path is not /mcp would make this
+            // document's own resource field point at a resource_metadata URL matches() does not
+            // serve (see CanonicalResourceUri#isCompatibleAudience).
+            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
+            return;
+        }
         final String canonicalUri = resolveCanonicalUri(request);
         final Map<String, Object> body = new ProtectedResourceMetadata(canonicalUri, issuer, getScopesSupported()).toMap();
         write(response, Json.write(body));
@@ -211,14 +217,12 @@ public class McpMetadataApiManager implements WebApiManager {
      * @return the parsed {@code mcp.oauth.required.scopes}; empty when unset
      */
     protected Set<String> getScopesSupported() {
-        final String raw = getSystemProperty("mcp.oauth.required.scopes", StringUtil.EMPTY);
-        if (StringUtil.isBlank(raw)) {
-            return Set.of();
-        }
-        return Arrays.stream(raw.split(","))
-                .map(String::trim)
-                .filter(s -> !s.isEmpty())
-                .collect(Collectors.toCollection(LinkedHashSet::new));
+        // Delegates to OAuthResourceServerAuthenticator's parser rather than re-implementing the
+        // same comma-split/trim/filter logic here: mcp.oauth.required.scopes is read by both
+        // classes (that one to enforce it, this one to advertise it), and a single parser is the
+        // only way to guarantee the two can never silently diverge on what counts as a valid
+        // scope token.
+        return OAuthResourceServerAuthenticator.parseScopeList(getSystemProperty("mcp.oauth.required.scopes", StringUtil.EMPTY));
     }
 
     /**

@@ -16,6 +16,8 @@
 package org.codelibs.fess.plugin.webapp.mcp.auth;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.Set;
 
@@ -137,13 +139,86 @@ public class CanonicalResourceUriTest {
     }
 
     @Test
+    public void testTrustedProxyForwardedHostWithEmbeddedCrlfIsRejected() {
+        // Even from a TRUSTED proxy, a forwarded header value carrying an embedded CR/LF must
+        // never reach the WWW-Authenticate response header this value eventually feeds into
+        // (via resource_metadata). Falls back to the servlet-observed origin instead of
+        // propagating the injected value.
+        final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("POST", "/mcp");
+        request.setScheme("http");
+        request.setServerName("internal-host");
+        request.setServerPort(80);
+        request.setRemoteAddr("10.0.0.1");
+        request.addHeader("X-Forwarded-Proto", "https");
+        request.addHeader("X-Forwarded-Host", "attacker.example.com\r\nX-Injected: evil");
+
+        assertEquals("http://internal-host/mcp", CanonicalResourceUri.resolve(request, "", Set.of("10.0.0.1")),
+                "an embedded CR/LF in a forwarded header must not reach the canonical URI, even from a trusted proxy");
+    }
+
+    @Test
+    public void testTrustedProxyForwardedProtoWithEmbeddedCrlfIsRejected() {
+        final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("POST", "/mcp");
+        request.setScheme("http");
+        request.setServerName("internal-host");
+        request.setServerPort(80);
+        request.setRemoteAddr("10.0.0.1");
+        request.addHeader("X-Forwarded-Proto", "https\r\nX-Injected: evil");
+        request.addHeader("X-Forwarded-Host", "public.example.com");
+
+        assertEquals("http://internal-host/mcp", CanonicalResourceUri.resolve(request, "", Set.of("10.0.0.1")));
+    }
+
+    @Test
     public void testMetadataUrlStripsMcpSuffixAndAppendsWellKnownPath() {
         assertEquals("https://fess.example.com/.well-known/oauth-protected-resource/mcp",
                 CanonicalResourceUri.metadataUrl("https://fess.example.com/mcp"));
     }
 
     @Test
-    public void testMetadataUrlHandlesConfiguredAudienceWithoutMcpSuffix() {
-        assertEquals("urn:fess-resource/.well-known/oauth-protected-resource/mcp", CanonicalResourceUri.metadataUrl("urn:fess-resource"));
+    public void testMetadataUrlOnAnUncompatibleAudienceIsNotAContractThisTestPinsAsCorrect() {
+        // metadataUrl() itself is a pure string transform with no validation of its own -- for an
+        // audience whose path is not /mcp, it produces a URL nothing serves (a real bug the
+        // reviewer of an earlier round of this task caught). This is no longer reachable through
+        // isUsable()/McpMetadataApiManager, which now both refuse such an audience via
+        // isCompatibleAudience below, before metadataUrl() would ever see it. This test exists
+        // only to document that metadataUrl() itself still has no such guard -- it does NOT
+        // assert the malformed output is fine to keep producing.
+        final String malformed = CanonicalResourceUri.metadataUrl("urn:fess-resource");
+        assertTrue(malformed.startsWith("urn:fess-resource"),
+                "metadataUrl() does not itself validate its input -- callers must check isCompatibleAudience first");
+    }
+
+    // ------------------------------------------------------------------
+    // isCompatibleAudience: the guard that keeps metadataUrl()'s degenerate case unreachable.
+    // ------------------------------------------------------------------
+
+    @Test
+    public void testCompatibleAudienceAcceptsBlank() {
+        // Blank means "derive from the request", which always ends in /mcp by construction.
+        assertTrue(CanonicalResourceUri.isCompatibleAudience(""));
+        assertTrue(CanonicalResourceUri.isCompatibleAudience(null));
+    }
+
+    @Test
+    public void testCompatibleAudienceAcceptsAnMcpSuffixedValue() {
+        assertTrue(CanonicalResourceUri.isCompatibleAudience("https://fess.example.com/mcp"));
+        assertTrue(CanonicalResourceUri.isCompatibleAudience("https://fess.example.com/api/mcp"));
+    }
+
+    @Test
+    public void testCompatibleAudienceToleratesTrailingSlashAndFragment() {
+        assertTrue(CanonicalResourceUri.isCompatibleAudience("https://fess.example.com/mcp/"));
+        assertTrue(CanonicalResourceUri.isCompatibleAudience("https://fess.example.com/mcp#fragment"));
+    }
+
+    @Test
+    public void testCompatibleAudienceRejectsANonMcpPath() {
+        // The exact bug the reviewer found: an audience whose path is not /mcp would make every
+        // challenge advertise a resource_metadata URL McpMetadataApiManager#matches() never
+        // serves (it is an exact match on two fixed literal paths).
+        assertFalse(CanonicalResourceUri.isCompatibleAudience("https://fess.example.com/api/mcp2"));
+        assertFalse(CanonicalResourceUri.isCompatibleAudience("https://fess.example.com"));
+        assertFalse(CanonicalResourceUri.isCompatibleAudience("urn:fess-resource"));
     }
 }

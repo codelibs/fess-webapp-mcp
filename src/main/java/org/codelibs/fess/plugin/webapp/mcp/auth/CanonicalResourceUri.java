@@ -131,6 +131,31 @@ public final class CanonicalResourceUri {
     }
 
     /**
+     * Returns whether a configured {@code mcp.oauth.audience} value is compatible with the one
+     * {@code resource_metadata} shape this server actually serves.
+     * <p>
+     * {@link #metadataUrl} only implements RFC 9728 &#xa7;3.1's well-known-path insertion for a
+     * resource path of exactly {@code /mcp} -- the one shape {@code McpMetadataApiManager}
+     * matches, since widening its exact-match {@code matches()} to an unbounded set of paths
+     * would conflict with the very guarantee that method exists to give (registration order
+     * across plugins is not deterministic, so a broad match risks shadowing something else). A
+     * configured audience whose path is not {@code /mcp} -- e.g. {@code
+     * https://host/api/mcp} -- would make {@link #metadataUrl} produce a URL nothing serves, so
+     * a caller must refuse to treat that configuration as usable rather than silently pointing
+     * every challenge at a 404.
+     * </p>
+     *
+     * @param audience the raw {@code mcp.oauth.audience} configuration value; blank is always
+     *            compatible, since the derived (non-configured) case in {@link #resolve} always
+     *            ends in {@code /mcp} by construction
+     * @return {@code true} when {@code audience} is blank or, once normalised, ends with the
+     *         literal {@code /mcp} path segment
+     */
+    public static boolean isCompatibleAudience(final String audience) {
+        return StringUtil.isBlank(audience) || normalize(audience).endsWith(MCP_PATH);
+    }
+
+    /**
      * Strips a fragment and any trailing slashes from {@code raw}.
      *
      * @param raw the URI text to normalise
@@ -222,11 +247,22 @@ public final class CanonicalResourceUri {
     }
 
     /**
-     * Returns the first value of a possibly comma-separated header value, trimmed, or
-     * {@code null} when the input is blank.
+     * Returns the first value of a possibly comma-separated header value, or {@code null} when
+     * the input is blank or, once the first value is isolated, embeds a control character.
+     * <p>
+     * Deliberately strips only surrounding ASCII spaces, not {@link String#trim()}: {@code trim()}
+     * also silently removes trailing CR/LF/TAB, which would let a header value such as
+     * {@code "attacker.example.com\r\nX-Injected: evil"} slip through with its trailing CRLF
+     * stripped and its embedded one intact -- and this value can end up directly inside the
+     * {@code WWW-Authenticate} response header via {@code resource_metadata}. Any remaining
+     * embedded whitespace or control character is rejected outright (the whole value is
+     * discarded, not truncated at the bad character), the same way {@code OriginUtil#canonicalize}
+     * treats the same class of input for the same {@code X-Forwarded-*} trust boundary.
+     * </p>
      *
      * @param headerValue the raw header value
-     * @return the first value, trimmed, or {@code null}
+     * @return the first value, or {@code null} when blank, empty after stripping, or carrying an
+     *         embedded control character
      */
     private static String firstValue(final String headerValue) {
         if (StringUtil.isBlank(headerValue)) {
@@ -234,7 +270,47 @@ public final class CanonicalResourceUri {
         }
         final int comma = headerValue.indexOf(',');
         final String first = comma >= 0 ? headerValue.substring(0, comma) : headerValue;
-        final String trimmed = first.trim();
-        return trimmed.isEmpty() ? null : trimmed;
+        final String stripped = stripAsciiSpaces(first);
+        if (stripped.isEmpty() || containsWhitespaceOrControlChar(stripped)) {
+            return null;
+        }
+        return stripped;
+    }
+
+    /**
+     * Strips only surrounding ASCII space ({@code ' '}) characters -- not {@link String#trim()},
+     * whose broader definition of whitespace would silently remove a trailing CR/LF/TAB instead
+     * of leaving it for {@link #containsWhitespaceOrControlChar} to reject.
+     *
+     * @param value the text to strip
+     * @return {@code value} with leading/trailing ASCII spaces removed
+     */
+    private static String stripAsciiSpaces(final String value) {
+        int start = 0;
+        int end = value.length();
+        while (start < end && value.charAt(start) == ' ') {
+            start++;
+        }
+        while (end > start && value.charAt(end - 1) == ' ') {
+            end--;
+        }
+        return value.substring(start, end);
+    }
+
+    /**
+     * Returns whether {@code value} contains any whitespace or ISO control character, anywhere
+     * in the string.
+     *
+     * @param value the text to scan
+     * @return {@code true} when a whitespace or control character is present
+     */
+    private static boolean containsWhitespaceOrControlChar(final String value) {
+        for (int i = 0; i < value.length(); i++) {
+            final char c = value.charAt(i);
+            if (c <= ' ' || Character.isWhitespace(c) || Character.isISOControl(c)) {
+                return true;
+            }
+        }
+        return false;
     }
 }
