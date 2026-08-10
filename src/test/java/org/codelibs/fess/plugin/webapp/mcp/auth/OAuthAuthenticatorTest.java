@@ -344,55 +344,35 @@ public class OAuthAuthenticatorTest {
     }
 
     @Test
-    public void testUntrustedForwardedHostCannotWidenTheAudienceAccepted() throws Exception {
-        // The attack this guards against: a token legitimately minted (by the SAME issuer) for a
-        // different resource must not become acceptable here just because an untrusted client
-        // claims (via X-Forwarded-Host) to be talking to that other resource's hostname.
+    public void testForeignHostHeaderCannotMintATrustedAudienceWhenAudienceIsNotConfigured() throws Exception {
+        // C1's regression guard. The attack: with mcp.oauth.audience unset (its documented
+        // default), the raw, directly-observed Host header IS request.getServerName() -- a caller
+        // sending a direct request fully controls it. An attacker holding a token legitimately
+        // minted (by the SAME issuer) for a DIFFERENT resource simply sends that resource's own
+        // hostname as Host: the pre-C1 resolveCanonicalUri would derive exactly that hostname as
+        // the canonical audience, which then trivially equals the token's real aud, and the
+        // attacker is admitted.
         //
-        // I2: this MUST use newAuthenticatorWithIssuer (mcp.oauth.audience deliberately left
-        // unset), not newAuthenticator("") -- that helper SETS mcp.oauth.audience, which made the
-        // original version of this test vacuous: authenticate() returned at its configured-
-        // audience branch and never read a header, getRemoteAddr(), or getServerName() at all, so
-        // the X-Forwarded-Host this test plants was never actually looked at, and the 401 came
-        // from an unrelated audience mismatch against the *configured* value. With the audience
-        // left unset, this now takes the SAME path as C1's fix: audienceNotConfigured() (see
-        // OAuthResourceServerAuthenticator#authenticate) refuses before any header is read, which
-        // is *also* a correct way to guarantee an untrusted X-Forwarded-Host can never widen the
-        // accepted audience -- if it were removed, resolveCanonicalUri's trusted-proxy check
-        // (proven separately by CanonicalResourceUriTest) would still catch this specific
-        // scenario, since 203.0.113.9 is not the configured trusted proxy.
-        final String token = sign(validClaims().audience("https://attacker.example.com/mcp"), signingKey);
-        final TestAuthenticator auth = newAuthenticatorWithIssuer(ISSUER);
-        auth.trustedProxies = Set.of("10.0.0.1"); // configured, but this caller is not it
-        final MockletHttpServletRequestImpl request = bearerRequest(token);
+        // Also covers the X-Forwarded-Host variant of the same attack in one test (folded in from
+        // a formerly separate testUntrustedForwardedHostCannotWidenTheAudienceAccepted): that
+        // test used newAuthenticatorWithIssuer too, so once C1's fix made an unconfigured
+        // audience refuse via audienceNotConfigured() before any header at all is read, both
+        // scenarios started failing for the exact same reason and could no longer be
+        // distinguished from each other by any mutant -- keeping them as two separately-named
+        // tests was itself becoming the same "test cannot fail for the reason its name states"
+        // defect I2 was originally raised for. The forwarded-header channel's own trust boundary
+        // (an untrusted proxy's X-Forwarded-Host must not be honoured) remains fully covered by
+        // CanonicalResourceUriTest#testUntrustedRemoteAddrIgnoresForwardedHeaders and its
+        // trusted-proxy siblings, which call resolve() directly and are unaffected by this guard.
+        final MockletHttpServletRequestImpl request = request();
+        request.setServerName("other-mcp.example.com");
         request.setRemoteAddr("203.0.113.9");
         request.addHeader("X-Forwarded-Proto", "https");
         request.addHeader("X-Forwarded-Host", "attacker.example.com");
-        final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
-
-        final McpError error = assertThrows(McpError.class, () -> auth.authenticate(request, response));
-        assertEquals(401, error.getHttpStatus(),
-                "an untrusted X-Forwarded-Host must not be able to rewrite the audience this server checks against");
-    }
-
-    @Test
-    public void testForeignHostHeaderCannotMintATrustedAudienceWhenAudienceIsNotConfigured() throws Exception {
-        // C1's regression guard. The attack: with mcp.oauth.audience unset (its documented
-        // default) and NO forwarding/proxy involved at all, the raw, directly-observed Host
-        // header IS request.getServerName() -- a caller sending a direct request fully controls
-        // it. An attacker holding a token legitimately minted (by the SAME issuer) for a
-        // DIFFERENT resource simply sends that resource's own hostname as Host: the pre-C1
-        // resolveCanonicalUri would derive exactly that hostname as the canonical audience, which
-        // then trivially equals the token's real aud, and the attacker is admitted. No trusted-
-        // proxy misconfiguration is needed for this -- unlike
-        // testUntrustedForwardedHostCannotWidenTheAudienceAccepted above, this does not touch
-        // X-Forwarded-* at all, so no trusted-proxy check could ever have caught it; only
-        // requiring a configured audience (this test's own regression guard) can.
-        final MockletHttpServletRequestImpl request = request();
-        request.setServerName("other-mcp.example.com");
         final String token = sign(validClaims().audience("https://other-mcp.example.com/mcp"), signingKey);
         request.addHeader("Authorization", "Bearer " + token);
         final TestAuthenticator auth = newAuthenticatorWithIssuer(ISSUER); // mcp.oauth.audience deliberately unset
+        auth.trustedProxies = Set.of("10.0.0.1"); // configured, but this caller is not it either
         final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
 
         final McpError error = assertThrows(McpError.class, () -> auth.authenticate(request, response),

@@ -55,6 +55,7 @@ public class McpMetadataApiManagerTest {
         manager.properties.put("mcp.auth.mode", "oauth");
         manager.properties.put("mcp.oauth.issuer", "https://idp.example.com");
         manager.properties.put("mcp.oauth.audience", "https://fess.example.com/mcp");
+        manager.properties.put("mcp.oauth.jwks.uri", "https://idp.example.com/jwks");
         return manager;
     }
 
@@ -123,10 +124,25 @@ public class McpMetadataApiManagerTest {
         // document's own "resource" field advertise a resource_metadata URL matches() never
         // serves. Refusing to serve the document at all is safer than serving a self-inconsistent
         // one.
-        final TestManager manager = new TestManager();
-        manager.properties.put("mcp.auth.mode", "oauth");
-        manager.properties.put("mcp.oauth.issuer", "https://idp.example.com");
+        final TestManager manager = oauthManager();
         manager.properties.put("mcp.oauth.audience", "https://fess.example.com/api/mcp2");
+        final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("GET", "/.well-known/oauth-protected-resource/mcp");
+        final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
+        manager.process(request, response, null);
+        assertEquals(404, response.getStatus());
+    }
+
+    @Test
+    public void testMetadataIs404WhenOauthModeHasNoJwksUriConfigured() throws Exception {
+        // Mirrors OAuthResourceServerAuthenticator#isUsable()'s own jwks.uri requirement (I1) via
+        // the shared CanonicalResourceUri#isUsableConfiguration predicate: with issuer and
+        // audience both set but jwks.uri blank, McpApiManager#getAuthenticator has already fallen
+        // back to none-mode (anonymous) behaviour for /mcp -- this endpoint must not still
+        // advertise a 200 protected-resource document for a configuration that isn't actually
+        // enforcing OAuth. Before this fix, this test would have observed 200 (README.md's "both
+        // return HTTP 404 otherwise" was false for exactly this configuration).
+        final TestManager manager = oauthManager();
+        manager.properties.remove("mcp.oauth.jwks.uri");
         final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("GET", "/.well-known/oauth-protected-resource/mcp");
         final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
         manager.process(request, response, null);

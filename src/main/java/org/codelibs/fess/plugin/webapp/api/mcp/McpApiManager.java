@@ -223,10 +223,9 @@ public class McpApiManager extends BaseApiManager {
         final boolean authenticated =
                 AUTH_MODE_FESS_TOKEN.equals(authMode) || (AUTH_MODE_OAUTH.equals(authMode) && !oauthRequestedButUnusable);
         if (!authenticated && logger.isWarnEnabled()) {
-            logger.warn(
-                    "[MCP] mcp.auth.mode={} - every /mcp caller is treated as anonymous. "
-                            + "Set mcp.auth.mode=fess_token, or mcp.auth.mode=oauth with mcp.oauth.issuer set, to require a credential.",
-                    authMode);
+            logger.warn("[MCP] mcp.auth.mode={} - every /mcp caller is treated as anonymous. "
+                    + "Set mcp.auth.mode=fess_token, or mcp.auth.mode=oauth with mcp.oauth.issuer, "
+                    + "mcp.oauth.audience, and mcp.oauth.jwks.uri all set, to require a credential.", authMode);
         }
     }
 
@@ -519,8 +518,9 @@ public class McpApiManager extends BaseApiManager {
      * <p>
      * {@code fess_token} always resolves to {@link FessTokenAuthenticator}. {@code oauth}
      * resolves to {@link OAuthResourceServerAuthenticator} only when
-     * {@link OAuthResourceServerAuthenticator#isUsable()} agrees (i.e. {@code mcp.oauth.issuer}
-     * is set); an unusable {@code oauth} configuration falls back to {@code none} rather than
+     * {@link OAuthResourceServerAuthenticator#isUsable()} agrees (i.e. {@code mcp.oauth.issuer},
+     * {@code mcp.oauth.audience}, and {@code mcp.oauth.jwks.uri} are all set, and the audience is
+     * compatible); an unusable {@code oauth} configuration falls back to {@code none} rather than
      * serving a broken protected-resource document with an empty {@code authorization_servers}.
      * Every other value -- the default {@code none}, and any empty or unrecognised string --
      * resolves to {@link NoneAuthenticator}. Falling back rather than failing closed or raising

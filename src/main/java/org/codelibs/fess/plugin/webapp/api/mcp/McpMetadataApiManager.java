@@ -115,34 +115,19 @@ public class McpMetadataApiManager implements WebApiManager {
             return;
         }
         final String issuer = getIssuer();
-        if (StringUtil.isBlank(issuer)) {
-            // Defence in depth: McpApiManager#getAuthenticator already refuses to select oauth
-            // mode when the issuer is unset, but this manager reads mcp.auth.mode independently,
-            // so it must independently refuse to serve a PRM document with an empty
-            // authorization_servers array (RFC 9728 requires it non-empty) rather than trusting
-            // that the two config reads can never disagree.
-            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
-            return;
-        }
-        final String configuredAudience = getConfiguredAudience();
-        if (StringUtil.isBlank(configuredAudience)) {
-            // C1 defence in depth, mirroring OAuthResourceServerAuthenticator#isUsable()'s own
-            // now-mandatory audience check: without an explicitly configured audience,
-            // resolveCanonicalUri would derive the served "resource" field from the request's
-            // caller-controlled Host header (or, from a trusted proxy, X-Forwarded-Host) instead.
-            // That value also becomes the resource_metadata URL's own basis, so an unauthenticated
-            // caller could make this very document reflect an attacker-chosen resource identifier.
-            // This manager reads mcp.auth.mode/mcp.oauth.* independently of
-            // OAuthResourceServerAuthenticator, so it must independently refuse here too, rather
-            // than trusting that authenticator's own guard is the only caller of resolve().
-            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
-            return;
-        }
-        if (!CanonicalResourceUri.isCompatibleAudience(configuredAudience)) {
-            // Same defence-in-depth rationale, for the other half of OAuthResourceServerAuthenticator
-            // #isUsable(): a configured mcp.oauth.audience whose path is not /mcp would make this
-            // document's own resource field point at a resource_metadata URL matches() does not
-            // serve (see CanonicalResourceUri#isCompatibleAudience).
+        if (!CanonicalResourceUri.isUsableConfiguration(issuer, getConfiguredAudience(), getJwksUri())) {
+            // Defence in depth, mirroring OAuthResourceServerAuthenticator#isUsable(): this
+            // manager reads mcp.auth.mode/mcp.oauth.* independently, through its own
+            // ComponentUtil seams rather than by consulting an authenticator instance, so it must
+            // independently apply the exact same usability predicate rather than trusting that
+            // the two config reads can never disagree. A blank issuer would serve a PRM document
+            // with an empty authorization_servers array (RFC 9728 requires it non-empty); a blank
+            // or incompatible audience would derive (or otherwise misstate) this document's own
+            // "resource" field from the request's caller-controlled Host header instead of the
+            // operator-pinned value (C1); a blank jwks.uri means the sibling /mcp endpoint has
+            // already fallen back to none-mode (anonymous) behaviour for this exact
+            // configuration, so serving 200 here would advertise OAuth protection this deployment
+            // is not actually enforcing (I1). See CanonicalResourceUri#isUsableConfiguration.
             response.setStatus(HttpServletResponse.SC_NOT_FOUND);
             return;
         }
@@ -202,12 +187,37 @@ public class McpMetadataApiManager implements WebApiManager {
     }
 
     /**
-     * Returns the configured audience override.
+     * Returns the configured audience.
+     * <p>
+     * Required for {@link CanonicalResourceUri#isUsableConfiguration} to accept this
+     * configuration (C1): a blank value now makes {@link #process} refuse with HTTP 404 rather
+     * than deriving the served {@code resource} field from the request the way {@link
+     * CanonicalResourceUri#resolve}'s own {@code configuredAudience} parameter still documents as
+     * its general contract -- that derivation is retained in {@link CanonicalResourceUri} itself
+     * but is no longer reachable from this class with a blank value here.
+     * </p>
      *
-     * @return {@code mcp.oauth.audience}'s value; blank means "derive from the request"
+     * @return {@code mcp.oauth.audience}'s value; blank means oauth mode is not configured
      */
     protected String getConfiguredAudience() {
         return getSystemProperty("mcp.oauth.audience", StringUtil.EMPTY);
+    }
+
+    /**
+     * Returns the configured JWKS endpoint.
+     * <p>
+     * Required for {@link CanonicalResourceUri#isUsableConfiguration} to accept this
+     * configuration (I1): without it, {@code OAuthResourceServerAuthenticator#isUsable()} has
+     * already made the sibling {@code /mcp} endpoint fall back to {@code none}-mode (anonymous)
+     * behaviour for this exact configuration, so this manager must refuse too, rather than
+     * serving a 200 protected-resource document that advertises OAuth protection the {@code /mcp}
+     * endpoint is not actually enforcing.
+     * </p>
+     *
+     * @return {@code mcp.oauth.jwks.uri}'s value; blank when unset
+     */
+    protected String getJwksUri() {
+        return getSystemProperty("mcp.oauth.jwks.uri", StringUtil.EMPTY);
     }
 
     /**

@@ -159,19 +159,25 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
      * make it do so.
      * </p>
      * <p>
-     * {@code McpApiManager#getAuthenticator} and {@code McpMetadataApiManager} both consult this
-     * before selecting this class, falling back to {@code none}-mode behaviour (and, for the
-     * metadata endpoint, HTTP 404) when it returns {@code false}.
+     * {@code McpApiManager#getAuthenticator} consults this method directly before selecting this
+     * class, falling back to {@code none}-mode behaviour when it returns {@code false}.
+     * {@code McpMetadataApiManager} does <em>not</em> consult this instance method -- it has none
+     * of this class's state to call it on, reading {@code mcp.auth.mode}/{@code mcp.oauth.*}
+     * through its own, independent {@code ComponentUtil} seams instead -- but it applies the
+     * exact same {@link CanonicalResourceUri#isUsableConfiguration} predicate this method
+     * delegates to, falling back to HTTP 404 when it returns {@code false}. The predicate is
+     * shared so the two classes' definitions of "usable" cannot silently drift apart the way
+     * their hand-written, independently-duplicated checks already had before {@code
+     * isUsableConfiguration} existed.
      * </p>
      *
      * @return {@code true} when {@link #getIssuer()}, {@link #getConfiguredAudience()}, and
      *         {@link #getJwksUri()} are all non-blank and
      *         {@link CanonicalResourceUri#isCompatibleAudience} accepts
-     *         {@link #getConfiguredAudience()}
+     *         {@link #getConfiguredAudience()} -- see {@link CanonicalResourceUri#isUsableConfiguration}
      */
     public boolean isUsable() {
-        return StringUtil.isNotBlank(getIssuer()) && StringUtil.isNotBlank(getConfiguredAudience())
-                && CanonicalResourceUri.isCompatibleAudience(getConfiguredAudience()) && StringUtil.isNotBlank(getJwksUri());
+        return CanonicalResourceUri.isUsableConfiguration(getIssuer(), getConfiguredAudience(), getJwksUri());
     }
 
     @Override
@@ -354,6 +360,14 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
      * metadataUrl} is passed as {@code null} deliberately, not derived and then discarded.
      * </p>
      * <p>
+     * No {@code error} (or {@code error_description}) is set, for the same RFC 6750 &#xa7;3
+     * reason {@link #missingCredential} sets none: this check runs before {@link #authenticate}
+     * has looked at the {@code Authorization} header at all, so it cannot yet know whether the
+     * caller supplied a credential -- {@code error="invalid_token"} specifically claims one was
+     * supplied and rejected, which would misdescribe the caller's own request in exactly the case
+     * where no credential was sent either.
+     * </p>
+     * <p>
      * In production this method is only ever reached on an instance {@code
      * McpApiManager#getAuthenticator} has already confirmed {@link #isUsable()} for -- and
      * {@link #isUsable()} now requires a non-blank audience too -- so this check is a redundant,
@@ -369,8 +383,9 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
         if (logger.isDebugEnabled()) {
             logger.debug("[MCP] oauth authentication refused: mcp.oauth.audience is not configured");
         }
-        setChallenge(response, "invalid_token", "This server's OAuth configuration is incomplete.", requiredScopes, null);
-        return new McpError(HttpServletResponse.SC_UNAUTHORIZED, ErrorCode.InvalidRequest, "The access token is invalid or expired.");
+        setChallenge(response, null, null, requiredScopes, null);
+        return new McpError(HttpServletResponse.SC_UNAUTHORIZED, ErrorCode.InvalidRequest,
+                "This server's OAuth configuration is incomplete.");
     }
 
     /**
@@ -576,9 +591,17 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
     }
 
     /**
-     * Returns the configured audience override.
+     * Returns the configured audience.
+     * <p>
+     * Required for {@link #isUsable()} (C1): a blank value now makes this authenticator unusable,
+     * and {@link #authenticate} refuses every call outright (see {@link #audienceNotConfigured})
+     * rather than deriving a canonical URI from the request the way {@link CanonicalResourceUri
+     * #resolve}'s own {@code configuredAudience} parameter still documents as its general
+     * contract -- that derivation is retained in {@link CanonicalResourceUri} itself but is no
+     * longer reachable from this class with a blank value here.
+     * </p>
      *
-     * @return {@code mcp.oauth.audience}'s value; blank means "derive from the request"
+     * @return {@code mcp.oauth.audience}'s value; blank means oauth mode is not configured
      */
     protected String getConfiguredAudience() {
         return getSystemProperty("mcp.oauth.audience", StringUtil.EMPTY);

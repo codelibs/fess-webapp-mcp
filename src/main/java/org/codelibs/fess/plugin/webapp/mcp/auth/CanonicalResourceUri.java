@@ -63,21 +63,28 @@ import jakarta.servlet.http.HttpServletRequest;
  * served by the same authorization server, while holding a token legitimately minted for that
  * other resource, would make this branch derive an audience that matches the token's real {@code
  * aud} -- the confused-deputy case audience binding exists to prevent. Both current callers now
- * refuse to reach this branch with a blank {@code configuredAudience}, each with its own
- * independent guard rather than relying on the other's: {@code
+ * independently refuse to reach this branch with a blank {@code configuredAudience} -- {@code
  * OAuthResourceServerAuthenticator#authenticate} refuses before ever calling {@link #resolve},
- * and {@code OAuthResourceServerAuthenticator#isUsable} (consulted by {@code
- * McpApiManager#getAuthenticator} before this authenticator is even selected) requires a
- * non-blank audience too; {@code McpMetadataApiManager#process} independently refuses the same
- * way before its own call to {@link #resolve}. This branch is kept, rather than deleted, because
- * it remains a directly and thoroughly tested (see {@code CanonicalResourceUriTest}), pure,
- * well-isolated piece of the trust-boundary logic Fess's own {@code TargetOriginResolver} also
- * needs for the same {@code X-Forwarded-*} headers -- deleting it would not make the codebase any
- * safer (the vulnerability was never in this method; it was in calling it without first requiring
- * a configured audience), only harder to directly verify in isolation. Any future caller of
- * {@link #resolve} with a blank {@code configuredAudience} for a security decision must
- * independently justify why deriving from the request is safe in its context -- the answer for
- * an OAuth audience check is that it is not.
+ * and both it (via {@code isUsable()}) and {@code McpMetadataApiManager#process} apply {@link
+ * #isUsableConfiguration} before their own separate call to {@link #resolve}, so the audience
+ * requirement itself is defined exactly once even though it is still enforced at two independent
+ * call sites. This branch is kept, rather than deleted, because it remains a directly and
+ * thoroughly tested (see {@code CanonicalResourceUriTest}), pure, well-isolated piece of the
+ * trust-boundary logic Fess's own {@code TargetOriginResolver} also needs for the same {@code
+ * X-Forwarded-*} headers -- deleting it would not make the codebase any safer (the vulnerability
+ * was never in this method; it was in calling it without first requiring a configured audience),
+ * only harder to directly verify in isolation. Any future caller of {@link #resolve} with a blank
+ * {@code configuredAudience} for a security decision must independently justify why deriving from
+ * the request is safe in its context -- the answer for an OAuth audience check is that it is not.
+ * </p>
+ * <p>
+ * <b>Honest cost of keeping it.</b> With both callers now required to hold a non-blank audience
+ * before this class is even usable, {@code trustedProxies} and the entire {@code X-Forwarded-*}
+ * overlay it gates are, as of this wave, never reached by either caller in production either --
+ * only {@link #resolve}'s first branch (the configured-audience short-circuit) ever runs. That is
+ * roughly half of this class's own source by line count. It stays for the same reason the derived
+ * branch itself stays: it is not wrong, it is thoroughly tested in isolation, and removing it buys
+ * no additional safety over the guards that already make it unreachable. Follow-up, not a blocker.
  * </p>
  */
 public final class CanonicalResourceUri {
@@ -178,6 +185,35 @@ public final class CanonicalResourceUri {
      */
     public static boolean isCompatibleAudience(final String audience) {
         return StringUtil.isBlank(audience) || normalize(audience).endsWith(MCP_PATH);
+    }
+
+    /**
+     * Returns whether an {@code oauth}-mode configuration is usable at all: {@code issuer} is
+     * configured, {@code audience} is configured and {@link #isCompatibleAudience(String)
+     * compatible}, and {@code jwksUri} is configured.
+     * <p>
+     * {@code OAuthResourceServerAuthenticator#isUsable()} and {@code McpMetadataApiManager
+     * #process} both need this exact three-way check -- the first to decide whether to select
+     * this authenticator at all, the second (reading its own independent {@code ComponentUtil}
+     * seams, not consulting the authenticator instance) to decide whether to serve the RFC 9728
+     * metadata document. Factored out here, alongside {@link #resolve} and {@link #metadataUrl},
+     * for the same reason those are: two classes in different packages need the identical pure
+     * computation, and a single shared implementation is the only way to guarantee they cannot
+     * silently drift apart. Before this method existed, they already had, twice: the audience
+     * requirement and the {@code jwksUri} requirement were each added to one class's hand-written
+     * checks first and had to be separately, manually mirrored into the other's.
+     * </p>
+     *
+     * @param issuer the {@code mcp.oauth.issuer} value
+     * @param audience the {@code mcp.oauth.audience} value; blank means "not configured" here --
+     *            unlike {@link #resolve}'s {@code configuredAudience} parameter, this method has
+     *            no request to fall back to deriving from
+     * @param jwksUri the {@code mcp.oauth.jwks.uri} value
+     * @return {@code true} when all three are non-blank and {@code audience} is compatible
+     */
+    public static boolean isUsableConfiguration(final String issuer, final String audience, final String jwksUri) {
+        return StringUtil.isNotBlank(issuer) && StringUtil.isNotBlank(audience) && isCompatibleAudience(audience)
+                && StringUtil.isNotBlank(jwksUri);
     }
 
     /**
