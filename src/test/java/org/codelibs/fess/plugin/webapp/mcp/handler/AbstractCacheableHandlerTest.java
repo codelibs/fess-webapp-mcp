@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import java.util.Map;
 
 import org.codelibs.fess.mylasta.direction.FessConfig;
+import org.codelibs.fess.plugin.webapp.api.mcp.McpApiManager;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
 import org.junit.jupiter.api.Test;
 
@@ -119,5 +120,78 @@ public class AbstractCacheableHandlerTest {
         // Long.parseLong(" 5000 ") would throw and this would see the default instead of 5000.
         final TestHandler handler = new TestHandler(" 5000 ", 3_600_000L);
         assertEquals(5000L, handler.getTtlMs());
+    }
+
+    /**
+     * Test double for {@link #testGetAuthModeRealBodyReadsTheExactKeyAndDefault} specifically:
+     * unlike every {@code getAuthMode()}-overriding double elsewhere in this suite (e.g.
+     * {@code ToolsListHandlerTest.FixedTtlHandler}), this class does <em>not</em> override
+     * {@code getAuthMode()} itself. Overriding only {@link AbstractCacheableHandler#getSystemProperty}
+     * -- the one primitive {@code getAuthMode()}'s real body touches {@code ComponentUtil}
+     * through -- lets that real body run container-free, so its literal key and default-value
+     * argument are actually exercised instead of permanently bypassed. Mirrors
+     * {@code AuthenticatorTest.SystemPropertyCapturingManager} for the identical reason.
+     */
+    private static final class AuthModeCapturingHandler extends AbstractCacheableHandler {
+
+        String capturedKey;
+        String capturedDefaultValue;
+
+        AuthModeCapturingHandler() {
+            super(TTL_KEY, 3_600_000L);
+        }
+
+        @Override
+        public String getMethod() {
+            return "test/cacheable";
+        }
+
+        @Override
+        public Map<String, Object> handle(final McpCallContext context) {
+            throw new UnsupportedOperationException("not exercised by this test");
+        }
+
+        @Override
+        protected String getCacheScope(final McpCallContext context) {
+            return "public";
+        }
+
+        @Override
+        protected String getSystemProperty(final String key, final String defaultValue) {
+            // Simulates an unset property: real FessConfig#getSystemProperty returns
+            // defaultValue precisely when the key is unset, so echoing it back here is a
+            // faithful stand-in without needing a live container.
+            capturedKey = key;
+            capturedDefaultValue = defaultValue;
+            return defaultValue;
+        }
+    }
+
+    @Test
+    public void testGetAuthModeRealBodyReadsTheExactKeyAndDefault() {
+        // Every getAuthMode()-overriding test double elsewhere in this suite leaves this
+        // method's own body -- the actual key/default it passes to getSystemProperty -- entirely
+        // unexercised. A regression that reads a typo'd key (which always misses, silently and
+        // permanently falling back to the default) would survive every one of those tests; this
+        // one does not, because it overrides only the ComponentUtil-touching primitive one level
+        // below and lets getAuthMode()'s real body run.
+        final AuthModeCapturingHandler handler = new AuthModeCapturingHandler();
+
+        final String authMode = handler.getAuthMode();
+
+        assertEquals("mcp.auth.mode", handler.capturedKey, "getAuthMode() must read this exact property key");
+        assertEquals(AbstractCacheableHandler.AUTH_MODE_NONE, handler.capturedDefaultValue,
+                "getAuthMode() must pass AUTH_MODE_NONE as the default, not a different or re-typed literal");
+        assertEquals("none", authMode);
+    }
+
+    @Test
+    public void testAuthModeNoneConstantMatchesMcpApiManagers() {
+        // AbstractCacheableHandler#AUTH_MODE_CONFIG_KEY's Javadoc documents "mcp.auth.mode" as a
+        // deliberate duplicate of McpApiManager#getAuthMode()'s literal key (a cross-package
+        // import the other way would cycle back into this package's own handlers). Pinning the
+        // "none" default the two classes share keeps that duplication from silently drifting
+        // apart -- e.g. one side being renamed to "anonymous" while the other stays "none".
+        assertEquals(McpApiManager.AUTH_MODE_NONE, AbstractCacheableHandler.AUTH_MODE_NONE);
     }
 }

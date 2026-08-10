@@ -135,14 +135,38 @@ public abstract class AbstractCacheableHandler implements McpMethodHandler {
     /**
      * Returns the configured MCP authentication mode.
      * <p>
-     * A test double overrides this method directly, exactly like {@link #getTtlMs()}, so no
-     * test needs a live DI container to exercise a subclass's {@code getCacheScope}.
+     * Delegates to {@link #getSystemProperty(String, String)} rather than calling
+     * {@code getFessConfig().getSystemProperty(...)} directly, so a container-free test can stub
+     * that one primitive and drive this method's real body -- including its literal
+     * {@value #AUTH_MODE_CONFIG_KEY} key and {@link #AUTH_MODE_NONE} default argument -- without
+     * needing a live DI container. {@code ToolsListHandler} and {@code ResourcesListHandler}
+     * (the only two subclasses that consult this) both override {@code getAuthMode()} itself in
+     * their tests, exactly like {@link #getTtlMs()}; without this seam, this method's own body
+     * -- the actual key/default it passes -- would never be exercised by any test in this suite,
+     * and a typo'd key would read a property that does not exist, silently and permanently
+     * falling back to {@link #AUTH_MODE_NONE} in production.
      * </p>
      *
      * @return {@value #AUTH_MODE_CONFIG_KEY}'s value; {@value #AUTH_MODE_NONE} when unset
      */
     protected String getAuthMode() {
-        return getFessConfig().getSystemProperty(AUTH_MODE_CONFIG_KEY, AUTH_MODE_NONE);
+        return getSystemProperty(AUTH_MODE_CONFIG_KEY, AUTH_MODE_NONE);
+    }
+
+    /**
+     * Reads a String-valued Fess system property.
+     * <p>
+     * Isolated so {@link #getAuthMode()} itself can be exercised container-free: this is the
+     * only place in that call chain that touches {@code ComponentUtil}. Mirrors
+     * {@code McpApiManager#getSystemProperty(String, String)} for the identical reason.
+     * </p>
+     *
+     * @param key the system property key
+     * @param defaultValue the value to return when the property is unset
+     * @return the property's value, or {@code defaultValue} when unset
+     */
+    protected String getSystemProperty(final String key, final String defaultValue) {
+        return getFessConfig().getSystemProperty(key, defaultValue);
     }
 
     /**

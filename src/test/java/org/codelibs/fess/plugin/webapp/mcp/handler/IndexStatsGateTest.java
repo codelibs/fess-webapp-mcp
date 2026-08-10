@@ -179,6 +179,10 @@ public class IndexStatsGateTest {
         assertEquals(unknown.getErrorCode(), hidden.getErrorCode());
         assertEquals(unknown.getHttpStatus(), hidden.getHttpStatus());
         assertEquals("Unknown tool: get_index_stats", hidden.getMessage(), "must not disclose that the tool exists");
+        // Asserted on both sides, not just the gated one: a template change that altered only
+        // the unknown-tool branch's message (leaving the two still equal to each other, just
+        // both wrong) would otherwise go unnoticed by the structural comparison above.
+        assertEquals("Unknown tool: no_such_tool", unknown.getMessage());
     }
 
     @Test
@@ -191,6 +195,10 @@ public class IndexStatsGateTest {
         assertEquals(unknown.getErrorCode(), hidden.getErrorCode());
         assertEquals(unknown.getHttpStatus(), hidden.getHttpStatus());
         assertEquals("Resource not found: fess://index/stats", hidden.getMessage(), "must not disclose that the resource exists");
+        // Asserted on both sides, not just the gated one: a template change that altered only
+        // the unknown-resource branch's message (leaving the two still equal to each other, just
+        // both wrong) would otherwise go unnoticed by the structural comparison above.
+        assertEquals("Resource not found: fess://unknown/thing", unknown.getMessage());
     }
 
     @Test

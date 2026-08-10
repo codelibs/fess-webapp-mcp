@@ -46,15 +46,21 @@ public final class PermissionGate {
     /**
      * Returns whether the caller may use a primitive with the given requirement.
      *
-     * @param required the encoded Fess permissions the primitive requires; an empty set means
-     *            the primitive is not gated and every caller is allowed
+     * @param required the encoded Fess permissions the primitive requires; {@code null} or an
+     *            empty set means the primitive is not gated and every caller is allowed. Every
+     *            {@code McpTool#getRequiredPermissions()} implementation shipped in this plugin
+     *            already honours the non-null contract that method's own Javadoc documents, so
+     *            {@code null} is not expected in practice -- but a third-party tool that
+     *            violated it would otherwise NPE every caller out of {@code tools/list}, not
+     *            just itself, so this treats {@code null} the same as empty rather than trusting
+     *            the caller
      * @param principal the caller, or {@code null} when no authenticator resolved one
-     * @return {@code true} when {@code required} is empty, or when {@code principal} is not
-     *         {@code null} and its {@link McpPrincipal#getPermissions()} contains at least one
-     *         permission in {@code required}; {@code false} otherwise
+     * @return {@code true} when {@code required} is {@code null} or empty, or when
+     *         {@code principal} is not {@code null} and its {@link McpPrincipal#getPermissions()}
+     *         contains at least one permission in {@code required}; {@code false} otherwise
      */
     public static boolean isAllowed(final Set<String> required, final McpPrincipal principal) {
-        if (required.isEmpty()) {
+        if (required == null || required.isEmpty()) {
             return true;
         }
         if (principal == null) {

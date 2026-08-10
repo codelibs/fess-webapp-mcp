@@ -174,6 +174,16 @@ public class ResourcesReadHandler extends AbstractCacheableHandler {
 
     /**
      * Builds the index stats resource content.
+     * <p>
+     * Deliberately constructs its own {@link IndexStatsTool} rather than reusing
+     * {@link #indexStatsTool} (the instance {@code handle()} consults only for the permission
+     * gate): the two cannot diverge in production -- both are stock {@code IndexStatsTool}
+     * instances backed by the same {@code mcp.tools.index_stats.permissions} system property --
+     * and this method is only ever reached after {@link #indexStatsTool}'s gate has already
+     * passed, so the one reachable divergence (a caller-supplied {@link #indexStatsTool} with a
+     * looser gate than a genuinely different tool used here) is fail-closed, not fail-open: it
+     * would make this resource harder to reach, never easier.
+     * </p>
      *
      * @return a mutable map with {@code contents}
      * @throws McpError with HTTP 200 and {@link ErrorCode#InternalError} when the stats cannot

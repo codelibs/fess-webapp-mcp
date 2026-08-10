@@ -35,6 +35,16 @@ public class PermissionGateTest {
     }
 
     @Test
+    public void testNullRequiredSetAllowsEvenANullPrincipal() {
+        // Every shipped McpTool#getRequiredPermissions() honours the non-null contract that
+        // method's own Javadoc documents, so this is latent in practice -- but a third-party
+        // tool that returned null would otherwise NPE every caller out of tools/list, not just
+        // itself. If the required == null half of the guard were removed, this would NPE on
+        // required.isEmpty() instead of returning true.
+        assertTrue(PermissionGate.isAllowed(null, null));
+    }
+
+    @Test
     public void testEmptyRequiredSetAllowsAnAnonymousPrincipal() {
         assertTrue(PermissionGate.isAllowed(Set.of(), McpPrincipal.anonymous()));
     }

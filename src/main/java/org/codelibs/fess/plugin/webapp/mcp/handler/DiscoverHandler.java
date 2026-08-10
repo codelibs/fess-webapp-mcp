@@ -42,13 +42,23 @@ public class DiscoverHandler extends AbstractCacheableHandler {
     protected static final long DEFAULT_TTL_MS = 3_600_000L;
 
     /**
-     * Instructions surfaced to MCP clients. Unchanged from the retired {@code initialize}
-     * response's {@code instructions} field.
+     * Instructions surfaced to MCP clients.
+     * <p>
+     * {@code server/discover} is unauthenticated and always {@code cacheScope: "public"} --
+     * unlike {@code tools/list}, it is not gate-aware and must not become so, since that would
+     * force it off the public cache scope for every caller (a larger design change than the
+     * {@code get_index_stats} gate should carry). It must therefore never name a permission
+     * gated tool: doing so would announce a primitive's existence in plain text even though
+     * {@code tools/list} correctly hides it and {@code tools/call} correctly refuses it. This
+     * previously named {@code get_index_stats} (unchanged from the retired {@code initialize}
+     * response's {@code instructions} field) before that tool was gated; the reference was
+     * removed rather than made conditional. See {@code McpToolTest#testIndexStatsIsPermissionGated}
+     * for which tool that is today.
+     * </p>
      */
     protected static final String INSTRUCTIONS =
             "Fess Enterprise Search Server. Use the 'search' tool to perform full-text search with Lucene-like query syntax "
-                    + "(AND default, OR explicit, quotes for phrase, - for exclusion). "
-                    + "Use 'get_index_stats' to check index health. Use 'suggest' for query autocomplete.";
+                    + "(AND default, OR explicit, quotes for phrase, - for exclusion). " + "Use 'suggest' for query autocomplete.";
 
     /**
      * Creates a {@code server/discover} handler.

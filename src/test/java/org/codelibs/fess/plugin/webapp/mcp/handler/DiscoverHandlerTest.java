@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 
 import org.codelibs.fess.plugin.webapp.mcp.McpConstants;
+import org.codelibs.fess.plugin.webapp.mcp.tool.IndexStatsTool;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -110,6 +111,18 @@ public class DiscoverHandlerTest {
         // an immutable Map.of(...) would throw UnsupportedOperationException there.
         final Map<String, Object> result = new TestDiscoverHandler().handle(null);
         assertDoesNotThrow(() -> result.put("resultType", "complete"));
+    }
+
+    @Test
+    public void testInstructionsDoNotNameAGatedTool() {
+        // get_index_stats is gated by default (mcp.tools.index_stats.permissions, see
+        // IndexStatsGateTest). server/discover is unauthenticated and always cacheScope
+        // "public", so announcing a gated tool's name here would give away its existence even
+        // though tools/list correctly hides it and tools/call correctly refuses it with the
+        // same error an unknown tool gets. IndexStatsTool#getName() is a plain string literal,
+        // so this needs no DI container.
+        final String instructions = (String) new TestDiscoverHandler().handle(null).get("instructions");
+        assertFalse(instructions.contains(new IndexStatsTool().getName()), "must not disclose the gated get_index_stats tool");
     }
 
     @Test

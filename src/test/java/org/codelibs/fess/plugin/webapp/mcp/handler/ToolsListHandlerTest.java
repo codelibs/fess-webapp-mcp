@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpError;
@@ -174,13 +175,24 @@ public class ToolsListHandlerTest {
     }
 
     @Test
+    public void testDefaultToolsAreSearchIndexStatsSuggestGetDocumentInThisOrder() {
+        // Restored, DI-free pin on McpTool.defaultTools() itself: every getName() is a string
+        // literal, so this needs no container. Deterministic order matters -- MCP clients may
+        // present tools/list results in the order they arrive -- and a size()>=4 check alone
+        // would not catch a dropped, duplicated, or reordered tool as long as the count stayed
+        // >= 4.
+        final List<String> names = McpTool.defaultTools().stream().map(McpTool::getName).collect(Collectors.toList());
+        assertEquals(List.of("search", "get_index_stats", "suggest", "get_document"), names,
+                "tools/list must report the default tool set, in this exact order");
+    }
+
+    @Test
     public void testNoArgConstructorDefaultsToTheStandardFourToolsButGatingThemNeedsDiContainer() {
         // McpTool.defaultTools() wires in the real IndexStatsTool; filtering the list against a
         // caller's permissions now calls its getRequiredPermissions(), which reads Fess config
         // and therefore needs a live DI container this suite does not provide. This proves the
-        // no-arg constructor really does wire in the real (gated) tool set. Container-free
-        // coverage of the gate itself -- including that it correctly hides get_index_stats --
-        // lives in IndexStatsGateTest, which stubs IndexStatsTool instead of using the real one.
+        // no-arg constructor really does wire in the real (gated) tool set -- a characterization
+        // of the DI dependency, not a substitute for the ordered-name pin above.
         final ToolsListHandler handler = new FixedTtlHandlerNoArg();
         assertThrows(IllegalStateException.class, () -> handler.handle(contextWithParams(Map.of())));
     }
