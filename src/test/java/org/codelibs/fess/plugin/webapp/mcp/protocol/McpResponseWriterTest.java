@@ -139,6 +139,24 @@ public class McpResponseWriterTest {
     }
 
     @Test
+    public void testRetryAfterHeaderIsSetFromErrorData() {
+        final MockletHttpServletResponseImpl response = response();
+        writer.writeError(response, 1, true,
+                new McpError(429, ErrorCode.InternalError, "rate limit exceeded", Map.of("retryAfterSeconds", 60)));
+
+        assertEquals(429, response.getStatus());
+        assertEquals("60", response.getHeader("Retry-After"));
+    }
+
+    @Test
+    public void testRetryAfterHeaderIsAbsentWithoutRetryAfterSecondsData() {
+        final MockletHttpServletResponseImpl response = response();
+        writer.writeError(response, 1, true, new McpError(400, ErrorCode.ParseError, "malformed JSON"));
+
+        assertNull(response.getHeader("Retry-After"), "only an error carrying retryAfterSeconds data sets the header");
+    }
+
+    @Test
     public void testNotificationGets202WithNoBody() {
         final MockletHttpServletResponseImpl response = response();
         writer.writeAccepted(response);

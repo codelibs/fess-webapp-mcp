@@ -32,6 +32,7 @@ import org.codelibs.fess.api.BaseApiManager;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
 import org.codelibs.fess.plugin.webapp.mcp.McpConstants;
 import org.codelibs.fess.plugin.webapp.mcp.OriginValidator;
+import org.codelibs.fess.plugin.webapp.mcp.RateLimiter;
 import org.codelibs.fess.plugin.webapp.mcp.handler.CompletionHandler;
 import org.codelibs.fess.plugin.webapp.mcp.handler.DiscoverHandler;
 import org.codelibs.fess.plugin.webapp.mcp.handler.PromptsGetHandler;
@@ -71,6 +72,21 @@ public class McpApiManager extends BaseApiManager {
 
     /** The server name reported in {@code _meta.serverInfo} on every result. */
     protected static final String SERVER_NAME = "fess-mcp-server";
+
+    /**
+     * HTTP 429, Too Many Requests. Not one of the named constants on {@link HttpServletResponse}
+     * -- that interface predates RFC 6585, which defined this status -- so it is named here
+     * instead of spelled out as a bare literal at the throw site.
+     */
+    private static final int HTTP_TOO_MANY_REQUESTS = 429;
+
+    /**
+     * The shared rate limiter, or {@code null} until {@link #getRateLimiter()} builds it on
+     * first use. Not {@code final}: building it eagerly in a field initializer would call
+     * {@link #getRateLimitPerMinute()}'s {@code ComponentUtil} read for every {@code
+     * McpApiManager} construction, including every container-free test.
+     */
+    private RateLimiter rateLimiter;
 
     /**
      * Also one of the nine handlers in {@link #dispatcher}; held separately because
@@ -145,7 +161,6 @@ public class McpApiManager extends BaseApiManager {
             }
             writeHeaders(response);
             validateOrigin(request); // Task 10
-            checkRateLimit(request); // Task 11
             authenticate(request, response); // Task 13-14
 
             final String body = readBoundedRequestBody(request);
@@ -166,6 +181,7 @@ public class McpApiManager extends BaseApiManager {
             requireSupportedVersion(meta.getProtocolVersion());
 
             final McpCallContext context = new McpCallContext(mcpRequest, meta, mcpRequest.getParams());
+            enforceRateLimit(request, context); // Task 11
             writer.writeResult(response, id, getDispatcher().dispatch(context));
         } catch (final McpError e) {
             writer.writeError(response, id, hasId, e);
@@ -257,17 +273,114 @@ public class McpApiManager extends BaseApiManager {
     }
 
     /**
-     * Enforces the per-client request rate limit.
+     * Consumes a rate-limit token for methods that do real work.
      * <p>
-     * No-op placeholder. Task 11 implements rate limiting (HTTP 429 + {@code Retry-After} when
-     * exceeded); this seam exists now so {@link #process} calls it at the pipeline position the
-     * design mandates, ahead of that task landing.
+     * There is no seam for this at pipeline step 4 (ahead of body parsing, alongside
+     * {@link #validateOrigin}): the JSON-RPC method name -- which methods this limit applies to
+     * and which it does not -- is only known once the body has been parsed and dispatched to,
+     * so token consumption has to happen here, immediately before
+     * {@link McpDispatcher#dispatch}, not earlier in {@link #process}. Only {@code tools/call}
+     * and {@code completion/complete} are limited, per the spec's server MUST; {@code
+     * server/discover} and the list methods are metadata reads and are deliberately excluded.
+     * </p>
+     * <p>
+     * {@link #getRateLimiter()} -- and therefore {@link #getRateLimitPerMinute()}'s
+     * {@code ComponentUtil} read -- is only reached once the method check above has passed, so a
+     * {@code server/discover} or list-method call never touches the DI container here, matching
+     * the same early-return discipline {@link #validateOrigin} uses for {@code getAllowedOrigins()}.
+     * </p>
+     *
+     * @param request the servlet request, consulted for the caller's IP when there is no
+     *            authenticated subject
+     * @param context the call context, supplying the resolved JSON-RPC method
+     * @throws McpError with HTTP 429 and a {@code retryAfterSeconds} data entry when the caller
+     *             identified by {@link #resolveRateLimitKey} is over the limit
+     */
+    protected void enforceRateLimit(final HttpServletRequest request, final McpCallContext context) {
+        final String method = context.getRequest().getMethod();
+        if (!"tools/call".equals(method) && !"completion/complete".equals(method)) {
+            return;
+        }
+        final RateLimiter limiter = getRateLimiter();
+        final String key = resolveRateLimitKey(request, context);
+        if (!limiter.tryAcquire(key)) {
+            final Map<String, Object> data = new LinkedHashMap<>();
+            data.put("retryAfterSeconds", limiter.getRetryAfterSeconds());
+            throw new McpError(HTTP_TOO_MANY_REQUESTS, ErrorCode.InternalError, "rate limit exceeded (mcp.rate.limit.per.minute)", data);
+        }
+    }
+
+    /**
+     * Resolves the identity {@link #enforceRateLimit} counts calls against.
+     * <p>
+     * Keys on the authenticated subject when {@link #resolvePrincipalSubject} resolves one,
+     * the caller's IP address otherwise. {@code request.getRemoteAddr()} returning {@code null}
+     * -- not expected from a real container, but possible from a test double -- falls back to
+     * the literal {@code "unknown"} rather than a {@code null} key, since {@code
+     * ConcurrentHashMap} (which {@link RateLimiter} is built on) rejects {@code null} keys
+     * outright.
      * </p>
      *
      * @param request the servlet request
+     * @param context the call context
+     * @return the non-null key to rate-limit on
      */
-    protected void checkRateLimit(final HttpServletRequest request) {
-        // Task 11 fills this in.
+    protected String resolveRateLimitKey(final HttpServletRequest request, final McpCallContext context) {
+        final String subject = resolvePrincipalSubject(context);
+        if (subject != null) {
+            return subject;
+        }
+        final String remoteAddr = request.getRemoteAddr();
+        return remoteAddr != null ? remoteAddr : "unknown";
+    }
+
+    /**
+     * Resolves the authenticated subject for {@code context}, if any.
+     * <p>
+     * Always returns {@code null} today: {@link McpCallContext} does not yet carry a resolved
+     * principal, since authentication is Tasks 13-14's work, not this one's. Isolating the
+     * lookup in its own seam means those tasks only need to change this one method -- to read
+     * the subject off the principal {@link McpCallContext} will then carry -- without touching
+     * {@link #resolveRateLimitKey} or {@link #enforceRateLimit} at all.
+     * </p>
+     *
+     * @param context the call context
+     * @return the authenticated subject, or {@code null} when the caller is unauthenticated (or,
+     *         as today, when this server does not yet resolve one at all)
+     */
+    protected String resolvePrincipalSubject(final McpCallContext context) {
+        return null;
+    }
+
+    /**
+     * Returns the shared rate limiter, building it from {@link #getRateLimitPerMinute()} on
+     * first use.
+     * <p>
+     * Built lazily rather than eagerly in the constructor so that constructing a
+     * {@code McpApiManager} -- something the container-free test suite does for every test --
+     * never touches {@code ComponentUtil}; the {@code ComponentUtil} read only happens the first
+     * time a {@code tools/call} or {@code completion/complete} request actually needs it. The
+     * built instance is cached on the instance field so its per-key windows persist across
+     * requests instead of resetting on every call.
+     * </p>
+     *
+     * @return the rate limiter, shared across every request this manager processes
+     */
+    protected synchronized RateLimiter getRateLimiter() {
+        if (rateLimiter == null) {
+            rateLimiter = new RateLimiter(getRateLimitPerMinute());
+        }
+        return rateLimiter;
+    }
+
+    /**
+     * Returns the configured per-key request limit.
+     *
+     * @return the number of {@code tools/call}/{@code completion/complete} calls a single key
+     *         may make per minute; {@code 0} disables the limiter
+     */
+    protected int getRateLimitPerMinute() {
+        return ComponentUtil.getFessConfig().getSystemPropertyAsInt("mcp.rate.limit.per.minute", 60);
     }
 
     /**

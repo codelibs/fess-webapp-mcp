@@ -26,6 +26,7 @@ import java.util.Map;
 import java.util.Set;
 
 import org.codelibs.fess.plugin.webapp.mcp.McpConstants;
+import org.codelibs.fess.plugin.webapp.mcp.RateLimiter;
 import org.codelibs.fess.plugin.webapp.mcp.handler.McpMethodHandler;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpDispatcher;
@@ -76,6 +77,19 @@ public class McpApiManagerHttpTest {
             // presence-check actually skips this call when Origin is absent.
             allowedOriginsCalled = true;
             return Set.of();
+        }
+
+        boolean rateLimiterCalled = false;
+        RateLimiter rateLimiter = new RateLimiter(60);
+
+        @Override
+        protected RateLimiter getRateLimiter() {
+            // no-op: the real implementation reads mcp.rate.limit.per.minute from the container
+            // on first use. Records whether it ran at all, so tests can assert
+            // enforceRateLimit's method-check actually skips this call for methods the rate
+            // limit does not cover.
+            rateLimiterCalled = true;
+            return rateLimiter;
         }
     }
 
@@ -305,11 +319,63 @@ public class McpApiManagerHttpTest {
         // getAllowedOrigins() -- that call reaches ComponentUtil.getFessConfig() in production,
         // so paying for it on every request (including the CLI-bridge/stdio-proxy majority that
         // never sends Origin) would be pointless container traffic on the hot path that
-        // checkRateLimit and authenticate are about to join at this same call site.
+        // authenticate is about to join at this same call site.
         final TestManager manager = new TestManager();
         post(manager, modernBody("tools/list"), modernHeaders("tools/list"));
         assertEquals(200, lastResponse.getStatus());
         assertFalse(manager.allowedOriginsCalled, "getAllowedOrigins() must not run when Origin is absent");
+    }
+
+    /** A {@code tools/call} body/header pair naming a tool this server does not register. */
+    private static final String UNKNOWN_TOOL_CALL_BODY = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"_meta\":{"
+            + "\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\","
+            + "\"io.modelcontextprotocol/clientCapabilities\":{}},\"name\":\"unknown_tool\",\"arguments\":{}}}";
+
+    private Map<String, String> unknownToolCallHeaders() {
+        return Map.of(McpConstants.HEADER_PROTOCOL_VERSION, "2026-07-28", McpConstants.HEADER_METHOD, "tools/call",
+                McpConstants.HEADER_NAME, "unknown_tool");
+    }
+
+    @Test
+    public void testNonRateLimitedMethodSkipsRateLimiterLookup() throws Exception {
+        // enforceRateLimit must check the resolved method before calling getRateLimiter() --
+        // that call reaches ComponentUtil.getFessConfig() in production on its first invocation,
+        // so paying for it on every request (including server/discover and the list methods,
+        // which the spec does not rate-limit) would be pointless container traffic.
+        final TestManager manager = new TestManager();
+        post(manager, modernBody("tools/list"), modernHeaders("tools/list"));
+        assertEquals(200, lastResponse.getStatus());
+        assertFalse(manager.rateLimiterCalled, "getRateLimiter() must not run for a method the rate limit does not cover");
+    }
+
+    @Test
+    public void testToolsCallConsultsRateLimiter() throws Exception {
+        // Positive control for testNonRateLimitedMethodSkipsRateLimiterLookup: proves the flag
+        // is not simply always false, only false for methods the limit does not cover.
+        final TestManager manager = new TestManager();
+        post(manager, UNKNOWN_TOOL_CALL_BODY, unknownToolCallHeaders());
+        assertTrue(manager.rateLimiterCalled, "tools/call must consult the rate limiter");
+    }
+
+    @Test
+    public void testCompletionCompleteConsultsRateLimiter() throws Exception {
+        final TestManager manager = new TestManager();
+        post(manager, modernBody("completion/complete"), modernHeaders("completion/complete"));
+        assertTrue(manager.rateLimiterCalled, "completion/complete must consult the rate limiter");
+    }
+
+    @Test
+    public void testRateLimitExceededIs429WithRetryAfterHeader() throws Exception {
+        final TestManager manager = new TestManager();
+        manager.rateLimiter = new RateLimiter(1);
+        final String first = post(manager, UNKNOWN_TOOL_CALL_BODY, unknownToolCallHeaders());
+        assertEquals(200, lastResponse.getStatus(), "the first call is within the limit: " + first);
+
+        final String second = post(manager, UNKNOWN_TOOL_CALL_BODY, unknownToolCallHeaders());
+        assertEquals(429, lastResponse.getStatus(), second);
+        assertEquals("60", lastResponse.getHeader("Retry-After"), second);
+        assertTrue(second.contains("\"id\":1"), "the id is known by the time the rate limit is enforced: " + second);
+        assertTrue(second.contains("-32603"), second);
     }
 
     @Test

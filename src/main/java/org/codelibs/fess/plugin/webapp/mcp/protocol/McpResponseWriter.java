@@ -109,6 +109,14 @@ public class McpResponseWriter {
      * <p>When {@code hasId} is false the {@code id} member is omitted entirely.
      * {@code RequestId} is {@code string | number}; {@code null} is not part of the type.</p>
      *
+     * <p>When {@code error.getData()} carries a {@code retryAfterSeconds} entry -- as
+     * {@code McpApiManager#enforceRateLimit} sets on a 429 -- its value is also written as the
+     * HTTP {@code Retry-After} response header (delay-seconds form, per RFC 9110 10.2.3). This
+     * class has no other mechanism for a caller to attach a response header from an error, so
+     * routing it through {@code error.data} keeps {@link McpError} the single channel a caller
+     * has for reporting a failure, rather than adding a second, header-specific parameter to
+     * this method for the sake of one error type.</p>
+     *
      * @param response the servlet response
      * @param id the request id, ignored when {@code hasId} is false
      * @param hasId whether the request carried a usable id
@@ -120,6 +128,10 @@ public class McpResponseWriter {
         body.put("message", error.getMessage());
         if (error.getData() != null) {
             body.put("data", error.getData());
+            final Object retryAfterSeconds = error.getData().get("retryAfterSeconds");
+            if (retryAfterSeconds != null) {
+                response.setHeader("Retry-After", String.valueOf(retryAfterSeconds));
+            }
         }
 
         final Map<String, Object> envelope = new LinkedHashMap<>();
