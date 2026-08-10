@@ -104,6 +104,11 @@ public class McpApiManager extends BaseApiManager {
     @Override
     public void process(final HttpServletRequest request, final HttpServletResponse response, final FilterChain chain)
             throws IOException, ServletException {
+        if (!"POST".equalsIgnoreCase(request.getMethod())) {
+            response.setStatus(HttpServletResponse.SC_METHOD_NOT_ALLOWED);
+            response.setHeader("Allow", "POST");
+            return;
+        }
         writeHeaders(response);
         try {
             if (logger.isDebugEnabled()) {
