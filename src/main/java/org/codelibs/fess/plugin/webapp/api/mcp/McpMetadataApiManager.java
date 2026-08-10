@@ -1,0 +1,234 @@
+/*
+ * Copyright 2012-2025 CodeLibs Project and the Others.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+ * either express or implied. See the License for the specific language
+ * governing permissions and limitations under the License.
+ */
+package org.codelibs.fess.plugin.webapp.api.mcp;
+
+import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.codelibs.core.lang.StringUtil;
+import org.codelibs.fess.api.WebApiManager;
+import org.codelibs.fess.plugin.webapp.mcp.auth.CanonicalResourceUri;
+import org.codelibs.fess.plugin.webapp.mcp.auth.ProtectedResourceMetadata;
+import org.codelibs.fess.plugin.webapp.mcp.json.Json;
+import org.codelibs.fess.util.ComponentUtil;
+
+import jakarta.annotation.PostConstruct;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+
+/**
+ * Serves the RFC 9728 OAuth 2.0 Protected Resource Metadata document at
+ * {@code /.well-known/oauth-protected-resource} and its {@code /mcp}-scoped form.
+ * <p>
+ * Implements {@link WebApiManager} directly rather than extending {@code BaseApiManager} (the
+ * way {@link McpApiManager} does): {@code BaseApiManager} is abstract specifically to force a
+ * {@code writeHeaders} override and carries a {@code FormatType} enum plus a
+ * {@code write(String, String, String)} helper built around {@code LaResponseUtil}'s
+ * thread-local response and Fess's search-API content negotiation (label/favorite/scroll/...) --
+ * none of which this two-path, always-JSON, container-free-testable endpoint has any use for.
+ * Implementing {@link WebApiManager} directly keeps this class to exactly the two methods that
+ * interface requires.
+ * </p>
+ * <p>
+ * Registered as its own Lasta DI component in {@code fess_api++.xml}, separate from
+ * {@link McpApiManager}'s. Being declared there is not enough by itself: like
+ * {@link McpApiManager#register()}, {@link #register()} must independently call
+ * {@code ComponentUtil.getWebApiManagerFactory().add(this)} from a {@code @PostConstruct}
+ * callback, or this manager is constructed by the container but never consulted for any request.
+ * </p>
+ */
+public class McpMetadataApiManager implements WebApiManager {
+
+    private static final Logger logger = LogManager.getLogger(McpMetadataApiManager.class);
+
+    /** The bare, resource-path-independent well-known path some clients probe before trying a resource-scoped one. */
+    private static final String ROOT_PATH = "/.well-known/oauth-protected-resource";
+
+    /** The {@code /mcp}-scoped well-known path RFC 9728 &#xa7;3.1 would construct for this server's one resource. */
+    private static final String MCP_SCOPED_PATH = "/.well-known/oauth-protected-resource/mcp";
+
+    /** Content type applied to the response body. */
+    private static final String CONTENT_TYPE = "application/json; charset=UTF-8";
+
+    /**
+     * Creates a metadata API manager. Stateless: every {@code ComponentUtil} read happens inside
+     * {@link #process}, not here, so construction costs a container-free test nothing.
+     */
+    public McpMetadataApiManager() {
+        // no state
+    }
+
+    /**
+     * Registers this API manager with the {@code WebApiManagerFactory}.
+     * <p>
+     * A DI component declaration in {@code fess_api++.xml} alone does not put an instance in the
+     * factory {@code McpApiManager#matches}/{@code #process} dispatch consults; this
+     * {@code @PostConstruct} callback is what actually does that, exactly as
+     * {@link McpApiManager#register()} does for the sibling {@code /mcp} endpoint.
+     * </p>
+     */
+    @PostConstruct
+    public void register() {
+        if (logger.isInfoEnabled()) {
+            logger.info("Load {}", this.getClass().getSimpleName());
+        }
+        ComponentUtil.getWebApiManagerFactory().add(this);
+    }
+
+    @Override
+    public boolean matches(final HttpServletRequest request) {
+        // Exact match only, on both paths: registration order across plugins' WebApiManagers is
+        // not deterministic, so a prefix match here could shadow an unrelated manager registered
+        // after this one for some other path beginning with this well-known prefix.
+        final String path = request.getServletPath();
+        return ROOT_PATH.equals(path) || MCP_SCOPED_PATH.equals(path);
+    }
+
+    @Override
+    public void process(final HttpServletRequest request, final HttpServletResponse response, final FilterChain chain)
+            throws IOException, ServletException {
+        if (!McpApiManager.AUTH_MODE_OAUTH.equals(getAuthMode())) {
+            // Not sendError(): see SendErrorProhibitedTest -- this endpoint is not recognised by
+            // WebApiUtil#isApiRequestUri either, so a container sendError() would become a 302.
+            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
+            return;
+        }
+        final String issuer = getIssuer();
+        if (StringUtil.isBlank(issuer)) {
+            // Defence in depth: McpApiManager#getAuthenticator already refuses to select oauth
+            // mode when the issuer is unset, but this manager reads mcp.auth.mode independently,
+            // so it must independently refuse to serve a PRM document with an empty
+            // authorization_servers array (RFC 9728 requires it non-empty) rather than trusting
+            // that the two config reads can never disagree.
+            response.setStatus(HttpServletResponse.SC_NOT_FOUND);
+            return;
+        }
+        final String canonicalUri = resolveCanonicalUri(request);
+        final Map<String, Object> body = new ProtectedResourceMetadata(canonicalUri, issuer, getScopesSupported()).toMap();
+        write(response, Json.write(body));
+    }
+
+    /**
+     * Writes the response body. Never calls {@code sendError} or {@code sendRedirect}.
+     *
+     * @param response the servlet response
+     * @param json the response body
+     */
+    protected void write(final HttpServletResponse response, final String json) {
+        response.setStatus(HttpServletResponse.SC_OK);
+        response.setContentType(CONTENT_TYPE);
+        final byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
+        response.setContentLength(bytes.length);
+        try (OutputStream out = response.getOutputStream()) {
+            out.write(bytes);
+            out.flush();
+        } catch (final IOException e) {
+            logger.warn("[MCP] Failed to write protected-resource metadata: error={}", e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Resolves the canonical resource URI for {@code request}, per {@link CanonicalResourceUri}
+     * -- the same value {@link org.codelibs.fess.plugin.webapp.mcp.auth.OAuthResourceServerAuthenticator}
+     * checks the token's {@code aud} against and attaches to a challenge's
+     * {@code resource_metadata}.
+     *
+     * @param request the servlet request
+     * @return the canonical resource URI
+     */
+    protected String resolveCanonicalUri(final HttpServletRequest request) {
+        return CanonicalResourceUri.resolve(request, getConfiguredAudience(), getTrustedProxies());
+    }
+
+    /**
+     * Returns the configured authentication mode.
+     *
+     * @return {@code mcp.auth.mode}'s value; {@link McpApiManager#AUTH_MODE_NONE} when unset
+     */
+    protected String getAuthMode() {
+        return getSystemProperty("mcp.auth.mode", McpApiManager.AUTH_MODE_NONE);
+    }
+
+    /**
+     * Returns the configured authorization server issuer.
+     *
+     * @return {@code mcp.oauth.issuer}'s value; blank when unset
+     */
+    protected String getIssuer() {
+        return getSystemProperty("mcp.oauth.issuer", StringUtil.EMPTY);
+    }
+
+    /**
+     * Returns the configured audience override.
+     *
+     * @return {@code mcp.oauth.audience}'s value; blank means "derive from the request"
+     */
+    protected String getConfiguredAudience() {
+        return getSystemProperty("mcp.oauth.audience", StringUtil.EMPTY);
+    }
+
+    /**
+     * Returns the configured trusted-proxy set, the same property Fess's own
+     * {@code TargetOriginResolver} uses for the same trust decision.
+     *
+     * @return the trusted proxy IP addresses; empty when unset
+     */
+    protected Set<String> getTrustedProxies() {
+        return ComponentUtil.getFessConfig().getRateLimitTrustedProxiesAsSet();
+    }
+
+    /**
+     * Returns the scopes advertised in the served document's {@code scopes_supported}.
+     * <p>
+     * Reuses {@code mcp.oauth.required.scopes} -- the same property
+     * {@code OAuthResourceServerAuthenticator#getRequiredScopes()} enforces -- so the advertised
+     * scopes and the enforced scopes can never drift apart from independently-maintained config.
+     * </p>
+     *
+     * @return the parsed {@code mcp.oauth.required.scopes}; empty when unset
+     */
+    protected Set<String> getScopesSupported() {
+        final String raw = getSystemProperty("mcp.oauth.required.scopes", StringUtil.EMPTY);
+        if (StringUtil.isBlank(raw)) {
+            return Set.of();
+        }
+        return Arrays.stream(raw.split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+    }
+
+    /**
+     * Reads a String-valued Fess system property.
+     *
+     * @param key the system property key
+     * @param defaultValue the value to return when the property is unset
+     * @return the property's value, or {@code defaultValue} when unset
+     */
+    protected String getSystemProperty(final String key, final String defaultValue) {
+        return ComponentUtil.getFessConfig().getSystemProperty(key, defaultValue);
+    }
+}

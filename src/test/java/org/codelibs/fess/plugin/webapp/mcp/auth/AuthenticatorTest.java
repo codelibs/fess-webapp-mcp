@@ -60,6 +60,24 @@ import jakarta.servlet.http.HttpServletResponse;
  */
 public class AuthenticatorTest {
 
+    /**
+     * A fake {@link OAuthResourceServerAuthenticator} whose {@link #isUsable()} is a plain field
+     * read, never touching {@code ComponentUtil} the way the real
+     * {@code isUsable() -> getIssuer() -> getSystemProperty(...)} chain does.
+     */
+    static class FakeOAuthAuthenticator extends OAuthResourceServerAuthenticator {
+        private final boolean usable;
+
+        FakeOAuthAuthenticator(final boolean usable) {
+            this.usable = usable;
+        }
+
+        @Override
+        public boolean isUsable() {
+            return usable;
+        }
+    }
+
     /** Test double: never touches {@code ComponentUtil}, mirroring McpApiManagerHttpTest's TestManager. */
     static class TestManager extends McpApiManager {
         String body = "";
@@ -68,6 +86,10 @@ public class AuthenticatorTest {
         List<String> defaultPermissions = List.of();
         boolean getSearchGuestRoleListCalled = false;
         boolean getSearchDefaultPermissionListCalled = false;
+        // Defaults to "unusable": a test that sets authMode = "oauth" without also configuring
+        // this field fails safe to none-mode behaviour, container-free, rather than falling
+        // through to the real (ComponentUtil-touching) OAuthResourceServerAuthenticator#isUsable().
+        OAuthResourceServerAuthenticator oauthAuthenticator = new FakeOAuthAuthenticator(false);
 
         @Override
         protected String readRequestBody(final HttpServletRequest request) throws IOException {
@@ -96,6 +118,13 @@ public class AuthenticatorTest {
         protected String getAuthMode() {
             // no-op: the real implementation reads mcp.auth.mode from the container
             return authMode;
+        }
+
+        @Override
+        protected OAuthResourceServerAuthenticator getOAuthAuthenticator() {
+            // no-op: the real field is a live OAuthResourceServerAuthenticator whose isUsable()
+            // reads mcp.oauth.issuer via ComponentUtil
+            return oauthAuthenticator;
         }
 
         @Override
@@ -388,11 +417,34 @@ public class AuthenticatorTest {
 
     @Test
     public void testUnrecognizedAuthModeFallsBackToNone() {
-        // Matches the design's own fallback rule for the not-yet-implemented oauth mode
-        // (§8.3: an unusable auth mode falls back to none rather than failing closed or open
-        // in some other way).
+        // A genuinely unrecognised mode string (neither fess_token nor oauth) always falls back
+        // to none. Deliberately not "oauth" (that is now a real, wired mode -- see
+        // testOauthModeSelectsOAuthAuthenticatorWhenUsable / testOauthModeFallsBackToNoneWhenUnusable
+        // below for its own, conditional fallback rule).
+        final TestManager manager = new TestManager();
+        manager.authMode = "bogus-mode";
+        assertTrue(manager.resolveAuthenticator() instanceof NoneAuthenticator);
+    }
+
+    @Test
+    public void testOauthModeSelectsOAuthAuthenticatorWhenUsable() {
+        // Positive control: oauth mode is not an unconditional fallback to none -- when
+        // OAuthResourceServerAuthenticator#isUsable() says it is configured, it is actually
+        // selected and used, not just resolved-then-discarded.
         final TestManager manager = new TestManager();
         manager.authMode = "oauth";
+        manager.oauthAuthenticator = new FakeOAuthAuthenticator(true);
+        assertSame(manager.oauthAuthenticator, manager.resolveAuthenticator());
+    }
+
+    @Test
+    public void testOauthModeFallsBackToNoneWhenUnusable() {
+        // Matches the design's own fallback rule for an unusable oauth configuration (an unset
+        // mcp.oauth.issuer falls back to none rather than serving a broken protected-resource
+        // document with an empty authorization_servers array).
+        final TestManager manager = new TestManager();
+        manager.authMode = "oauth";
+        manager.oauthAuthenticator = new FakeOAuthAuthenticator(false);
         assertTrue(manager.resolveAuthenticator() instanceof NoneAuthenticator);
     }
 

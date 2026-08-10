@@ -38,6 +38,7 @@ import org.codelibs.fess.plugin.webapp.mcp.auth.FessTokenAuthenticator;
 import org.codelibs.fess.plugin.webapp.mcp.auth.McpAuthenticator;
 import org.codelibs.fess.plugin.webapp.mcp.auth.McpPrincipal;
 import org.codelibs.fess.plugin.webapp.mcp.auth.NoneAuthenticator;
+import org.codelibs.fess.plugin.webapp.mcp.auth.OAuthResourceServerAuthenticator;
 import org.codelibs.fess.plugin.webapp.mcp.handler.CompletionHandler;
 import org.codelibs.fess.plugin.webapp.mcp.handler.DiscoverHandler;
 import org.codelibs.fess.plugin.webapp.mcp.handler.PromptsGetHandler;
@@ -99,6 +100,13 @@ public class McpApiManager extends BaseApiManager {
     public static final String AUTH_MODE_FESS_TOKEN = "fess_token";
 
     /**
+     * {@code mcp.auth.mode} value selecting {@link OAuthResourceServerAuthenticator}, subject to
+     * that class's own {@link OAuthResourceServerAuthenticator#isUsable()} check. Same
+     * visibility rationale as {@link #AUTH_MODE_NONE}.
+     */
+    public static final String AUTH_MODE_OAUTH = "oauth";
+
+    /**
      * The shared rate limiter, or {@code null} until {@link #getRateLimiter()} builds it on
      * first use. Not {@code final}: building it eagerly in a field initializer would call
      * {@link #getRateLimitPerMinute()}'s {@code ComponentUtil} read for every {@code
@@ -147,6 +155,15 @@ public class McpApiManager extends BaseApiManager {
     private final McpAuthenticator fessTokenAuthenticator = new FessTokenAuthenticator();
 
     /**
+     * The {@code mcp.auth.mode=oauth} authenticator. Stateless at construction time -- like
+     * {@link #fessTokenAuthenticator}, it only reaches {@code ComponentUtil} from inside its own
+     * methods -- so building it here costs every container-free test nothing, provided the test
+     * does not call {@link #getAuthenticator()}'s real (non-overridden) body with
+     * {@code mcp.auth.mode=oauth}. See {@link #getOAuthAuthenticator()}.
+     */
+    private final OAuthResourceServerAuthenticator oauthAuthenticator = new OAuthResourceServerAuthenticator();
+
+    /**
      * Creates a new MCP API manager with the default path prefix "/mcp".
      */
     public McpApiManager() {
@@ -176,22 +193,37 @@ public class McpApiManager extends BaseApiManager {
 
     /**
      * Emits a one-time startup WARN when {@code mcp.auth.mode} resolves to the default,
-     * unauthenticated {@code none} mode.
+     * unauthenticated {@code none} mode -- and, when {@code mcp.auth.mode=oauth} but
+     * {@link OAuthResourceServerAuthenticator#isUsable()} is {@code false}, a one-time startup
+     * ERROR explaining why.
      * <p>
      * The MCP Streamable HTTP transport's Security Considerations say a server SHOULD
      * authenticate every connection. Shipping {@code none} as the default is a deliberate,
      * documented deviation from that SHOULD -- made so every existing Fess deployment keeps
-     * working without a config change after upgrading this plugin -- and this WARN is that
-     * deviation's runtime acknowledgement. It also fires for any value other than {@code
-     * fess_token} (for example an as-yet-unimplemented {@code oauth}), since
-     * {@link #getAuthenticator()} falls back to {@code none} behaviour for those too.
+     * working without a config change after upgrading this plugin -- and the WARN is that
+     * deviation's runtime acknowledgement. It fires for any value {@link #getAuthenticator()}
+     * resolves to {@code none} behaviour for, including an unrecognised mode string and a
+     * {@code oauth} mode that is not yet usable -- for that last case specifically, the more
+     * severe ERROR fires first: a protected-resource metadata document with no authorization
+     * server would be worse than not enabling authorization at all (RFC 9728 requires
+     * {@code authorization_servers} to be non-empty), so an operator who intended to turn OAuth
+     * on needs to know their configuration was rejected, not just that authentication is off.
      * </p>
      */
     protected void warnIfAuthenticationIsDisabled() {
         final String authMode = getAuthMode();
-        if (!AUTH_MODE_FESS_TOKEN.equals(authMode) && logger.isWarnEnabled()) {
-            logger.warn("[MCP] mcp.auth.mode={} - every /mcp caller is treated as anonymous. "
-                    + "Set mcp.auth.mode=fess_token to require a Fess access token.", authMode);
+        final boolean oauthRequestedButUnusable = AUTH_MODE_OAUTH.equals(authMode) && !getOAuthAuthenticator().isUsable();
+        if (oauthRequestedButUnusable && logger.isErrorEnabled()) {
+            logger.error("[MCP] mcp.auth.mode=oauth but mcp.oauth.issuer is not set - falling back to none. "
+                    + "Set mcp.oauth.issuer to the authorization server's issuer URL to enable OAuth 2.1 protection.");
+        }
+        final boolean authenticated =
+                AUTH_MODE_FESS_TOKEN.equals(authMode) || (AUTH_MODE_OAUTH.equals(authMode) && !oauthRequestedButUnusable);
+        if (!authenticated && logger.isWarnEnabled()) {
+            logger.warn(
+                    "[MCP] mcp.auth.mode={} - every /mcp caller is treated as anonymous. "
+                            + "Set mcp.auth.mode=fess_token, or mcp.auth.mode=oauth with mcp.oauth.issuer set, to require a credential.",
+                    authMode);
         }
     }
 
@@ -482,22 +514,49 @@ public class McpApiManager extends BaseApiManager {
     /**
      * Selects the {@link McpAuthenticator} for the configured {@code mcp.auth.mode}.
      * <p>
-     * Any value other than {@code fess_token} -- including the default {@code none}, an empty
-     * or unrecognised value, and (until a later task implements it) {@code oauth} -- resolves to
-     * {@link NoneAuthenticator}. Falling back rather than failing closed or raising an error
-     * matches the design's own rule for an unusable {@code oauth} configuration (an unset
-     * issuer falls back to {@code none} rather than serving a broken protected-resource
-     * document), and keeps this call site stable as future modes are added: adding one means
-     * adding a branch here, not reshaping {@link #authenticate}.
+     * {@code fess_token} always resolves to {@link FessTokenAuthenticator}. {@code oauth}
+     * resolves to {@link OAuthResourceServerAuthenticator} only when
+     * {@link OAuthResourceServerAuthenticator#isUsable()} agrees (i.e. {@code mcp.oauth.issuer}
+     * is set); an unusable {@code oauth} configuration falls back to {@code none} rather than
+     * serving a broken protected-resource document with an empty {@code authorization_servers}.
+     * Every other value -- the default {@code none}, and any empty or unrecognised string --
+     * resolves to {@link NoneAuthenticator}. Falling back rather than failing closed or raising
+     * an error keeps this call site stable as future modes are added: adding one means adding a
+     * branch here, not reshaping {@link #authenticate}.
      * </p>
      *
      * @return the authenticator to use for this request
      */
     protected McpAuthenticator getAuthenticator() {
-        if (AUTH_MODE_FESS_TOKEN.equals(getAuthMode())) {
+        final String authMode = getAuthMode();
+        if (AUTH_MODE_FESS_TOKEN.equals(authMode)) {
             return fessTokenAuthenticator;
         }
+        if (AUTH_MODE_OAUTH.equals(authMode)) {
+            final OAuthResourceServerAuthenticator oauth = getOAuthAuthenticator();
+            if (oauth.isUsable()) {
+                return oauth;
+            }
+        }
         return noneAuthenticator;
+    }
+
+    /**
+     * Returns the {@code mcp.auth.mode=oauth} authenticator.
+     * <p>
+     * Isolated behind this seam -- rather than reading the {@link #oauthAuthenticator} field
+     * directly from {@link #getAuthenticator()} and {@link #warnIfAuthenticationIsDisabled()} --
+     * so a container-free test can substitute an {@link OAuthResourceServerAuthenticator}
+     * subclass whose {@code isUsable()} is overridden directly, exercising both branches of
+     * {@link #getAuthenticator()}'s {@code oauth} handling without needing a live DI container
+     * (the real, non-overridden {@code isUsable()} reads {@code mcp.oauth.issuer} via
+     * {@code ComponentUtil}).
+     * </p>
+     *
+     * @return the oauth-mode authenticator, shared across every request this manager processes
+     */
+    protected OAuthResourceServerAuthenticator getOAuthAuthenticator() {
+        return oauthAuthenticator;
     }
 
     /**
