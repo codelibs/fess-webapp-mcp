@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.codelibs.fess.app.service.AccessTokenService;
 import org.codelibs.fess.exception.InvalidAccessTokenException;
 import org.codelibs.fess.plugin.webapp.api.mcp.McpApiManager;
 import org.codelibs.fess.plugin.webapp.api.mcp.McpHttpTestSupport;
@@ -38,6 +39,7 @@ import org.codelibs.fess.plugin.webapp.mcp.handler.McpMethodHandler;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpDispatcher;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpError;
+import org.dbflute.optional.OptionalEntity;
 import org.dbflute.utflute.mocklet.MockletHttpServletRequestImpl;
 import org.dbflute.utflute.mocklet.MockletHttpServletResponseImpl;
 import org.junit.jupiter.api.Test;
@@ -121,18 +123,21 @@ public class AuthenticatorTest {
         McpAuthenticator resolveAuthenticator() {
             return getAuthenticator();
         }
+
+        /**
+         * Exposes the protected {@code resolveRateLimitKey(...)} seam, for the same reason as
+         * {@link #resolveAuthenticator()}.
+         */
+        String resolveRateLimitKeyFor(final HttpServletRequest request, final McpCallContext context) {
+            return resolveRateLimitKey(request, context);
+        }
     }
 
-    private MockletHttpServletResponseImpl lastResponse;
-
-    private String post(final TestManager manager, final String body, final Map<String, String> headers) throws Exception {
+    private void post(final TestManager manager, final String body, final Map<String, String> headers) throws Exception {
         manager.body = body;
         final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("POST", "/mcp");
         headers.forEach(request::addHeader);
-        final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
-        manager.process(request, response, null);
-        lastResponse = response;
-        return McpHttpTestSupport.bodyOf(response);
+        manager.process(request, McpHttpTestSupport.newResponse(request), null);
     }
 
     private Map<String, String> modernHeaders(final String method) {
@@ -248,6 +253,34 @@ public class AuthenticatorTest {
     }
 
     // ------------------------------------------------------------------
+    // resolvePrincipalSubject: rate-limiting keys on the resolved principal's subject.
+    // ------------------------------------------------------------------
+
+    @Test
+    public void testResolveRateLimitKeyUsesPrincipalSubjectWhenPresent() {
+        final TestManager manager = new TestManager();
+        final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("POST", "/mcp");
+        request.setRemoteAddr("203.0.113.5");
+        final McpCallContext context = new McpCallContext(null, null, Map.of(), new McpPrincipal("stable-subject", Set.of(), Set.of()));
+
+        assertEquals("stable-subject", manager.resolveRateLimitKeyFor(request, context),
+                "an authenticated caller must be rate-limited per-subject, not per-IP -- otherwise callers behind one NAT "
+                        + "would share a bucket, and one token used from several source IPs would get one bucket each");
+    }
+
+    @Test
+    public void testResolveRateLimitKeyFallsBackToRemoteAddrForAnonymousPrincipal() {
+        final TestManager manager = new TestManager();
+        final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("POST", "/mcp");
+        request.setRemoteAddr("203.0.113.5");
+        final McpCallContext context = new McpCallContext(null, null, Map.of(), McpPrincipal.anonymous());
+
+        assertEquals("203.0.113.5", manager.resolveRateLimitKeyFor(request, context),
+                "none mode's anonymous principal has no subject, so this must fall back to the caller's IP exactly as before "
+                        + "this task wired a principal into McpCallContext at all");
+    }
+
+    // ------------------------------------------------------------------
     // Compensation: role.search.default.permissions and the guest-role fallback.
     // ------------------------------------------------------------------
 
@@ -331,9 +364,23 @@ public class AuthenticatorTest {
     }
 
     @Test
-    public void testDefaultAuthModeIsNone() {
+    public void testDefaultAuthModeConstantIsNone() {
+        // McpApiManager.AUTH_MODE_NONE is the literal getAuthMode()'s real (non-overridden) body
+        // falls back to. Every test double in this file overrides getAuthMode() -- it reads
+        // ComponentUtil -- so this is the only place that literal is exercised at all; without
+        // it, changing McpApiManager's default from "none" to anything else would leave every
+        // test in this file green while silently rejecting every existing unauthenticated
+        // deployment on upgrade.
+        assertEquals("none", McpApiManager.AUTH_MODE_NONE);
+    }
+
+    @Test
+    public void testDefaultAuthModeConstantResolvesToNoneAuthenticator() {
+        // Non-tautological companion to the above: routes McpApiManager's own default-mode
+        // constant (not an independently-typed literal) through getAuthenticator()'s real
+        // selection logic.
         final TestManager manager = new TestManager();
-        assertEquals("none", manager.authMode);
+        manager.authMode = McpApiManager.AUTH_MODE_NONE;
         assertTrue(manager.resolveAuthenticator() instanceof NoneAuthenticator);
     }
 
@@ -488,5 +535,40 @@ public class AuthenticatorTest {
         assertNull(wrapped.getParameterValues("anything"));
         assertEquals("Bearer abc123", wrapped.getHeader("Authorization"), "must report a canonically-cased bearer credential");
         assertEquals("Bearer abc123", wrapped.getHeader("authorization"), "header lookup must stay case-insensitive by name too");
+    }
+
+    @Test
+    public void testResolvePermissionsCallsAccessTokenServiceWithTheSuppressingWrapperNotTheRawRequest() {
+        // Binds the wrapper (proven in isolation above) to the actual call site: nothing
+        // previously asserted that resolvePermissions hands AccessTokenService the wrapper
+        // rather than the raw request. If it passed the raw request instead, this test would
+        // observe the raw MockletHttpServletRequestImpl here and the query-injected "permission"
+        // parameter would come back non-null -- the exact escalation channel this class exists
+        // to close.
+        final HttpServletRequest[] captured = new HttpServletRequest[1];
+        final FessTokenAuthenticator authenticator = new FessTokenAuthenticator() {
+            @Override
+            protected AccessTokenService getAccessTokenService() {
+                return new AccessTokenService() {
+                    @Override
+                    public OptionalEntity<Set<String>> getPermissions(final HttpServletRequest request) {
+                        captured[0] = request;
+                        return OptionalEntity.of(Set.of("Rfoo"));
+                    }
+                };
+            }
+        };
+        final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("POST", "/mcp");
+        request.addHeader("Authorization", "Bearer abc123");
+        request.addParameter("permission", "Radmin-api");
+
+        final McpPrincipal principal = authenticator.authenticate(request, McpHttpTestSupport.newResponse(request));
+
+        assertEquals(Set.of("Rfoo"), principal.getPermissions());
+        assertNotNull(captured[0], "resolvePermissions must call AccessTokenService#getPermissions at all");
+        assertTrue(captured[0] instanceof FessTokenAuthenticator.QueryPermissionsSuppressedRequest,
+                "resolvePermissions must pass the parameter-suppressing wrapper, not the raw request: was " + captured[0].getClass());
+        assertNull(captured[0].getParameterValues("permission"),
+                "the request AccessTokenService actually receives must not expose the query-injected permission");
     }
 }

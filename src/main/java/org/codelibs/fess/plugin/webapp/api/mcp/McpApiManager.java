@@ -86,6 +86,19 @@ public class McpApiManager extends BaseApiManager {
     private static final int HTTP_TOO_MANY_REQUESTS = 429;
 
     /**
+     * {@code mcp.auth.mode}'s default value: authenticate nobody, reject nobody. Named (not a
+     * bare literal inside {@link #getAuthMode()}) so a test can assert the actual production
+     * default directly -- {@code getAuthMode()} itself is always overridden in container-free
+     * tests (it reads {@code ComponentUtil}), so nothing else exercises that literal. {@code
+     * public}, not {@code protected}: a test asserting against it lives in a different package
+     * and is not a subclass, so {@code protected} visibility would not reach it.
+     */
+    public static final String AUTH_MODE_NONE = "none";
+
+    /** {@code mcp.auth.mode} value selecting {@link FessTokenAuthenticator}. Same visibility rationale as {@link #AUTH_MODE_NONE}. */
+    public static final String AUTH_MODE_FESS_TOKEN = "fess_token";
+
+    /**
      * The shared rate limiter, or {@code null} until {@link #getRateLimiter()} builds it on
      * first use. Not {@code final}: building it eagerly in a field initializer would call
      * {@link #getRateLimitPerMinute()}'s {@code ComponentUtil} read for every {@code
@@ -176,7 +189,7 @@ public class McpApiManager extends BaseApiManager {
      */
     protected void warnIfAuthenticationIsDisabled() {
         final String authMode = getAuthMode();
-        if (!"fess_token".equals(authMode) && logger.isWarnEnabled()) {
+        if (!AUTH_MODE_FESS_TOKEN.equals(authMode) && logger.isWarnEnabled()) {
             logger.warn("[MCP] mcp.auth.mode={} - every /mcp caller is treated as anonymous. "
                     + "Set mcp.auth.mode=fess_token to require a Fess access token.", authMode);
         }
@@ -387,19 +400,21 @@ public class McpApiManager extends BaseApiManager {
     /**
      * Resolves the authenticated subject for {@code context}, if any.
      * <p>
-     * Always returns {@code null} today: {@link McpCallContext} does not yet carry a resolved
-     * principal, since authentication is Tasks 13-14's work, not this one's. Isolating the
-     * lookup in its own seam means those tasks only need to change this one method -- to read
-     * the subject off the principal {@link McpCallContext} will then carry -- without touching
-     * {@link #resolveRateLimitKey} or {@link #enforceRateLimit} at all.
+     * Reads it off {@link McpCallContext#getPrincipal()} -- {@code none} mode resolves the
+     * shared {@link McpPrincipal#anonymous()}, whose subject is {@code null}, so
+     * {@link #resolveRateLimitKey} falls back to the caller's IP exactly as before this method
+     * had anything to return; {@code fess_token} mode resolves a real, collision-safe, non-secret
+     * subject (see {@code FessTokenAuthenticator#subjectFor}), so an authenticated caller is now
+     * rate-limited per-token rather than per-IP -- multiple callers behind one NAT no longer
+     * share a bucket, and one token used from several source IPs gets exactly one.
      * </p>
      *
      * @param context the call context
-     * @return the authenticated subject, or {@code null} when the caller is unauthenticated (or,
-     *         as today, when this server does not yet resolve one at all)
+     * @return the authenticated subject, or {@code null} when the caller is unauthenticated
      */
     protected String resolvePrincipalSubject(final McpCallContext context) {
-        return null;
+        final McpPrincipal principal = context.getPrincipal();
+        return principal != null ? principal.getSubject() : null;
     }
 
     /**
@@ -479,7 +494,7 @@ public class McpApiManager extends BaseApiManager {
      * @return the authenticator to use for this request
      */
     protected McpAuthenticator getAuthenticator() {
-        if ("fess_token".equals(getAuthMode())) {
+        if (AUTH_MODE_FESS_TOKEN.equals(getAuthMode())) {
             return fessTokenAuthenticator;
         }
         return noneAuthenticator;
@@ -488,10 +503,10 @@ public class McpApiManager extends BaseApiManager {
     /**
      * Returns the configured authentication mode.
      *
-     * @return {@code mcp.auth.mode}'s value; {@code "none"} when unset
+     * @return {@code mcp.auth.mode}'s value; {@link #AUTH_MODE_NONE} when unset
      */
     protected String getAuthMode() {
-        return ComponentUtil.getFessConfig().getSystemProperty("mcp.auth.mode", "none");
+        return ComponentUtil.getFessConfig().getSystemProperty("mcp.auth.mode", AUTH_MODE_NONE);
     }
 
     /**
@@ -500,11 +515,17 @@ public class McpApiManager extends BaseApiManager {
      * Only called for an authenticator that {@linkplain McpAuthenticator#ownsRoleResolution()
      * owns role resolution} -- {@link #authenticate} skips it entirely for {@code none} mode, so
      * neither {@link #getSearchGuestRoleList()} nor {@link #getSearchDefaultPermissionList()}
-     * (both backed by {@code ComponentUtil}) is ever consulted on that path. When it does run,
-     * it must reproduce two effects the {@code userRoles} attribute's seeding otherwise skips
-     * inside {@code RoleQueryHelper.build}: the unconditional {@code role.search.default
-     * .permissions} addition, and the guest-role fallback for a caller with no resolved
-     * permissions of their own.
+     * (both backed by {@code ComponentUtil}) is ever consulted on that path.
+     * </p>
+     * <p>
+     * Seeding {@code userRoles} makes {@code RoleQueryHelper.build} return via its early return,
+     * which skips <em>every</em> other role source it would otherwise consult: the request
+     * parameter/header/cookie role channels, and the permissions of a logged-in
+     * {@code FessUserBean}. None of those apply to an MCP caller -- this endpoint has no session
+     * and configures none of those channels -- so skipping them is a correct no-op, not a gap.
+     * The two effects this method exists to reproduce are the ones that are <em>not</em> no-ops
+     * for MCP: the unconditional {@code role.search.default.permissions} addition, and the
+     * guest-role fallback for a caller with no resolved permissions of their own.
      * </p>
      *
      * @param principal the caller

@@ -18,9 +18,14 @@ package org.codelibs.fess.plugin.webapp.mcp.auth;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.Collections;
+import java.util.Enumeration;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.codelibs.fess.app.service.AccessTokenService;
 import org.codelibs.fess.exception.InvalidAccessTokenException;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
@@ -55,6 +60,8 @@ import jakarta.servlet.http.HttpServletResponse;
  */
 public class FessTokenAuthenticator implements McpAuthenticator {
 
+    private static final Logger logger = LogManager.getLogger(FessTokenAuthenticator.class);
+
     /** The RFC 6750 bearer scheme, matched case-insensitively. */
     private static final String BEARER_SCHEME = "bearer";
 
@@ -76,13 +83,13 @@ public class FessTokenAuthenticator implements McpAuthenticator {
     public McpPrincipal authenticate(final HttpServletRequest request, final HttpServletResponse response) {
         final String token = extractBearerToken(request.getHeader(AUTHORIZATION_HEADER));
         if (token == null) {
-            throw unauthorized(response, "A Bearer access token is required.");
+            throw missingCredential(response);
         }
         try {
             final Set<String> permissions = resolvePermissions(request, token);
             return new McpPrincipal(subjectFor(token), Set.of(), permissions);
         } catch (final InvalidAccessTokenException e) {
-            throw unauthorized(response, e.getMessage());
+            throw invalidToken(response, e);
         }
     }
 
@@ -113,15 +120,35 @@ public class FessTokenAuthenticator implements McpAuthenticator {
      *             token, or names one that has expired
      */
     protected Set<String> resolvePermissions(final HttpServletRequest request, final String token) {
-        final AccessTokenService accessTokenService = ComponentUtil.getComponent(AccessTokenService.class);
-        return accessTokenService.getPermissions(new QueryPermissionsSuppressedRequest(request, token))
+        return getAccessTokenService().getPermissions(new QueryPermissionsSuppressedRequest(request, token))
                 .map(HashSet::new)
                 .orElseGet(HashSet::new);
     }
 
     /**
-     * Builds the 401 to throw for a missing or invalid token, attaching an RFC 6750
-     * {@code WWW-Authenticate} challenge to {@code response} first.
+     * Returns the {@link AccessTokenService} component used to resolve a token's permissions.
+     * <p>
+     * Isolated in its own seam -- the sole {@code ComponentUtil} call this class makes -- so a
+     * container-free test can substitute a stub here and observe exactly what
+     * {@link HttpServletRequest} {@link #resolvePermissions} hands it, without needing a live DI
+     * container. Same pattern as {@code SearchTool#getSearchHelper()} and
+     * {@code GetDocumentTool#getSearchHelper()}.
+     * </p>
+     *
+     * @return the access token service
+     */
+    protected AccessTokenService getAccessTokenService() {
+        return ComponentUtil.getComponent(AccessTokenService.class);
+    }
+
+    /**
+     * Builds the 401 to throw when the request carried no bearer credential at all.
+     * <p>
+     * RFC 6750 §3 says a server SHOULD NOT include an {@code error} value on the challenge when
+     * the request had no authentication information: {@code invalid_token} specifically claims a
+     * credential <em>was</em> supplied and rejected, and a client that sees it may reasonably
+     * discard an otherwise-good cached token. This case gets the bare challenge instead.
+     * </p>
      * <p>
      * This class never delegates status-setting to the servlet container's own error-page
      * mechanism (see {@code SendErrorProhibitedTest}): Fess maps container-generated error
@@ -130,34 +157,43 @@ public class FessTokenAuthenticator implements McpAuthenticator {
      * </p>
      *
      * @param response the servlet response to attach the challenge header to
-     * @param message a human-readable description of why authentication failed; embedded in
-     *            the challenge's {@code error_description} after stripping characters that
-     *            could otherwise inject additional header syntax
      * @return the error to throw; never returns normally
      */
-    private McpError unauthorized(final HttpServletResponse response, final String message) {
-        response.setHeader(WWW_AUTHENTICATE,
-                "Bearer realm=\"fess-mcp\", error=\"invalid_token\", error_description=\"" + sanitizeForHeader(message) + "\"");
-        return new McpError(HttpServletResponse.SC_UNAUTHORIZED, ErrorCode.InvalidRequest, message);
+    private McpError missingCredential(final HttpServletResponse response) {
+        response.setHeader(WWW_AUTHENTICATE, "Bearer realm=\"fess-mcp\"");
+        return new McpError(HttpServletResponse.SC_UNAUTHORIZED, ErrorCode.InvalidRequest, "A Bearer access token is required.");
     }
 
     /**
-     * Strips characters that could split or inject additional syntax into an HTTP header value.
+     * Builds the 401 to throw when the supplied token failed resolution (not found or expired),
+     * attaching an RFC 6750 {@code WWW-Authenticate} challenge to {@code response} first.
      * <p>
-     * {@code message} may echo attacker-controlled input -- {@code InvalidAccessTokenException}
-     * messages include the raw bearer token the caller supplied (e.g.
-     * {@code "Invalid token: <token>"}) -- so it is not safe to place verbatim into a header
-     * value even though the servlet container is also expected to reject a literal CR/LF.
+     * Deliberately does <em>not</em> place {@code cause.getMessage()} in either the challenge
+     * header or the thrown {@link McpError}'s message: {@link AccessTokenService} echoes the
+     * caller-supplied token verbatim into that message (e.g. {@code "Invalid token: <token>"}),
+     * and {@link #subjectFor(String)} two methods below exists specifically so this class never
+     * copies the raw token into a value that could reach a log line or a response -- doing so
+     * here for the sake of a marginally more specific error message would contradict that. The
+     * detail is logged instead, for operator debugging, not returned to the caller.
+     * </p>
+     * <p>
+     * This class never delegates status-setting to the servlet container's own error-page
+     * mechanism (see {@code SendErrorProhibitedTest}): Fess maps container-generated error
+     * statuses through {@code redirect.jsp}, which turns them into a 302 and discards any header
+     * set beforehand, including this challenge.
      * </p>
      *
-     * @param message the raw message, may be {@code null}
-     * @return {@code message} with CR, LF, and {@code "} replaced; never {@code null}
+     * @param response the servlet response to attach the challenge header to
+     * @param cause the resolution failure; logged at debug level, never echoed to the caller
+     * @return the error to throw; never returns normally
      */
-    private static String sanitizeForHeader(final String message) {
-        if (message == null) {
-            return "";
+    private McpError invalidToken(final HttpServletResponse response, final InvalidAccessTokenException cause) {
+        if (logger.isDebugEnabled()) {
+            logger.debug("[MCP] fess_token authentication rejected a token: {}", cause.getMessage());
         }
-        return message.replace('\r', ' ').replace('\n', ' ').replace('"', '\'');
+        response.setHeader(WWW_AUTHENTICATE,
+                "Bearer realm=\"fess-mcp\", error=\"invalid_token\", error_description=\"The access token is invalid or expired.\"");
+        return new McpError(HttpServletResponse.SC_UNAUTHORIZED, ErrorCode.InvalidRequest, "The access token is invalid or expired.");
     }
 
     /**
@@ -214,8 +250,17 @@ public class FessTokenAuthenticator implements McpAuthenticator {
 
     /**
      * Presents a fixed, canonically-formatted bearer credential to {@link AccessTokenService}
-     * while suppressing the query-parameter permission channel described in this class's
-     * Javadoc.
+     * while suppressing every request-parameter read: {@link AccessTokenService#getPermissions}
+     * folds {@code getParameterValues(accessToken.getParameterName())} into the resolved
+     * permission set when the token row declares a {@code parameterName}, letting the caller
+     * inject permissions via the query string. MCP does not adopt that channel.
+     * <p>
+     * All four parameter-reading methods on {@link HttpServletRequest} are overridden, not only
+     * {@link #getParameterValues}, which is the one method {@code AccessTokenService} calls
+     * today: a future Fess-side switch to {@code getParameterMap()} or {@code getParameter()}
+     * would otherwise reopen this channel silently, without anything in this class changing to
+     * signal it.
+     * </p>
      * <p>
      * Package-private rather than {@code private} so {@code AuthenticatorTest} (same package)
      * can construct and exercise it directly, proving the parameter-suppression guarantee
@@ -244,11 +289,22 @@ public class FessTokenAuthenticator implements McpAuthenticator {
         }
 
         @Override
+        public String getParameter(final String name) {
+            return null;
+        }
+
+        @Override
+        public Map<String, String[]> getParameterMap() {
+            return Collections.emptyMap();
+        }
+
+        @Override
+        public Enumeration<String> getParameterNames() {
+            return Collections.emptyEnumeration();
+        }
+
+        @Override
         public String[] getParameterValues(final String name) {
-            // AccessTokenService.getPermissions folds in getParameterValues(accessToken
-            // .getParameterName()) when the token row declares one, letting the caller inject
-            // permissions via the query string. MCP does not adopt that channel, so every name
-            // reports "none supplied" here regardless of what the token row declares.
             return null;
         }
     }
