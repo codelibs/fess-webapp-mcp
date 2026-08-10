@@ -23,6 +23,7 @@ import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.codelibs.fess.plugin.webapp.mcp.McpConstants;
 import org.codelibs.fess.plugin.webapp.mcp.handler.McpMethodHandler;
@@ -46,6 +47,7 @@ public class McpApiManagerHttpTest {
         String body = "";
         boolean enabled = true;
         int maxBytes = 1_048_576;
+        boolean allowedOriginsCalled = false;
 
         @Override
         protected String readRequestBody(final HttpServletRequest request) throws IOException {
@@ -65,6 +67,15 @@ public class McpApiManagerHttpTest {
         @Override
         protected int getRequestMaxBytes() {
             return maxBytes;
+        }
+
+        @Override
+        protected Set<String> getAllowedOrigins() {
+            // no-op: the real implementation reads mcp.allowed.origins from the container.
+            // Records whether it ran at all, so tests can assert validateOrigin's
+            // presence-check actually skips this call when Origin is absent.
+            allowedOriginsCalled = true;
+            return Set.of();
         }
     }
 
@@ -270,6 +281,35 @@ public class McpApiManagerHttpTest {
         manager.maxBytes = 10;
         final String body = post(manager, modernBody("tools/list"), modernHeaders("tools/list"));
         assertEquals(413, lastResponse.getStatus(), body);
+    }
+
+    @Test
+    public void testForeignOriginIs403() throws Exception {
+        // Wiring check: OriginValidatorTest covers the matching rules directly; this confirms
+        // McpApiManager#process actually calls validateOrigin(request) ahead of the rest of the
+        // pipeline, with no id echoed since the failure precedes body parsing.
+        final TestManager manager = new TestManager();
+        final Map<String, String> headers = new LinkedHashMap<>(modernHeaders("tools/list"));
+        headers.put("Origin", "https://evil.example.com");
+        final String body = post(manager, modernBody("tools/list"), headers);
+        assertEquals(403, lastResponse.getStatus(), body);
+        assertTrue(body.contains("\"jsonrpc\":\"2.0\""), body);
+        assertTrue(body.contains("-32600"), body);
+        assertFalse(body.contains("\"id\""), "an unknown id must be omitted, not null: " + body);
+        assertTrue(manager.allowedOriginsCalled, "a present Origin must consult the allowed-origins config");
+    }
+
+    @Test
+    public void testAbsentOriginSkipsAllowedOriginsLookup() throws Exception {
+        // validateOrigin must check for the Origin header itself before calling
+        // getAllowedOrigins() -- that call reaches ComponentUtil.getFessConfig() in production,
+        // so paying for it on every request (including the CLI-bridge/stdio-proxy majority that
+        // never sends Origin) would be pointless container traffic on the hot path that
+        // checkRateLimit and authenticate are about to join at this same call site.
+        final TestManager manager = new TestManager();
+        post(manager, modernBody("tools/list"), modernHeaders("tools/list"));
+        assertEquals(200, lastResponse.getStatus());
+        assertFalse(manager.allowedOriginsCalled, "getAllowedOrigins() must not run when Origin is absent");
     }
 
     @Test

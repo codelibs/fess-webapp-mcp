@@ -16,16 +16,22 @@
 package org.codelibs.fess.plugin.webapp.api.mcp;
 
 import java.io.IOException;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codelibs.core.lang.StringUtil;
 import org.codelibs.fess.Constants;
 import org.codelibs.fess.api.BaseApiManager;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
 import org.codelibs.fess.plugin.webapp.mcp.McpConstants;
+import org.codelibs.fess.plugin.webapp.mcp.OriginValidator;
 import org.codelibs.fess.plugin.webapp.mcp.handler.CompletionHandler;
 import org.codelibs.fess.plugin.webapp.mcp.handler.DiscoverHandler;
 import org.codelibs.fess.plugin.webapp.mcp.handler.PromptsGetHandler;
@@ -217,17 +223,37 @@ public class McpApiManager extends BaseApiManager {
     }
 
     /**
-     * Validates the request's {@code Origin} header against the configured allowlist.
+     * Rejects a request whose Origin header is present but not allowed.
      * <p>
-     * No-op placeholder. Task 10 implements Origin validation (HTTP 403 for a present-but-
-     * disallowed value); this seam exists now so {@link #process} calls it at the pipeline
-     * position the design mandates, ahead of that task landing.
+     * The presence check happens here, before {@link #getAllowedOrigins()} runs, so a request
+     * with no {@code Origin} header -- every CLI bridge, stdio proxy, and non-browser client --
+     * never touches the DI container to build a {@link Set} it would not have consulted anyway.
+     * {@link OriginValidator#validate} carries its own {@code null} check too, as defence in
+     * depth, but that one alone would still pay for {@link #getAllowedOrigins()} on every
+     * request since Java evaluates a method argument before the call.
      * </p>
      *
      * @param request the servlet request
+     * @throws McpError with HTTP 403 when the Origin is present and invalid
      */
     protected void validateOrigin(final HttpServletRequest request) {
-        // Task 10 fills this in.
+        if (request.getHeader("Origin") == null) {
+            return;
+        }
+        OriginValidator.validate(request, getAllowedOrigins());
+    }
+
+    /**
+     * Returns the configured additional allowed origins.
+     *
+     * @return the allowed origins; empty means same-origin only
+     */
+    protected Set<String> getAllowedOrigins() {
+        final String value = ComponentUtil.getFessConfig().getSystemProperty("mcp.allowed.origins", StringUtil.EMPTY);
+        if (StringUtil.isBlank(value)) {
+            return Collections.emptySet();
+        }
+        return Arrays.stream(value.split(",")).map(String::trim).filter(s -> !s.isEmpty()).collect(Collectors.toSet());
     }
 
     /**
