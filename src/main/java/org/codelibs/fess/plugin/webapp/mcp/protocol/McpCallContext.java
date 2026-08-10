@@ -18,18 +18,19 @@ package org.codelibs.fess.plugin.webapp.mcp.protocol;
 import java.util.Collections;
 import java.util.Map;
 
+import org.codelibs.fess.plugin.webapp.mcp.auth.McpPrincipal;
+
 /**
  * Per-invocation context passed to
  * {@link org.codelibs.fess.plugin.webapp.mcp.handler.McpMethodHandler#handle(McpCallContext)}
  * and to {@link org.codelibs.fess.plugin.webapp.mcp.tool.McpTool#call(java.util.Map, McpCallContext)}.
  *
  * <p>
- * Carries the parsed request envelope, its {@code params._meta}, and the request's
- * {@code params} for direct access. Deliberately does not yet carry a resolved
- * {@code McpPrincipal}: permission enforcement is a later task's work, and adding that field
- * then is not a breaking change for any existing {@code McpMethodHandler} or {@code McpTool}
- * implementation, exactly as adding {@code request}/{@code meta}/{@code params} here was not a
- * breaking change for the {@code McpTool} implementations that predate them.
+ * Carries the parsed request envelope, its {@code params._meta}, the request's {@code params}
+ * for direct access, and the {@link McpPrincipal} resolved by {@code McpApiManager#authenticate}
+ * for this call. The principal lets a handler or tool -- most immediately the
+ * {@code get_index_stats} permission gate -- decide what the caller may see without threading
+ * the servlet request itself through the dispatch layer.
  * </p>
  */
 public class McpCallContext {
@@ -43,9 +44,12 @@ public class McpCallContext {
     /** The request's {@code params}; never null. */
     private final Map<String, Object> params;
 
+    /** The resolved caller; never null. */
+    private final McpPrincipal principal;
+
     /**
      * Creates an empty call context, carrying neither a request nor {@code _meta} nor any
-     * params.
+     * params, with an anonymous principal.
      * <p>
      * Used by {@code McpTool} unit tests, which exercise {@code call} directly and have no
      * full {@link McpRequest} to hand over.
@@ -56,16 +60,30 @@ public class McpCallContext {
     }
 
     /**
-     * Creates a call context.
+     * Creates a call context with an anonymous principal.
      *
      * @param request the parsed request envelope, or null when unavailable
      * @param meta the parsed {@code params._meta}, or null when unavailable
      * @param params the request's {@code params}; null is treated as empty
      */
     public McpCallContext(final McpRequest request, final McpRequestMeta meta, final Map<String, Object> params) {
+        this(request, meta, params, McpPrincipal.anonymous());
+    }
+
+    /**
+     * Creates a call context.
+     *
+     * @param request the parsed request envelope, or null when unavailable
+     * @param meta the parsed {@code params._meta}, or null when unavailable
+     * @param params the request's {@code params}; null is treated as empty
+     * @param principal the resolved caller; null is treated as {@link McpPrincipal#anonymous()}
+     */
+    public McpCallContext(final McpRequest request, final McpRequestMeta meta, final Map<String, Object> params,
+            final McpPrincipal principal) {
         this.request = request;
         this.meta = meta;
         this.params = params != null ? params : Collections.emptyMap();
+        this.principal = principal != null ? principal : McpPrincipal.anonymous();
     }
 
     /**
@@ -93,5 +111,14 @@ public class McpCallContext {
      */
     public Map<String, Object> getParams() {
         return params;
+    }
+
+    /**
+     * Returns the resolved caller.
+     *
+     * @return the principal; never null, may be {@link McpPrincipal#anonymous()}
+     */
+    public McpPrincipal getPrincipal() {
+        return principal;
     }
 }

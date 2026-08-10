@@ -91,6 +91,16 @@ public class McpApiManagerHttpTest {
             rateLimiterCalled = true;
             return rateLimiter;
         }
+
+        String authMode = "none";
+
+        @Override
+        protected String getAuthMode() {
+            // no-op: the real implementation reads mcp.auth.mode from the container. This file's
+            // tests are not about authentication (see AuthenticatorTest for that), so every test
+            // here runs the default "none" mode unless a test overrides this field.
+            return authMode;
+        }
     }
 
     private MockletHttpServletResponseImpl lastResponse;

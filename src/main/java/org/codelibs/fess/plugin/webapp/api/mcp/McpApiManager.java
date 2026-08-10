@@ -18,6 +18,7 @@ package org.codelibs.fess.plugin.webapp.api.mcp;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -33,6 +34,10 @@ import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
 import org.codelibs.fess.plugin.webapp.mcp.McpConstants;
 import org.codelibs.fess.plugin.webapp.mcp.OriginValidator;
 import org.codelibs.fess.plugin.webapp.mcp.RateLimiter;
+import org.codelibs.fess.plugin.webapp.mcp.auth.FessTokenAuthenticator;
+import org.codelibs.fess.plugin.webapp.mcp.auth.McpAuthenticator;
+import org.codelibs.fess.plugin.webapp.mcp.auth.McpPrincipal;
+import org.codelibs.fess.plugin.webapp.mcp.auth.NoneAuthenticator;
 import org.codelibs.fess.plugin.webapp.mcp.handler.CompletionHandler;
 import org.codelibs.fess.plugin.webapp.mcp.handler.DiscoverHandler;
 import org.codelibs.fess.plugin.webapp.mcp.handler.PromptsGetHandler;
@@ -113,6 +118,22 @@ public class McpApiManager extends BaseApiManager {
     private final McpResponseWriter responseWriter = new McpResponseWriter(SERVER_NAME, discoverHandler.resolveServerVersion());
 
     /**
+     * The {@code mcp.auth.mode=none} authenticator. Stateless and free of any {@code
+     * ComponentUtil} dependency of its own, so building it here at construction time -- like
+     * {@link #dispatcher}, {@link #discoverHandler}, and {@link #responseWriter} above -- costs
+     * every container-free test nothing.
+     */
+    private final McpAuthenticator noneAuthenticator = new NoneAuthenticator();
+
+    /**
+     * The {@code mcp.auth.mode=fess_token} authenticator. Stateless at construction time -- it
+     * only reaches {@code ComponentUtil} from inside {@link McpAuthenticator#authenticate}, and
+     * only once a bearer token has actually been found on the request -- so building it here
+     * costs every container-free test nothing either.
+     */
+    private final McpAuthenticator fessTokenAuthenticator = new FessTokenAuthenticator();
+
+    /**
      * Creates a new MCP API manager with the default path prefix "/mcp".
      */
     public McpApiManager() {
@@ -122,6 +143,13 @@ public class McpApiManager extends BaseApiManager {
 
     /**
      * Registers this API manager with the WebApiManagerFactory.
+     * <p>
+     * Also the natural "server startup" moment for the one-time {@code mcp.auth.mode=none} WARN
+     * ({@link #warnIfAuthenticationIsDisabled}): this {@code @PostConstruct} callback runs
+     * exactly once, when the DI container wires this singleton component in, strictly before
+     * the endpoint can accept its first request -- unlike {@link #process}, which runs on every
+     * request and would repeat the warning needlessly.
+     * </p>
      */
     @PostConstruct
     public void register() {
@@ -129,7 +157,29 @@ public class McpApiManager extends BaseApiManager {
             logger.info("Load {}", this.getClass().getSimpleName());
         }
 
+        warnIfAuthenticationIsDisabled();
         ComponentUtil.getWebApiManagerFactory().add(this);
+    }
+
+    /**
+     * Emits a one-time startup WARN when {@code mcp.auth.mode} resolves to the default,
+     * unauthenticated {@code none} mode.
+     * <p>
+     * The MCP Streamable HTTP transport's Security Considerations say a server SHOULD
+     * authenticate every connection. Shipping {@code none} as the default is a deliberate,
+     * documented deviation from that SHOULD -- made so every existing Fess deployment keeps
+     * working without a config change after upgrading this plugin -- and this WARN is that
+     * deviation's runtime acknowledgement. It also fires for any value other than {@code
+     * fess_token} (for example an as-yet-unimplemented {@code oauth}), since
+     * {@link #getAuthenticator()} falls back to {@code none} behaviour for those too.
+     * </p>
+     */
+    protected void warnIfAuthenticationIsDisabled() {
+        final String authMode = getAuthMode();
+        if (!"fess_token".equals(authMode) && logger.isWarnEnabled()) {
+            logger.warn("[MCP] mcp.auth.mode={} - every /mcp caller is treated as anonymous. "
+                    + "Set mcp.auth.mode=fess_token to require a Fess access token.", authMode);
+        }
     }
 
     @Override
@@ -161,7 +211,7 @@ public class McpApiManager extends BaseApiManager {
             }
             writeHeaders(response);
             validateOrigin(request); // Task 10
-            authenticate(request, response); // Task 13-14
+            final McpPrincipal principal = authenticate(request, response); // Task 13-14
 
             final String body = readBoundedRequestBody(request);
             final McpRequest mcpRequest = McpRequest.parse(Json.parseObject(body));
@@ -180,7 +230,7 @@ public class McpApiManager extends BaseApiManager {
             HeaderValidator.requireMatches(request, mcpRequest, meta);
             requireSupportedVersion(meta.getProtocolVersion());
 
-            final McpCallContext context = new McpCallContext(mcpRequest, meta, mcpRequest.getParams());
+            final McpCallContext context = new McpCallContext(mcpRequest, meta, mcpRequest.getParams(), principal);
             enforceRateLimit(request, context); // Task 11
             writer.writeResult(response, id, getDispatcher().dispatch(context));
         } catch (final McpError e) {
@@ -384,21 +434,111 @@ public class McpApiManager extends BaseApiManager {
     }
 
     /**
-     * Authenticates and authorizes the caller.
+     * Authenticates the caller according to {@code mcp.auth.mode}, and -- only for a mode that
+     * owns role resolution -- seeds the {@code userRoles} request attribute Fess's
+     * {@code RoleQueryHelper} consults.
      * <p>
-     * No-op placeholder. Tasks 13-14 implement authentication and authorization (HTTP 401/403
-     * with a {@code WWW-Authenticate} challenge); this seam exists now so {@link #process} calls
-     * it at the pipeline position the design mandates, ahead of those tasks landing.
-     * {@link McpCallContext} does not yet carry a resolved principal -- adding one is those
-     * tasks' work too.
+     * The {@code none} mode (the default) deliberately does <em>not</em> seed that attribute.
+     * {@code /mcp} already honours an {@code Authorization: Bearer <fess-token>} caller
+     * implicitly today, because this endpoint's search calls use {@code SearchRequestType.JSON},
+     * which makes {@code RoleQueryHelper} treat the call as an API request and consult its own
+     * access-token resolution. Seeding {@code userRoles} unconditionally would short-circuit
+     * that resolution via {@code RoleQueryHelper}'s own early return -- {@code userRoles} present
+     * means "trust this set, do not look any further" -- silently dropping every such existing
+     * deployment to guest permissions. See {@link McpAuthenticator#ownsRoleResolution()} for the
+     * mode-by-mode contract that keeps this correct as new modes are added.
      * </p>
      *
      * @param request the servlet request
-     * @param response the servlet response, needed once a failure must set
-     *            {@code WWW-Authenticate}
+     * @param response the servlet response, used to attach a {@code WWW-Authenticate} challenge
+     *            when authentication fails
+     * @return the caller; never {@code null}, may be {@link McpPrincipal#anonymous()}
+     * @throws McpError with HTTP 401 or 403 when authentication or authorization fails
      */
-    protected void authenticate(final HttpServletRequest request, final HttpServletResponse response) {
-        // Tasks 13-14 fill this in.
+    protected McpPrincipal authenticate(final HttpServletRequest request, final HttpServletResponse response) {
+        final McpAuthenticator authenticator = getAuthenticator();
+        final McpPrincipal principal = authenticator.authenticate(request, response);
+        if (authenticator.ownsRoleResolution()) {
+            request.setAttribute(McpConstants.USER_ROLES_ATTRIBUTE, resolveRoles(principal));
+        }
+        return principal;
+    }
+
+    /**
+     * Selects the {@link McpAuthenticator} for the configured {@code mcp.auth.mode}.
+     * <p>
+     * Any value other than {@code fess_token} -- including the default {@code none}, an empty
+     * or unrecognised value, and (until a later task implements it) {@code oauth} -- resolves to
+     * {@link NoneAuthenticator}. Falling back rather than failing closed or raising an error
+     * matches the design's own rule for an unusable {@code oauth} configuration (an unset
+     * issuer falls back to {@code none} rather than serving a broken protected-resource
+     * document), and keeps this call site stable as future modes are added: adding one means
+     * adding a branch here, not reshaping {@link #authenticate}.
+     * </p>
+     *
+     * @return the authenticator to use for this request
+     */
+    protected McpAuthenticator getAuthenticator() {
+        if ("fess_token".equals(getAuthMode())) {
+            return fessTokenAuthenticator;
+        }
+        return noneAuthenticator;
+    }
+
+    /**
+     * Returns the configured authentication mode.
+     *
+     * @return {@code mcp.auth.mode}'s value; {@code "none"} when unset
+     */
+    protected String getAuthMode() {
+        return ComponentUtil.getFessConfig().getSystemProperty("mcp.auth.mode", "none");
+    }
+
+    /**
+     * Maps a principal to the encoded Fess permissions used for search filtering.
+     * <p>
+     * Only called for an authenticator that {@linkplain McpAuthenticator#ownsRoleResolution()
+     * owns role resolution} -- {@link #authenticate} skips it entirely for {@code none} mode, so
+     * neither {@link #getSearchGuestRoleList()} nor {@link #getSearchDefaultPermissionList()}
+     * (both backed by {@code ComponentUtil}) is ever consulted on that path. When it does run,
+     * it must reproduce two effects the {@code userRoles} attribute's seeding otherwise skips
+     * inside {@code RoleQueryHelper.build}: the unconditional {@code role.search.default
+     * .permissions} addition, and the guest-role fallback for a caller with no resolved
+     * permissions of their own.
+     * </p>
+     *
+     * @param principal the caller
+     * @return the permission set, falling back to the configured guest roles when
+     *         {@code principal} carries none of its own
+     */
+    protected Set<String> resolveRoles(final McpPrincipal principal) {
+        final Set<String> roles = new HashSet<>(principal.getPermissions());
+        if (roles.isEmpty()) {
+            // getSearchGuestRoleList also appends the "1guest" user form; splitting the
+            // property by hand would lose it.
+            roles.addAll(getSearchGuestRoleList());
+        }
+        // RoleQueryHelper's early return skips role.search.default.permissions, so add it here.
+        roles.addAll(getSearchDefaultPermissionList());
+        return roles;
+    }
+
+    /**
+     * Returns the configured guest role list, including the {@code "1guest"} user form.
+     *
+     * @return {@code FessConfig#getSearchGuestRoleList()}'s result
+     */
+    protected List<String> getSearchGuestRoleList() {
+        return ComponentUtil.getFessConfig().getSearchGuestRoleList();
+    }
+
+    /**
+     * Returns the encoded {@code role.search.default.permissions} list.
+     *
+     * @return {@code FessConfig#getSearchDefaultPermissionsAsArray()}'s result, as a list
+     */
+    protected List<String> getSearchDefaultPermissionList() {
+        return Arrays.asList(ComponentUtil.getFessConfig().getSearchDefaultPermissionsAsArray());
     }
 
     /**
