@@ -815,7 +815,7 @@ public class McpApiManagerTest {
             mcpApiManager.handleReadResource(params);
             fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
-            assertEquals(ErrorCode.ResourceNotFound, e.getCode(), "Should be ResourceNotFound error");
+            assertEquals(ErrorCode.InvalidParams, e.getCode(), "Should be InvalidParams error (resource not found, MCP 2026-07-28)");
             assertTrue(e.getMessage().contains("Unknown resource"), "Error message should mention unknown resource");
         }
     }
@@ -829,7 +829,7 @@ public class McpApiManagerTest {
             mcpApiManager.handleReadResource(params);
             fail("Should have thrown McpApiException for invalid scheme");
         } catch (final McpApiException e) {
-            assertEquals(ErrorCode.ResourceNotFound, e.getCode(), "Should be ResourceNotFound error");
+            assertEquals(ErrorCode.InvalidParams, e.getCode(), "Should be InvalidParams error (resource not found, MCP 2026-07-28)");
         }
     }
 
@@ -855,7 +855,7 @@ public class McpApiManagerTest {
             mcpApiManager.handleReadResource(params);
             fail("Should have thrown McpApiException for partial URI");
         } catch (final McpApiException e) {
-            assertEquals(ErrorCode.ResourceNotFound, e.getCode(), "Should be ResourceNotFound error");
+            assertEquals(ErrorCode.InvalidParams, e.getCode(), "Should be InvalidParams error (resource not found, MCP 2026-07-28)");
         }
     }
 
@@ -868,7 +868,7 @@ public class McpApiManagerTest {
             mcpApiManager.handleReadResource(params);
             fail("Should have thrown McpApiException for case mismatch URI");
         } catch (final McpApiException e) {
-            assertEquals(ErrorCode.ResourceNotFound, e.getCode(), "Should be ResourceNotFound error");
+            assertEquals(ErrorCode.InvalidParams, e.getCode(), "Should be InvalidParams error (resource not found, MCP 2026-07-28)");
         }
     }
 
@@ -881,7 +881,7 @@ public class McpApiManagerTest {
             mcpApiManager.handleReadResource(params);
             fail("Should have thrown McpApiException for unknown resource");
         } catch (final McpApiException e) {
-            assertEquals(ErrorCode.ResourceNotFound, e.getCode(), "Should be ResourceNotFound error");
+            assertEquals(ErrorCode.InvalidParams, e.getCode(), "Should be InvalidParams error (resource not found, MCP 2026-07-28)");
         }
     }
 
@@ -904,7 +904,7 @@ public class McpApiManagerTest {
             mcpApiManager.dispatchRpcMethod("resources/read", params);
             fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
-            assertEquals(ErrorCode.ResourceNotFound, e.getCode(), "Should be ResourceNotFound error");
+            assertEquals(ErrorCode.InvalidParams, e.getCode(), "Should be InvalidParams error (resource not found, MCP 2026-07-28)");
         }
     }
 
@@ -1580,7 +1580,7 @@ public class McpApiManagerTest {
         } catch (final IllegalStateException e) {
             assertTrue(e.getMessage().contains("container"), "Should fail due to container not initialized");
         } catch (final McpApiException e) {
-            // ResourceNotFound is also acceptable if container is available but doc doesn't exist
+            // InvalidParams (resource not found) is also acceptable if container is available but doc doesn't exist
         }
     }
 

@@ -1084,7 +1084,7 @@ public class McpApiManager extends BaseApiManager {
             if (logger.isDebugEnabled()) {
                 logger.debug("[MCP] Unknown resource requested: {}", uri);
             }
-            throw new McpApiException(ErrorCode.ResourceNotFound, "Unknown resource: " + uri);
+            throw new McpApiException(ErrorCode.InvalidParams, "Unknown resource: " + uri);
         }
         };
     }
@@ -1132,7 +1132,7 @@ public class McpApiManager extends BaseApiManager {
             } catch (final IOException e) {
                 throw new McpApiException(ErrorCode.InternalError, "Failed to serialize document: " + e.getMessage());
             }
-        }).orElseThrow(() -> new McpApiException(ErrorCode.ResourceNotFound, "Document not found: " + docId));
+        }).orElseThrow(() -> new McpApiException(ErrorCode.InvalidParams, "Document not found: " + docId));
     }
 
     /**
