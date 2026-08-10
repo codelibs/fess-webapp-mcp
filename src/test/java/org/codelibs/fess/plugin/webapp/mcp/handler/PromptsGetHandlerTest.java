@@ -128,6 +128,26 @@ public class PromptsGetHandlerTest {
         assertTrue(error.getMessage().contains("query"));
     }
 
+    @SuppressWarnings("unchecked")
+    @Test
+    public void testAdvancedSearchAcceptsNonStringNum() {
+        // Migrated from the retired McpApiManagerTest#testHandleGetPrompt_AdvancedSearch_NumericNum:
+        // arguments.get("num") is read as a raw Object and only later toString()'d, so a JSON
+        // number (decoded as an Integer, not a String) must still be substituted correctly.
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "advanced_search");
+        final Map<String, Object> arguments = new HashMap<>();
+        arguments.put("query", "test");
+        arguments.put("num", Integer.valueOf(100));
+        params.put("arguments", arguments);
+
+        final Map<String, Object> result = handler.handle(contextWithParams(params));
+
+        final List<Map<String, Object>> messages = (List<Map<String, Object>>) result.get("messages");
+        final Map<String, Object> content = (Map<String, Object>) messages.get(0).get("content");
+        assertTrue(content.get("text").toString().contains("100"), "Content should contain num as string");
+    }
+
     @Test
     public void testDoesNotSetTtlMsOrCacheScope() {
         // GetPromptResult is not a CacheableResult in the 2026-07-28 schema.

@@ -37,7 +37,13 @@ import org.junit.jupiter.api.Test;
  * Migrated from {@code McpApiManagerTest} ({@code testCreateDocumentContent*},
  * {@code testStripHighlightTags}, {@code testProcessDocumentItems*}, {@code testProcessValue*})
  * when {@code invokeSearch} and its formatting helpers moved out of {@code McpApiManager} into
- * this class.
+ * this class. {@code testGetName}, {@code testDescriptionContainsQuerySyntaxInfo},
+ * {@code testAnnotationsAreReadOnlyAndNotDestructive}, and
+ * {@code testInputSchemaRequiresOnlyQ} migrated similarly from
+ * {@code testHandleListTools}/{@code testSearchToolDescription_ContainsQuerySyntaxInfo}/
+ * {@code testHandleListTools_SearchToolAnnotations}/{@code testHandleListTools_DetailedSchema}
+ * when {@code getName}/{@code getDescription}/{@code getAnnotations}/{@code getInputSchema}
+ * moved out of {@code McpApiManager} into this class.
  * </p>
  */
 public class SearchToolTest {
@@ -279,6 +285,37 @@ public class SearchToolTest {
         } catch (final IllegalStateException e) {
             assertTrue(e.getMessage().contains("container"), "Should fail due to container not initialized");
         }
+    }
+
+    @Test
+    public void testGetName() {
+        assertEquals("search", searchTool.getName());
+    }
+
+    @Test
+    public void testDescriptionContainsQuerySyntaxInfo() {
+        final String description = searchTool.getDescription();
+        assertTrue(description.contains("Lucene"), "Description should mention Lucene");
+        assertTrue(description.contains("AND"), "Description should mention AND");
+        assertTrue(description.contains("OR"), "Description should mention OR");
+        assertTrue(description.contains("phrase"), "Description should mention phrase search");
+        assertTrue(description.contains("exclusion") || description.contains("-"), "Description should mention exclusion");
+    }
+
+    @Test
+    public void testAnnotationsAreReadOnlyAndNotDestructive() {
+        final Map<String, Object> annotations = searchTool.getAnnotations();
+        assertEquals(true, annotations.get("readOnlyHint"), "Search should be read-only");
+        assertEquals(false, annotations.get("destructiveHint"), "Search should not be destructive");
+        assertEquals(false, annotations.get("openWorldHint"), "Search should not be open-world");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testInputSchemaRequiresOnlyQ() {
+        final Map<String, Object> schema = searchTool.getInputSchema();
+        final List<String> required = (List<String>) schema.get("required");
+        assertEquals(List.of("q"), required, "Only q should be required");
     }
 
     @Test

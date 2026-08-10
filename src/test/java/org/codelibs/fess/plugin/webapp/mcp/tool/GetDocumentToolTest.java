@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
+import java.util.List;
 import java.util.Map;
 
 import org.codelibs.fess.plugin.webapp.exception.McpApiException;
@@ -33,12 +34,21 @@ import org.junit.jupiter.api.Test;
  * {@code invokeGetDocument} moved out of {@code McpApiManager} into this class; the missing-doc_id
  * behaviour it must preserve is already covered end-to-end by
  * {@code McpApiManagerTest#testHandleInvoke_GetDocument_MissingDocId}, and is exercised again
- * here directly against the tool.
+ * here directly against the tool. {@code testInputSchemaRequiresDocId} migrated similarly from
+ * {@code testHandleListTools_HasGetDocumentTool}.
  * </p>
  */
 public class GetDocumentToolTest {
 
     private final GetDocumentTool getDocumentTool = new GetDocumentTool();
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testInputSchemaRequiresDocId() {
+        final Map<String, Object> schema = getDocumentTool.getInputSchema();
+        final List<String> required = (List<String>) schema.get("required");
+        assertTrue(required.contains("doc_id"), "doc_id should be required");
+    }
 
     @Test
     public void testCall_MissingDocId() {

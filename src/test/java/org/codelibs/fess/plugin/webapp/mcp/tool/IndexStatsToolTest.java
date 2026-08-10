@@ -32,12 +32,27 @@ import org.junit.jupiter.api.Test;
  * {@code testCollectIndexStats_RequiresDIContainer} and
  * {@code testInvokeGetIndexStats_RequiresDIContainer} migrated from {@code McpApiManagerTest}
  * when {@code collectIndexStats} and {@code invokeGetIndexStats} moved out of
- * {@code McpApiManager} into this class.
+ * {@code McpApiManager} into this class. {@code testGetNameAndDescription} and
+ * {@code testAnnotationsAreReadOnlyAndNotDestructive} migrated similarly from
+ * {@code testHandleListTools_GetIndexStatsTool}/{@code testHandleListTools_IndexStatsToolAnnotations}.
  * </p>
  */
 public class IndexStatsToolTest {
 
     private final IndexStatsTool indexStatsTool = new IndexStatsTool();
+
+    @Test
+    public void testGetNameAndDescription() {
+        assertEquals("get_index_stats", indexStatsTool.getName());
+        assertEquals("Get index statistics and information", indexStatsTool.getDescription());
+    }
+
+    @Test
+    public void testAnnotationsAreReadOnlyAndNotDestructive() {
+        final Map<String, Object> annotations = indexStatsTool.getAnnotations();
+        assertEquals(true, annotations.get("readOnlyHint"), "Stats should be read-only");
+        assertEquals(false, annotations.get("destructiveHint"), "Stats should not be destructive");
+    }
 
     @Test
     public void testCollectIndexStats_RequiresDIContainer() {

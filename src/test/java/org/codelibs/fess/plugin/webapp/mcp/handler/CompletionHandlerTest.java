@@ -21,6 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -31,6 +33,21 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Test class for {@link CompletionHandler}.
+ *
+ * <p>
+ * {@code testAdvancedSearchSortEmptyValueReturnsAllSixValues},
+ * {@code testAdvancedSearchSortPrefixNoMatchReturnsEmpty},
+ * {@code testAdvancedSearchKnownPromptButUnmatchedArgumentFallsThroughToEmptyCompletions},
+ * {@code testCompleteViaSuggestRequiresDiContainer}, and the three
+ * {@code testBuildCompletionResult*} cases migrated from the retired {@code McpApiManagerTest}
+ * ({@code testHandleComplete_AdvancedSearchSort_EmptyValueReturnsAll},
+ * {@code testHandleComplete_SortPrefix_NoMatch}, {@code testHandleComplete_AdvancedSearchNum_EmptyValues},
+ * {@code testHandleComplete_WithValue_RequiresDIContainer}, and
+ * {@code testBuildCompletionResult_Caps100_ValuesAndReflectsHasMore} /
+ * {@code testBuildCompletionResult_ExactlyAtCap_HasMoreFalse} /
+ * {@code testBuildCompletionResult_TotalLessThanValues_NormalizesTotal}) when {@code handleComplete}
+ * and {@code buildCompletionResult} moved out of {@code McpApiManager} into this class.
+ * </p>
  */
 public class CompletionHandlerTest {
 
@@ -112,5 +129,122 @@ public class CompletionHandlerTest {
         final Map<String, Object> params = Map.of("ref", Map.of("type", "ref/unknown"), "argument", Map.of());
         final Map<String, Object> result = handler.handle(contextWithParams(params));
         assertDoesNotThrow(() -> result.put("resultType", "complete"));
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    public void testAdvancedSearchSortEmptyValueReturnsAllSixValues() {
+        // An empty (or absent) sort prefix must return every SORT_VALUES entry, not none.
+        final Map<String, Object> params =
+                Map.of("ref", Map.of("type", "ref/prompt", "name", "advanced_search"), "argument", Map.of("name", "sort", "value", ""));
+
+        final Map<String, Object> result = handler.handle(contextWithParams(params));
+
+        final Map<String, Object> completion = (Map<String, Object>) result.get("completion");
+        assertEquals(6, ((List<String>) completion.get("values")).size());
+        assertEquals(false, completion.get("hasMore"));
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    public void testAdvancedSearchSortPrefixNoMatchReturnsEmpty() {
+        final Map<String, Object> params =
+                Map.of("ref", Map.of("type", "ref/prompt", "name", "advanced_search"), "argument", Map.of("name", "sort", "value", "zzz"));
+
+        final Map<String, Object> result = handler.handle(contextWithParams(params));
+
+        final Map<String, Object> completion = (Map<String, Object>) result.get("completion");
+        assertTrue(((List<String>) completion.get("values")).isEmpty());
+        assertEquals(false, completion.get("hasMore"));
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    public void testAdvancedSearchKnownPromptButUnmatchedArgumentFallsThroughToEmptyCompletions() {
+        // "num" is a real advanced_search argument, but completion is not implemented for it:
+        // this must fall through to the ref/prompt branch's own empty-values default, a
+        // different code path from the outer ref/resource-or-unknown-type default covered by
+        // testUnknownRefTypeReturnsEmptyCompletions.
+        final Map<String, Object> params =
+                Map.of("ref", Map.of("type", "ref/prompt", "name", "advanced_search"), "argument", Map.of("name", "num", "value", "1"));
+
+        final Map<String, Object> result = handler.handle(contextWithParams(params));
+
+        final Map<String, Object> completion = (Map<String, Object>) result.get("completion");
+        assertTrue(((List<String>) completion.get("values")).isEmpty());
+        assertEquals(false, completion.get("hasMore"));
+    }
+
+    @Test
+    public void testCompleteViaSuggestRequiresDiContainer() {
+        // Past the empty-value short-circuit, a non-empty query argument reaches
+        // ComponentUtil.getSuggestHelper(), which needs a DI container this container-free
+        // suite does not provide.
+        final Map<String, Object> params =
+                Map.of("ref", Map.of("type", "ref/prompt", "name", "basic_search"), "argument", Map.of("name", "query", "value", "test"));
+        try {
+            handler.handle(contextWithParams(params));
+        } catch (final IllegalStateException e) {
+            assertTrue(e.getMessage().contains("container"), "Should fail due to container not initialized");
+        }
+    }
+
+    @Test
+    public void testBuildCompletionResultCapsAt100AndReflectsHasMore() {
+        // buildCompletionResult must cap values at 100 and ensure hasMore reflects the fact
+        // that the reported total exceeds the capped list size.
+        final List<String> over = new ArrayList<>();
+        for (int i = 0; i < 150; i++) {
+            over.add("v" + i);
+        }
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> result = (Map<String, Object>) handler.buildCompletionResult(over, 150, false).get("completion");
+        @SuppressWarnings("unchecked")
+        final List<String> values = (List<String>) result.get("values");
+        assertEquals(100, values.size(), "Values must be capped at 100");
+        assertEquals(150, ((Number) result.get("total")).intValue(), "Total should be the original total");
+        assertEquals(true, result.get("hasMore"), "hasMore must be true when total exceeds cap");
+    }
+
+    @Test
+    public void testBuildCompletionResultExactlyAtCapHasMoreFalse() {
+        final List<String> exact = new ArrayList<>();
+        for (int i = 0; i < 100; i++) {
+            exact.add("v" + i);
+        }
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> result = (Map<String, Object>) handler.buildCompletionResult(exact, 100, false).get("completion");
+        @SuppressWarnings("unchecked")
+        final List<String> values = (List<String>) result.get("values");
+        assertEquals(100, values.size(), "Exactly 100 values must remain 100");
+        assertEquals(100, ((Number) result.get("total")).intValue());
+        assertEquals(false, result.get("hasMore"), "hasMore must be false when total equals capped size");
+    }
+
+    @Test
+    public void testBuildCompletionResultNormalizesTotalWhenLessThanValues() {
+        // Defensive: if the caller passes total < values.size(), total should be normalized
+        // to at least values.size() so the envelope remains consistent.
+        final List<String> three = List.of("a", "b", "c");
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> result = (Map<String, Object>) handler.buildCompletionResult(three, 0, false).get("completion");
+        assertEquals(3, ((Number) result.get("total")).intValue(), "Total must be at least the number of values");
+    }
+
+    @Test
+    public void testEmptyArgumentMapYieldsNoCompletionsWithoutDiAccess() {
+        // argument is present but empty: argument.name is null, so no branch matches and the
+        // ref/prompt fallback applies without ever reaching Fess suggest.
+        final Map<String, Object> params = new HashMap<>();
+        params.put("ref", Map.of("type", "ref/prompt", "name", "basic_search"));
+        params.put("argument", Map.of());
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> completion = (Map<String, Object>) handler.handle(contextWithParams(params)).get("completion");
+        @SuppressWarnings("unchecked")
+        final List<String> values = (List<String>) completion.get("values");
+        assertTrue(values.isEmpty());
+        assertEquals(0, ((Number) completion.get("total")).intValue());
+        assertEquals(false, completion.get("hasMore"));
     }
 }

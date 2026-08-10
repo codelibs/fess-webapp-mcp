@@ -29,10 +29,9 @@ import org.codelibs.fess.plugin.webapp.mcp.handler.McpMethodHandler;
  * Routes a parsed MCP call to the {@link McpMethodHandler} registered for its method.
  *
  * <p>
- * Not wired into {@link org.codelibs.fess.plugin.webapp.api.mcp.McpApiManager#process} yet: this
- * class exists so the per-method handlers have a single, tested entry point, but the HTTP
- * boundary still runs its own {@code dispatchRpcMethod} switch until a later task replaces it
- * with this dispatcher.
+ * Wired into {@code McpApiManager#process}, which builds one dispatcher instance from the nine
+ * shipped handlers and routes every validated call through it, replacing the legacy
+ * {@code dispatchRpcMethod} switch that lived on {@code McpApiManager} before this class existed.
  * </p>
  */
 public class McpDispatcher {

@@ -102,10 +102,9 @@ public interface McpTool {
      * <p>
      * The single source of truth for "which tools does this server have, in what order" for the
      * {@code mcp.handler} package's {@code ToolsListHandler} and {@code ToolsCallHandler}, which
-     * both need it and must not drift against each other. {@code McpApiManager#getTools()} keeps
-     * its own copy for now -- it backs the legacy {@code dispatchRpcMethod} switch that a later
-     * task retires along with the rest of that switch -- so it is deliberately not routed through
-     * this method.
+     * both need it and must not drift against each other. {@code McpApiManager} no longer keeps a
+     * separate copy: the legacy {@code dispatchRpcMethod} switch and its {@code getTools()} were
+     * retired when {@code McpApiManager#process} was rewired onto {@code McpDispatcher}.
      * </p>
      *
      * @return a new list of freshly constructed default tools, in {@code tools/list} order

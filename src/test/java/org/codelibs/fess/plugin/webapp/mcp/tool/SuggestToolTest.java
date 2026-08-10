@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
+import java.util.List;
 import java.util.Map;
 
 import org.codelibs.fess.plugin.webapp.exception.McpApiException;
@@ -32,12 +33,21 @@ import org.junit.jupiter.api.Test;
  * <p>
  * Migrated from {@code McpApiManagerTest} ({@code testResolveSuggestSize*}) when
  * {@code invokeSuggest} and {@code resolveSuggestSize} moved out of {@code McpApiManager} into
- * this class.
+ * this class. {@code testInputSchemaRequiresQ} migrated similarly from
+ * {@code testHandleListTools_HasSuggestTool}.
  * </p>
  */
 public class SuggestToolTest {
 
     private final SuggestTool suggestTool = new SuggestTool();
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testInputSchemaRequiresQ() {
+        final Map<String, Object> schema = suggestTool.getInputSchema();
+        final List<String> required = (List<String>) schema.get("required");
+        assertTrue(required.contains("q"), "q should be required");
+    }
 
     @Test
     public void testResolveSuggestSize_NullUsesDefault() {
