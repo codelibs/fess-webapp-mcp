@@ -73,21 +73,22 @@ public class ToolsListHandler extends AbstractCacheableHandler {
     /**
      * Builds the {@code tools/list} descriptor for one tool.
      * <p>
-     * {@code outputSchema} is deliberately not included here: {@link McpTool#getOutputSchema()}
-     * exists so a later task can populate {@code structuredContent}, but until that task wires
-     * {@code structuredContent} into tool results, advertising an {@code outputSchema} would
-     * promise MCP clients a contract this server does not yet honour.
+     * {@code outputSchema} is included: every {@link McpTool} implementation now populates
+     * {@code structuredContent} in its {@code call} result conforming to
+     * {@link McpTool#getOutputSchema()}, so advertising the schema here keeps the promise -- a
+     * declared schema the client never sees would be useless.
      * </p>
      *
      * @param tool the tool to describe
-     * @return a map with {@code name}, {@code description}, {@code inputSchema}, and
-     *         {@code annotations}
+     * @return a map with {@code name}, {@code description}, {@code inputSchema},
+     *         {@code outputSchema}, and {@code annotations}
      */
     protected Map<String, Object> describeTool(final McpTool tool) {
         final Map<String, Object> descriptor = new LinkedHashMap<>();
         descriptor.put("name", tool.getName());
         descriptor.put("description", tool.getDescription());
         descriptor.put("inputSchema", tool.getInputSchema());
+        descriptor.put("outputSchema", tool.getOutputSchema());
         descriptor.put("annotations", tool.getAnnotations());
         return descriptor;
     }

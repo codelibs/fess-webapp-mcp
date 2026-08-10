@@ -113,6 +113,8 @@ public class ToolsListHandlerTest {
         assertEquals("search", tools.get(0).get("name"));
         assertEquals("desc:search", tools.get(0).get("description"));
         assertEquals(Map.of("type", "object"), tools.get(0).get("inputSchema"));
+        assertEquals(Map.of("type", "object"), tools.get(0).get("outputSchema"),
+                "outputSchema must be advertised: a declared schema the client never sees is useless");
         assertEquals(Map.of("readOnlyHint", true), tools.get(0).get("annotations"));
         assertEquals("suggest", tools.get(1).get("name"), "tool order must be preserved");
     }

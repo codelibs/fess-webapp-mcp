@@ -79,7 +79,40 @@ public class IndexStatsTool implements McpTool {
 
     @Override
     public Map<String, Object> getOutputSchema() {
-        return Map.of("type", "object");
+        final Map<String, Object> index = new LinkedHashMap<>();
+        index.put("type", "object");
+        index.put("properties", Map.of("index_name", Map.of("type", "string"), "document_count", Map.of("type", "integer"), "error",
+                Map.of("type", "string")));
+        // document_count is set on both the success and the catch(Exception) branch of
+        // collectIndexStats(); index_name and error are each set on only one of those branches.
+        index.put("required", List.of("document_count"));
+        index.put("additionalProperties", false);
+
+        final Map<String, Object> config = new LinkedHashMap<>();
+        config.put("type", "object");
+        config.put("properties", Map.of("max_page_size", Map.of("type", "integer")));
+        config.put("required", List.of("max_page_size"));
+        config.put("additionalProperties", false);
+
+        final Map<String, Object> memory = new LinkedHashMap<>();
+        memory.put("type", "object");
+        memory.put("properties", Map.of("total_bytes", Map.of("type", "integer"), "free_bytes", Map.of("type", "integer"), "used_bytes",
+                Map.of("type", "integer"), "max_bytes", Map.of("type", "integer")));
+        memory.put("required", List.of("total_bytes", "free_bytes", "used_bytes", "max_bytes"));
+        memory.put("additionalProperties", false);
+
+        final Map<String, Object> system = new LinkedHashMap<>();
+        system.put("type", "object");
+        system.put("properties", Map.of("memory", memory));
+        system.put("required", List.of("memory"));
+        system.put("additionalProperties", false);
+
+        final Map<String, Object> schema = new LinkedHashMap<>();
+        schema.put("type", "object");
+        schema.put("properties", Map.of("index", index, "config", config, "system", system));
+        schema.put("required", List.of("index", "config", "system"));
+        schema.put("additionalProperties", false);
+        return schema;
     }
 
     @Override
@@ -136,10 +169,43 @@ public class IndexStatsTool implements McpTool {
             final Map<String, Object> content = new HashMap<>();
             content.put("type", "text");
             content.put("text", jsonResult);
-            return Map.of("content", List.of(content));
+
+            final Map<String, Object> result = new LinkedHashMap<>();
+            result.put("content", List.of(content));
+            // Same data as the text block above, not re-derived, with nulls stripped so it
+            // conforms to getOutputSchema() (e.g. the "index.error" message can be null).
+            result.put("structuredContent", stripNulls(stats));
+            return result;
         } catch (final IOException e) {
             throw new McpApiException(ErrorCode.InternalError, "Failed to serialize index stats: " + e.getMessage());
         }
+    }
+
+    /**
+     * Recursively removes {@code null}-valued entries from a map, so it can be used as (part of)
+     * {@code structuredContent} conforming to {@link #getOutputSchema()}.
+     * <p>
+     * {@link #collectIndexStats()} can put a {@code null} {@code index.error} message (an
+     * exception with no message), which {@code structuredContent} must not carry: the schema
+     * does not mark {@code error} as {@code required}, but a {@code null} value for a
+     * present key is not a valid JSON Schema {@code string} either.
+     * </p>
+     *
+     * @param source the map to strip; not mutated
+     * @return a new map with the same non-null entries; nested maps are stripped recursively
+     */
+    protected Map<String, Object> stripNulls(final Map<String, Object> source) {
+        final Map<String, Object> result = new LinkedHashMap<>();
+        source.forEach((key, value) -> {
+            if (value instanceof final Map<?, ?> nested) {
+                @SuppressWarnings("unchecked")
+                final Map<String, Object> typedNested = (Map<String, Object>) nested;
+                result.put(key, stripNulls(typedNested));
+            } else if (value != null) {
+                result.put(key, value);
+            }
+        });
+        return result;
     }
 
     /**

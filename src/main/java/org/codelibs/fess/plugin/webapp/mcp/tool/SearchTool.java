@@ -99,7 +99,22 @@ public class SearchTool implements McpTool {
 
     @Override
     public Map<String, Object> getOutputSchema() {
-        return Map.of("type", "object");
+        final Map<String, Object> hit = new LinkedHashMap<>();
+        hit.put("type", "object");
+        hit.put("properties", Map.of("title", Map.of("type", "string"), "url", Map.of("type", "string"), "score", Map.of("type", "number"),
+                "content_description", Map.of("type", "string")));
+        // Only title and url are always present in a Fess document item; score is absent when
+        // rank fusion has no BM25 branch (e.g. kNN-only semantic search) and content_description
+        // is only populated when the document has highlightable content.
+        hit.put("required", List.of("title", "url"));
+        hit.put("additionalProperties", false);
+
+        final Map<String, Object> schema = new LinkedHashMap<>();
+        schema.put("type", "object");
+        schema.put("properties", Map.of("hits", Map.of("type", "array", "items", hit)));
+        schema.put("required", List.of("hits"));
+        schema.put("additionalProperties", false);
+        return schema;
     }
 
     @Override
@@ -114,9 +129,39 @@ public class SearchTool implements McpTool {
 
     @Override
     public Map<String, Object> call(final Map<String, Object> arguments, final McpCallContext context) {
+        final List<Map<String, Object>> documentItems = executeSearch(arguments);
+
+        // Build MCP-compliant response with multiple content entries, plus structuredContent
+        // conforming to getOutputSchema().
+        final List<Map<String, Object>> contents = new ArrayList<>();
+        final List<Map<String, Object>> hits = new ArrayList<>();
+        int index = 1;
+        for (final Map<String, Object> doc : documentItems) {
+            contents.add(createDocumentContent(doc, index++));
+            hits.add(buildHit(doc));
+        }
+
+        final Map<String, Object> result = new LinkedHashMap<>();
+        result.put("content", contents);
+        result.put("structuredContent", Map.of("hits", hits));
+        return result;
+    }
+
+    /**
+     * Executes the search and returns the processed document items.
+     * <p>
+     * This is the seam a container-free test overrides to exercise {@link #call} end to end
+     * without a DI container: everything below this point (building the request params,
+     * running the search, and normalising the resulting document items) touches
+     * {@link #getSearchHelper()}, which needs one.
+     * </p>
+     *
+     * @param arguments the raw {@code search} tool arguments
+     * @return the processed document items, in result order; never null
+     */
+    protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments) {
         final SearchRequestParams reqParams = buildRequestParams(arguments);
 
-        // Execute search
         if (logger.isDebugEnabled()) {
             logger.debug("[MCP] Executing search: query='{}', start={}, num={}, sort={}", reqParams.getQuery(),
                     reqParams.getStartPosition(), reqParams.getPageSize(), reqParams.getSort());
@@ -127,16 +172,48 @@ public class SearchTool implements McpTool {
             logger.debug("[MCP] Search completed: resultCount={}", data.getDocumentItems() != null ? data.getDocumentItems().size() : 0);
         }
 
-        // Build MCP-compliant response with multiple content entries
-        final List<Map<String, Object>> contents = new ArrayList<>();
-        final List<Map<String, Object>> documentItems = processDocumentItems(data.getDocumentItems());
+        return processDocumentItems(data.getDocumentItems());
+    }
 
-        int index = 1;
-        for (final Map<String, Object> doc : documentItems) {
-            contents.add(createDocumentContent(doc, index++));
+    /**
+     * Builds one {@code hits[]} entry of {@code structuredContent} from a processed document
+     * item, conforming to {@link #getOutputSchema()}.
+     * <p>
+     * Only the fields declared by {@code getOutputSchema()} are copied over -- notably, the
+     * (possibly large, possibly truncated) raw {@code content} field is deliberately left out,
+     * since the text block already carries a formatted view of it. {@code title} and {@code url}
+     * are the schema's {@code required} fields, so -- exactly like {@link #createDocumentContent}
+     * already does for the text block -- a missing key falls back to {@code ""} rather than being
+     * omitted: a raw Fess document can have its {@code title}/{@code url} {@code _source} field
+     * entirely unset, and {@code required} must hold regardless. {@code score} and
+     * {@code content_description} are optional and are omitted, rather than copied as
+     * {@code null}, when Fess did not populate them.
+     * </p>
+     *
+     * @param doc the processed document item, as returned by {@link #processDocumentItems}
+     * @return a new map with only the schema's declared fields; {@code title} and {@code url} are
+     *         always present
+     */
+    protected Map<String, Object> buildHit(final Map<String, Object> doc) {
+        final Map<String, Object> hit = new LinkedHashMap<>();
+        hit.put("title", String.valueOf(doc.getOrDefault("title", "")));
+        hit.put("url", String.valueOf(doc.getOrDefault("url", "")));
+        putIfNotNull(hit, "score", doc.get("score"));
+        putIfNotNull(hit, "content_description", doc.get("content_description"));
+        return hit;
+    }
+
+    /**
+     * Puts {@code key}-&gt;{@code value} into {@code target} unless {@code value} is null.
+     *
+     * @param target the map to (maybe) mutate
+     * @param key the key to put
+     * @param value the value to put, if non-null
+     */
+    private static void putIfNotNull(final Map<String, Object> target, final String key, final Object value) {
+        if (value != null) {
+            target.put(key, value);
         }
-
-        return Map.of("content", contents);
     }
 
     /**

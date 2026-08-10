@@ -59,15 +59,16 @@ public interface McpTool {
     /**
      * Returns the JSON Schema describing this tool's {@code structuredContent}.
      * <p>
-     * {@code structuredContent} is not populated by any tool yet -- that is a later task's
-     * work. Until then, every implementation returns the minimal valid placeholder
-     * {@code {"type": "object"}} rather than {@code null}: this method promises a non-null
-     * schema (below), and an unconstrained-but-typed placeholder is safer for a future caller
-     * to treat as "not yet meaningful" than either null (which the contract forbids) or a
-     * schema shape that looks deliberate but isn't.
+     * Per the MCP spec, a tool that declares an {@code outputSchema} MUST return
+     * {@code structuredContent} that conforms to it. Fess is a lenient data source -- documents
+     * can omit fields, {@code content} is truncated by {@code mcp.content.max.length}, and values
+     * can be {@code null} -- so each implementation's schema marks only fields Fess is guaranteed
+     * to populate as {@code required}, sets {@code additionalProperties} explicitly, and the
+     * implementation strips {@code null} values before building {@code structuredContent} so a
+     * result always conforms to the schema it declares.
      * </p>
      *
-     * @return the output schema; never null
+     * @return the output schema, always an object schema ({@code type: "object"}); never null
      */
     Map<String, Object> getOutputSchema();
 

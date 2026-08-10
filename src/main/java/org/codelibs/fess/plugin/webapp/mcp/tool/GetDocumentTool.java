@@ -70,7 +70,17 @@ public class GetDocumentTool implements McpTool {
 
     @Override
     public Map<String, Object> getOutputSchema() {
-        return Map.of("type", "object");
+        final Map<String, Object> schema = new LinkedHashMap<>();
+        schema.put("type", "object");
+        schema.put("properties", Map.of("doc_id", Map.of("type", "string"), "title", Map.of("type", "string"), "url",
+                Map.of("type", "string"), "content", Map.of("type", "string")));
+        // Once a document is found, doc_id echoes the (already validated, non-empty) request
+        // argument, and title/url/content are always present -- possibly as an empty string,
+        // never absent -- because the lookup falls back to "" for each. This schema only
+        // describes the found case: the not-found result carries no structuredContent.
+        schema.put("required", List.of("doc_id", "title", "url", "content"));
+        schema.put("additionalProperties", false);
+        return schema;
     }
 
     @Override
@@ -90,6 +100,51 @@ public class GetDocumentTool implements McpTool {
             throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: doc_id");
         }
 
+        final Map<String, Object> doc = executeGetDocument(docId);
+        if (doc == null) {
+            final Map<String, Object> result = new LinkedHashMap<>();
+            result.put("content", List.of(Map.of("type", "text", "text", "Document not found: " + docId)));
+            result.put("isError", true);
+            return result;
+        }
+
+        final String title = (String) doc.get("title");
+        final String url = (String) doc.get("url");
+        final String content = (String) doc.get("content");
+
+        final StringBuilder sb = new StringBuilder();
+        sb.append("**Title**: ").append(title).append("\n");
+        sb.append("**URL**: ").append(url).append("\n");
+        sb.append("**Doc ID**: ").append(docId).append("\n\n");
+        sb.append(content);
+
+        final Map<String, Object> structured = new LinkedHashMap<>();
+        structured.put("doc_id", docId);
+        structured.put("title", title);
+        structured.put("url", url);
+        structured.put("content", content);
+
+        final Map<String, Object> result = new LinkedHashMap<>();
+        result.put("content", List.of(Map.of("type", "text", "text", sb.toString())));
+        result.put("structuredContent", structured);
+        return result;
+    }
+
+    /**
+     * Looks up the document and returns its title, URL, and (truncated) content.
+     * <p>
+     * This is the seam a container-free test overrides to exercise {@link #call} end to end
+     * without a DI container: everything below this point (resolving field names via
+     * {@link #getFessConfig()} and looking the document up via {@link #getSearchHelper()}) needs
+     * one. The returned map's values are never {@code null} -- each falls back to {@code ""} --
+     * and always carries exactly {@code title}, {@code url}, and {@code content}.
+     * </p>
+     *
+     * @param docId the non-empty document ID to look up
+     * @return a map with {@code title}, {@code url}, and (already truncated) {@code content}, or
+     *         {@code null} when no document has this ID
+     */
+    protected Map<String, Object> executeGetDocument(final String docId) {
         if (logger.isDebugEnabled()) {
             logger.debug("[MCP] Retrieving document: doc_id={}", docId);
         }
@@ -98,26 +153,19 @@ public class GetDocumentTool implements McpTool {
         final String[] fields = new String[] { fessConfig.getIndexFieldTitle(), fessConfig.getIndexFieldContent(),
                 fessConfig.getIndexFieldUrl(), fessConfig.getIndexFieldDocId(), fessConfig.getIndexFieldLastModified() };
 
-        return getSearchHelper().getDocumentByDocId(docId, fields, OptionalThing.empty()).map(doc -> {
+        return getSearchHelper().getDocumentByDocId(docId, fields, OptionalThing.empty()).<Map<String, Object>> map(doc -> {
             final String title = String.valueOf(doc.getOrDefault(fessConfig.getIndexFieldTitle(), ""));
             final String url = String.valueOf(doc.getOrDefault(fessConfig.getIndexFieldUrl(), ""));
             final String content = String.valueOf(doc.getOrDefault(fessConfig.getIndexFieldContent(), ""));
             final DocumentFormatter formatter = getDocumentFormatter();
             final String displayContent = formatter.truncateContent(content, formatter.getContentMaxLength());
 
-            final StringBuilder sb = new StringBuilder();
-            sb.append("**Title**: ").append(title).append("\n");
-            sb.append("**URL**: ").append(url).append("\n");
-            sb.append("**Doc ID**: ").append(docId).append("\n\n");
-            sb.append(displayContent);
-
-            return Map.<String, Object> of("content", List.of(Map.of("type", "text", "text", sb.toString())));
-        }).orElseGet(() -> {
             final Map<String, Object> result = new LinkedHashMap<>();
-            result.put("content", List.of(Map.of("type", "text", "text", "Document not found: " + docId)));
-            result.put("isError", true);
+            result.put("title", title);
+            result.put("url", url);
+            result.put("content", displayContent);
             return result;
-        });
+        }).orElse(null);
     }
 
     /**

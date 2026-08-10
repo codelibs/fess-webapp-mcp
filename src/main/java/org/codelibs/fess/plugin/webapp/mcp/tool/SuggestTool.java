@@ -18,9 +18,11 @@ package org.codelibs.fess.plugin.webapp.mcp.tool;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -73,7 +75,18 @@ public class SuggestTool implements McpTool {
 
     @Override
     public Map<String, Object> getOutputSchema() {
-        return Map.of("type", "object");
+        final Map<String, Object> suggestion = new LinkedHashMap<>();
+        suggestion.put("type", "object");
+        suggestion.put("properties", Map.of("text", Map.of("type", "string")));
+        suggestion.put("required", List.of("text"));
+        suggestion.put("additionalProperties", false);
+
+        final Map<String, Object> schema = new LinkedHashMap<>();
+        schema.put("type", "object");
+        schema.put("properties", Map.of("suggestions", Map.of("type", "array", "items", suggestion)));
+        schema.put("required", List.of("suggestions"));
+        schema.put("additionalProperties", false);
+        return schema;
     }
 
     @Override
@@ -93,9 +106,42 @@ public class SuggestTool implements McpTool {
             throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: q");
         }
 
+        final List<String> suggestions = executeSuggest(query, arguments.get("num"));
+
+        final List<Map<String, Object>> contents = new ArrayList<>();
+        for (final String text : suggestions) {
+            contents.add(Map.of("type", "text", "text", text));
+        }
+        if (contents.isEmpty()) {
+            contents.add(Map.of("type", "text", "text", "No suggestions found for: " + query));
+        }
+
+        final List<Map<String, Object>> structuredSuggestions =
+                suggestions.stream().map(text -> Map.<String, Object> of("text", text)).collect(Collectors.toList());
+
+        final Map<String, Object> result = new LinkedHashMap<>();
+        result.put("content", contents);
+        result.put("structuredContent", Map.of("suggestions", structuredSuggestions));
+        return result;
+    }
+
+    /**
+     * Executes the suggest request and returns the suggestion texts.
+     * <p>
+     * This is the seam a container-free test overrides to exercise {@link #call} end to end
+     * without a DI container: everything below this point (resolving the effective size via
+     * {@link #getFessConfig()} and running the request via {@link #getSuggestHelper()}) needs
+     * one.
+     * </p>
+     *
+     * @param query the non-empty query prefix
+     * @param numArg the raw {@code num} argument value, as passed to {@link #resolveSuggestSize}
+     * @return the suggestion texts, in response order; never null
+     */
+    protected List<String> executeSuggest(final String query, final Object numArg) {
         final FessConfig fessConfig = getFessConfig();
         final int maxPageSize = fessConfig.getPagingSearchPageMaxSizeAsInteger().intValue();
-        final int num = resolveSuggestSize(arguments.get("num"), maxPageSize);
+        final int num = resolveSuggestSize(numArg, maxPageSize);
 
         if (logger.isDebugEnabled()) {
             logger.debug("[MCP] Executing suggest: query='{}', num={}", query, num);
@@ -109,18 +155,13 @@ public class SuggestTool implements McpTool {
 
         final SuggestResponse suggestResponse = builder.execute().getResponse();
 
-        final List<Map<String, Object>> contents = new ArrayList<>();
+        final List<String> texts = new ArrayList<>();
         if (suggestResponse.getItems() != null) {
             for (final SuggestItem item : suggestResponse.getItems()) {
-                contents.add(Map.of("type", "text", "text", item.getText()));
+                texts.add(item.getText());
             }
         }
-
-        if (contents.isEmpty()) {
-            contents.add(Map.of("type", "text", "text", "No suggestions found for: " + query));
-        }
-
-        return Map.of("content", contents);
+        return texts;
     }
 
     /**
