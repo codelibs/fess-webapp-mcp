@@ -69,7 +69,7 @@ Search functionality integrates with Fess through `SearchHelper` and `SearchRend
 
 ### Configuration
 
-Every configuration key is a Fess system property, read through `ComponentUtil.getFessConfig()`. **Boolean keys (`mcp.enabled`) accept only the literal string `true`** — `getSystemPropertyAsBoolean` treats anything else, including `"1"`, as `false`. The full key reference — including the three `mcp.auth.mode` values, the `mcp.oauth.*` family, the per-method `mcp.cache.*.ttl.ms` keys, and the pre-existing `mcp.content.max.length` / `mcp.highlight.*` / `mcp.default.page.size` — is documented in `README.md`'s Configuration table, not duplicated here.
+Every configuration key is a Fess system property, read through `ComponentUtil.getFessConfig()`. **Boolean keys (`mcp.enabled`) accept only `true`, matched case-insensitively** — `getSystemPropertyAsBoolean` is `Constants.TRUE.equalsIgnoreCase(...)`, so `True`/`TRUE` also work but anything else, including `"1"`, is `false`. The full key reference — including the three `mcp.auth.mode` values, the `mcp.oauth.*` family, the per-method `mcp.cache.*.ttl.ms` keys, and the pre-existing `mcp.content.max.length` / `mcp.highlight.*` / `mcp.default.page.size` — is documented in `README.md`'s Configuration table, not duplicated here.
 
 ## Key Dependencies
 

@@ -235,9 +235,14 @@ public class McpApiManagerHttpTest {
 
     @Test
     public void testBatchIsRejected() throws Exception {
+        // A JSON array body never reaches McpRequest.parse (Request-object validation, -32600):
+        // Json.parseObject rejects the array shape first, as a parse error (-32700). Pinning the
+        // exact code here, not just the HTTP status, is what keeps README.md's Error Codes table
+        // (which attributes this case to -32700, not -32600) honest against a future regression.
         final String body = post(new TestManager(), "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}]", Map.of());
         assertEquals(400, lastResponse.getStatus(), "batching was removed in 2025-06-18");
         assertFalse(body.isEmpty());
+        assertTrue(body.contains("\"code\":-32700"), "a JSON array body is a parse error (-32700), not -32600: " + body);
     }
 
     @Test

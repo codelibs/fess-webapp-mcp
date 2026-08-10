@@ -49,7 +49,7 @@ For detailed instructions, see the [Plugin Administration Guide](https://fess.co
 - **Suggest Tool**: Autocomplete/suggestion queries via Fess suggest engine
 - **Get Document Tool**: Retrieve individual documents by ID
 - **Index Statistics**: Retrieve index and system information, gated behind a permission by default
-- **Structured Tool Output**: Every tool declares an `outputSchema` and returns a matching `structuredContent`, alongside the existing Markdown `content` text block
+- **Structured Tool Output**: Every tool declares an `outputSchema` and returns a matching `structuredContent`. For `search`, `suggest`, and `get_document` this sits alongside the existing Markdown `content` text block; `get_index_stats`'s `content` text block is itself the same data serialized as JSON (see [Deviations From the Specification](#deviations-from-the-specification) item 2)
 - **Resources**: Access to Fess index statistics and configuration
 - **Resource Templates**: Parameterized URI templates (RFC 6570) for dynamic resource access
 - **Prompts**: Pre-defined search templates for common use cases
@@ -417,7 +417,7 @@ curl -sS -X POST http://localhost:8080/mcp \
   }
 }
 ```
-(headers: `Mcp-Method: tools/call`, `Mcp-Name: suggest`)
+(headers: `MCP-Protocol-Version: 2026-07-28`, `Mcp-Method: tools/call`, `Mcp-Name: suggest`)
 
 **Request (Get Document):**
 ```json
@@ -432,7 +432,7 @@ curl -sS -X POST http://localhost:8080/mcp \
   }
 }
 ```
-(headers: `Mcp-Method: tools/call`, `Mcp-Name: get_document`)
+(headers: `MCP-Protocol-Version: 2026-07-28`, `Mcp-Method: tools/call`, `Mcp-Name: get_document`)
 
 **Response when the document is not found:**
 ```json
@@ -461,7 +461,7 @@ curl -sS -X POST http://localhost:8080/mcp \
   }
 }
 ```
-(headers: `Mcp-Method: tools/call`, `Mcp-Name: get_index_stats`)
+(headers: `MCP-Protocol-Version: 2026-07-28`, `Mcp-Method: tools/call`, `Mcp-Name: get_index_stats`)
 
 **Unauthorized/unknown tool** (identical response for a tool that does not exist and one the caller is not authorized for — an unauthorized caller cannot distinguish the two):
 ```json
@@ -858,8 +858,8 @@ Unlike a strict per-code HTTP status mapping, the HTTP status for a given JSON-R
 
 | Code | Message | Description |
 |------|---------|--------------|
-| -32700 | Parse error | Invalid JSON was received |
-| -32600 | Invalid Request | The JSON sent is not a valid Request object (includes an explicit `"id": null`, and a JSON array body — batching is not supported) |
+| -32700 | Parse error | Invalid JSON was received; also covers a JSON array request body — `Json.parseObject` rejects the array shape before `McpRequest.parse` ever runs, so a batch request never reaches Request-object validation |
+| -32600 | Invalid Request | The JSON sent is not a valid Request object (e.g. an explicit `"id": null`) |
 | -32601 | Method not found | The method does not exist, including the retired `initialize` and `ping` |
 | -32602 | Invalid params | Invalid method parameter(s); also covers an unknown, gated, or otherwise unusable tool/prompt/resource, and an inbound `cursor` (this server never issues one) |
 | -32603 | Internal error | Internal JSON-RPC error; also used for a rate-limit refusal (HTTP 429, with a `retryAfterSeconds` in `error.data` and an HTTP `Retry-After` header) |
@@ -907,7 +907,7 @@ WWW-Authenticate: Bearer realm="fess-mcp", error="insufficient_scope", error_des
 
 ## Configuration
 
-The following system properties can be configured in Fess. **Boolean keys accept only the literal `true`; any other value (including `1`, `yes`, or an empty string) is treated as `false`** — `mcp.enabled=1` silently disables the endpoint rather than enabling it.
+The following system properties can be configured in Fess. **Boolean keys accept only `true`, matched case-insensitively** (so `True`/`TRUE` also work) — any other value, including `1`, `yes`, or an empty string, is treated as `false` (`FessProp#getSystemPropertyAsBoolean` is `Constants.TRUE.equalsIgnoreCase(...)`) — so `mcp.enabled=1` silently disables the endpoint rather than enabling it.
 
 | Property | Default | Description |
 |----------|---------|-------------|
@@ -937,14 +937,14 @@ The following system properties can be configured in Fess. **Boolean keys accept
 These are deliberate, reviewed choices, not oversights:
 
 1. **`mcp.auth.mode` defaults to `none`.** The MCP Streamable HTTP transport's Security Considerations say a server SHOULD authenticate every connection. This server does not, by default — kept for backward compatibility, so an existing Fess deployment keeps working unmodified after upgrading this plugin. The endpoint logs a one-time WARN at startup whenever it resolves to unauthenticated behaviour (including an unrecognised `mcp.auth.mode` value, or an `oauth` configuration that turned out not to be usable).
-2. **Tool text blocks stay Markdown, not serialized JSON.** The spec SHOULDs that a tool result's `content` text block, when `structuredContent` is also present, carry the same information serialized as JSON. This server keeps the pre-existing human-readable Markdown text instead, so clients already parsing today's `content` blocks are not broken by this migration.
+2. **`search`, `suggest`, and `get_document` keep Markdown text blocks, not serialized JSON.** The spec SHOULDs that a tool result's `content` text block, when `structuredContent` is also present, carry the same information serialized as JSON. These three tools keep their pre-existing human-readable Markdown text instead, so clients already parsing today's `content` blocks are not broken by this migration. **`get_index_stats` is the exception, and is already spec-compliant on this point**: its `content[0].text` has always been `JsonXContent.contentBuilder().map(stats).toString()` — the same data `structuredContent` carries (minus nulls), serialized as JSON, not Markdown.
 3. **`isError: true` results carry no `structuredContent`.** Verified correct against the MCP schema: both `content` and `structuredContent` are optional on `CallToolResult`, and there is nothing structured to report for a failure.
 4. **No automatic scope-hierarchy resolution.** `mcp.oauth.required.scopes` must be written using the authorization server's own leaf scopes — see [OAuth 2.1 Setup](#oauth-21-setup).
 5. **`mcp.oauth.audience`, when set, must end in `/mcp`**, or `oauth` mode is treated as unusable and falls back to `none` (logged at ERROR on startup).
 6. **`oauth` mode with an unset `mcp.oauth.issuer` falls back to `none`.** RFC 9728 requires a protected-resource metadata document's `authorization_servers` to be non-empty; serving one with none would be worse than not enabling authorization at all, so this server refuses to try rather than serving a broken document.
 7. **`get_index_stats` is gated by default** (`mcp.tools.index_stats.permissions=Radmin-api`), so it is unavailable in the default `none` mode. This tool bypasses Fess's normal role-based search filtering and exposes the index name, document count, and JVM heap — administrative information, not a search result. See [Get Index Stats and the permission gate](#get-index-stats-and-the-permission-gate).
 8. **The rate limiter is per-principal fairness, not a flood defence.** It has no cross-key cap: `MAX_TRACKED_KEYS` (10,000 distinct keys) is a *sweep trigger* that prompts the limiter to evict stale-window entries once the tracked-key count crosses it, not a hard ceiling — a flood from more distinct keys than that within one window is not throttled by this mechanism at all. For IP-level flood defence, enable Fess's own `rate.limit.*` filter alongside this plugin.
-9. **Boolean config keys accept only `true`/`false`.** `getSystemPropertyAsBoolean` treats anything other than the literal string `true` as `false` — see the Configuration table's warning.
+9. **Boolean config keys accept only `true` (case-insensitive), not `1`/`yes`/etc.** `getSystemPropertyAsBoolean` is a case-insensitive `equalsIgnoreCase` check against the string `"true"`; every other value, including `"1"` or `"yes"`, is `false` — see the Configuration table's warning.
 10. **Large JWTs and Tomcat's `maxHttpHeaderSize`.** A `Bearer` JWT carrying many claims (especially a large `mcp.oauth.permission.claim` array) can exceed Tomcat's default `maxHttpHeaderSize` (8 KB). `oauth`-mode deployments issuing larger tokens should raise this Tomcat setting.
 
 ## Development
