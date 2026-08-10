@@ -61,12 +61,6 @@ public class McpApiManager extends BaseApiManager {
 
     private static final Logger logger = LogManager.getLogger(McpApiManager.class);
 
-    /** The latest MCP protocol version supported by this server. */
-    protected static final String LATEST_PROTOCOL_VERSION = "2024-11-05";
-
-    /** The set of MCP protocol versions supported by this server. */
-    protected static final java.util.Set<String> SUPPORTED_PROTOCOL_VERSIONS = java.util.Set.of("2024-11-05");
-
     /** Static sort candidate values for advanced_search.sort completion. */
     protected static final List<String> SORT_VALUES =
             List.of("score.desc", "score.asc", "last_modified.desc", "last_modified.asc", "create_timestamp.desc", "create_timestamp.asc");
@@ -381,9 +375,11 @@ public class McpApiManager extends BaseApiManager {
         if (logger.isDebugEnabled()) {
             logger.debug("[MCP] Dispatching method: {}", method);
         }
+        // "initialize" and "ping" are gone in MCP 2026-07-28 (see McpDispatcher and
+        // org.codelibs.fess.plugin.webapp.mcp.handler): neither is a case here any more, so both
+        // fall through to the default MethodNotFound branch below, same as any other unknown
+        // method name.
         return switch (method) {
-        case "initialize" -> handleInitialize(params != null ? params : Collections.emptyMap());
-        case "ping" -> handlePing();
         case "tools/list" -> handleListTools(params);
         case "tools/call" -> handleInvoke(params);
         case "resources/list" -> handleListResources(params);
@@ -434,77 +430,6 @@ public class McpApiManager extends BaseApiManager {
     @Override
     protected void writeHeaders(final HttpServletResponse response) {
         ComponentUtil.getFessConfig().getApiJsonResponseHeaderList().forEach(e -> response.setHeader(e.getFirst(), e.getSecond()));
-    }
-
-    /**
-     * Handles the ping request per MCP specification.
-     * Returns an empty result to indicate the server is alive.
-     *
-     * @return an empty map
-     */
-    protected Map<String, Object> handlePing() {
-        return Collections.emptyMap();
-    }
-
-    /**
-     * Handles the initialization process and returns a map containing
-     * the capabilities of the MCP API.
-     *
-     * @return a map with the following keys:
-     *         - "protocolVersion": the MCP protocol version (e.g., "2024-11-05").
-     *         - "capabilities": object containing server capabilities including tools, resources, and prompts support.
-     *         - "serverInfo": object containing server name and version information.
-     */
-    protected Map<String, Object> handleInitialize() {
-        return handleInitialize(Collections.emptyMap());
-    }
-
-    /**
-     * Handles the initialization process with protocol version negotiation.
-     *
-     * @param params the request parameters (may contain "protocolVersion" and "clientInfo")
-     * @return a map with protocolVersion, capabilities, serverInfo, and instructions
-     */
-    protected Map<String, Object> handleInitialize(final Map<String, Object> params) {
-        final Map<String, Object> caps = new HashMap<>();
-        caps.put("tools", new HashMap<>());
-        caps.put("resources", new HashMap<>());
-        caps.put("prompts", new HashMap<>());
-        caps.put("completions", new HashMap<>());
-
-        final Map<String, Object> serverInfo = new HashMap<>();
-        serverInfo.put("name", "fess-mcp-server");
-        serverInfo.put("version", "1.0.0");
-
-        // Protocol version negotiation.
-        // If the client requests a version we support, echo it back.
-        // Otherwise (including null), respond with the latest version we support.
-        String negotiatedVersion = LATEST_PROTOCOL_VERSION;
-        if (params != null) {
-            final Object requested = params.get("protocolVersion");
-            if (requested instanceof final String requestedStr && SUPPORTED_PROTOCOL_VERSIONS.contains(requestedStr)) {
-                negotiatedVersion = requestedStr;
-            } else if (logger.isDebugEnabled() && requested != null) {
-                logger.debug("[MCP] Client requested unsupported protocolVersion={}, falling back to {}", requested,
-                        LATEST_PROTOCOL_VERSION);
-            }
-            if (logger.isDebugEnabled()) {
-                final Object clientInfo = params.get("clientInfo");
-                if (clientInfo != null) {
-                    logger.debug("[MCP] Initialize clientInfo={}", clientInfo);
-                }
-            }
-        }
-
-        final Map<String, Object> result = new LinkedHashMap<>();
-        result.put("protocolVersion", negotiatedVersion);
-        result.put("capabilities", caps);
-        result.put("serverInfo", serverInfo);
-        result.put("instructions",
-                "Fess Enterprise Search Server. Use the 'search' tool to perform full-text search with Lucene-like query syntax "
-                        + "(AND default, OR explicit, quotes for phrase, - for exclusion). "
-                        + "Use 'get_index_stats' to check index health. Use 'suggest' for query autocomplete.");
-        return result;
     }
 
     /**

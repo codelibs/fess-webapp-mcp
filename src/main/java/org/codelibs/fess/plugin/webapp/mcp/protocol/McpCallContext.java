@@ -15,25 +15,83 @@
  */
 package org.codelibs.fess.plugin.webapp.mcp.protocol;
 
+import java.util.Collections;
+import java.util.Map;
+
 /**
  * Per-invocation context passed to
- * {@link org.codelibs.fess.plugin.webapp.mcp.tool.McpTool#call(java.util.Map, McpCallContext)}.
+ * {@link org.codelibs.fess.plugin.webapp.mcp.handler.McpMethodHandler#handle(McpCallContext)}
+ * and to {@link org.codelibs.fess.plugin.webapp.mcp.tool.McpTool#call(java.util.Map, McpCallContext)}.
  *
  * <p>
- * Intentionally minimal: this revision of the tool extraction has no tool implementation that
- * reads anything from it. It exists now, ahead of need, only so that {@code McpTool#call} has a
- * stable, typed second parameter instead of {@code Object}. A later task (permission enforcement)
- * is expected to add fields here, e.g. the caller's resolved roles or the parsed request
- * metadata; adding fields to this class is intentionally not a breaking change for any
- * {@code McpTool} implementation.
+ * Carries the parsed request envelope, its {@code params._meta}, and the request's
+ * {@code params} for direct access. Deliberately does not yet carry a resolved
+ * {@code McpPrincipal}: permission enforcement is a later task's work, and adding that field
+ * then is not a breaking change for any existing {@code McpMethodHandler} or {@code McpTool}
+ * implementation, exactly as adding {@code request}/{@code meta}/{@code params} here was not a
+ * breaking change for the {@code McpTool} implementations that predate them.
  * </p>
  */
 public class McpCallContext {
 
+    /** The parsed request envelope, or null when this context was created without one. */
+    private final McpRequest request;
+
+    /** The parsed {@code params._meta}, or null when this context was created without one. */
+    private final McpRequestMeta meta;
+
+    /** The request's {@code params}; never null. */
+    private final Map<String, Object> params;
+
     /**
-     * Creates an empty call context.
+     * Creates an empty call context, carrying neither a request nor {@code _meta} nor any
+     * params.
+     * <p>
+     * Used by {@code McpTool} unit tests, and by {@code McpApiManager}'s pre-2026-07-28 dispatch
+     * path, neither of which has a full {@link McpRequest} to hand over.
+     * </p>
      */
     public McpCallContext() {
-        // intentionally empty; fields land in a later task
+        this(null, null, Collections.emptyMap());
+    }
+
+    /**
+     * Creates a call context.
+     *
+     * @param request the parsed request envelope, or null when unavailable
+     * @param meta the parsed {@code params._meta}, or null when unavailable
+     * @param params the request's {@code params}; null is treated as empty
+     */
+    public McpCallContext(final McpRequest request, final McpRequestMeta meta, final Map<String, Object> params) {
+        this.request = request;
+        this.meta = meta;
+        this.params = params != null ? params : Collections.emptyMap();
+    }
+
+    /**
+     * Returns the parsed request envelope.
+     *
+     * @return the request, or null when this context was created without one
+     */
+    public McpRequest getRequest() {
+        return request;
+    }
+
+    /**
+     * Returns the parsed {@code params._meta}.
+     *
+     * @return the request metadata, or null when this context was created without one
+     */
+    public McpRequestMeta getMeta() {
+        return meta;
+    }
+
+    /**
+     * Returns the request's {@code params}.
+     *
+     * @return the params map; never null
+     */
+    public Map<String, Object> getParams() {
+        return params;
     }
 }

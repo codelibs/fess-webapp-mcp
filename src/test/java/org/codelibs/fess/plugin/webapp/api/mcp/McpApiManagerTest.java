@@ -47,51 +47,12 @@ public class McpApiManagerTest {
         mcpApiManager = new McpApiManager();
     }
 
-    @Test
-    public void testHandleInitialize() {
-        final Map<String, Object> result = mcpApiManager.handleInitialize();
-
-        assertNotNull(result, "Initialize result should not be null");
-        assertEquals("2024-11-05", result.get("protocolVersion"), "Protocol version should be 2024-11-05");
-
-        @SuppressWarnings("unchecked")
-        final Map<String, Object> capabilities = (Map<String, Object>) result.get("capabilities");
-        assertNotNull(capabilities, "Capabilities should not be null");
-        assertTrue(capabilities.containsKey("tools"), "Capabilities should include tools");
-        assertTrue(capabilities.containsKey("resources"), "Capabilities should include resources");
-        assertTrue(capabilities.containsKey("prompts"), "Capabilities should include prompts");
-
-        @SuppressWarnings("unchecked")
-        final Map<String, Object> serverInfo = (Map<String, Object>) result.get("serverInfo");
-        assertNotNull(serverInfo, "ServerInfo should not be null");
-        assertEquals("fess-mcp-server", serverInfo.get("name"), "Server name should be fess-mcp-server");
-        assertEquals("1.0.0", serverInfo.get("version"), "Server version should be 1.0.0");
-    }
-
-    @Test
-    public void testHandleInitialize_HasInstructions() {
-        final Map<String, Object> result = mcpApiManager.handleInitialize();
-        assertNotNull(result.get("instructions"), "Should have instructions");
-        assertTrue(result.get("instructions") instanceof String && !((String) result.get("instructions")).isEmpty(),
-                "Instructions should be a non-empty string");
-    }
-
-    @Test
-    public void testHandleInitialize_DoesNotAdvertiseLoggingCapability() {
-        final Map<String, Object> result = mcpApiManager.handleInitialize();
-        @SuppressWarnings("unchecked")
-        final Map<String, Object> capabilities = (Map<String, Object>) result.get("capabilities");
-        assertFalse(capabilities.containsKey("logging"),
-                "Should not advertise logging capability (HTTP request/response server cannot emit notifications/message)");
-    }
-
-    @Test
-    public void testHandleInitialize_HasCompletionsCapability() {
-        final Map<String, Object> result = mcpApiManager.handleInitialize();
-        @SuppressWarnings("unchecked")
-        final Map<String, Object> capabilities = (Map<String, Object>) result.get("capabilities");
-        assertNotNull(capabilities.get("completions"), "Should have completions capability");
-    }
+    // handleInitialize()/handleInitialize(Map) and their tests are retired along with the
+    // initialize handshake itself (MCP 2026-07-28 deletes it outright and replaces it with the
+    // mandatory server/discover method). The replacement's shape -- capabilities, instructions,
+    // no logging capability, ttlMs/cacheScope -- is covered by DiscoverHandlerTest; the "initialize
+    // is now an error" replacement behaviour is covered by McpDispatcherTest and by
+    // testDispatchRpcMethod_InitializeIsNowMethodNotFound below.
 
     @Test
     public void testHandleListTools() {
@@ -166,10 +127,17 @@ public class McpApiManagerTest {
     }
 
     @Test
-    public void testDispatchRpcMethod_Initialize() {
-        final Object result = mcpApiManager.dispatchRpcMethod("initialize", Map.of());
-        assertNotNull(result, "Dispatch result should not be null");
-        assertTrue(result instanceof Map, "Result should be a Map");
+    public void testDispatchRpcMethod_InitializeIsNowMethodNotFound() {
+        // MCP 2026-07-28 deletes the initialize handshake outright; this legacy dispatch path
+        // (still exercised by process() until a later task replaces it) must no longer special-case
+        // it. The special-cased "name the supported version" replacement error lives in
+        // McpDispatcher, which is what process() will route through once that task lands.
+        try {
+            mcpApiManager.dispatchRpcMethod("initialize", Map.of());
+            fail("Should have thrown McpApiException for retired method initialize");
+        } catch (final McpApiException e) {
+            assertEquals(ErrorCode.MethodNotFound, e.getCode(), "Should be MethodNotFound");
+        }
     }
 
     @Test
@@ -906,40 +874,15 @@ public class McpApiManagerTest {
 
     @Test
     public void testDispatchRpcMethod_AllMethods() {
-        // Test all valid methods return non-null results
-        final String[] methods = { "initialize", "tools/list", "resources/list", "prompts/list" };
+        // Test all valid methods return non-null results. "initialize" is deliberately excluded:
+        // it is retired (see testDispatchRpcMethod_InitializeIsNowMethodNotFound).
+        final String[] methods = { "tools/list", "resources/list", "prompts/list" };
 
         for (final String method : methods) {
             final Object result = mcpApiManager.dispatchRpcMethod(method, Map.of());
             assertNotNull(result, "Result for method '" + method + "' should not be null");
             assertTrue(result instanceof Map, "Result for method '" + method + "' should be a Map");
         }
-    }
-
-    @Test
-    public void testHandleInitialize_CapabilitiesStructure() {
-        final Map<String, Object> result = mcpApiManager.handleInitialize();
-
-        @SuppressWarnings("unchecked")
-        final Map<String, Object> capabilities = (Map<String, Object>) result.get("capabilities");
-
-        // Verify capabilities structure
-        assertNotNull(capabilities.get("tools"), "tools capability should not be null");
-        assertNotNull(capabilities.get("resources"), "resources capability should not be null");
-        assertNotNull(capabilities.get("prompts"), "prompts capability should not be null");
-
-        assertTrue(capabilities.get("tools") instanceof Map, "tools should be a Map");
-        assertTrue(capabilities.get("resources") instanceof Map, "resources should be a Map");
-        assertTrue(capabilities.get("prompts") instanceof Map, "prompts should be a Map");
-
-        // Verify serverInfo structure
-        @SuppressWarnings("unchecked")
-        final Map<String, Object> serverInfo = (Map<String, Object>) result.get("serverInfo");
-
-        assertTrue(serverInfo.containsKey("name"), "serverInfo should have name");
-        assertTrue(serverInfo.containsKey("version"), "serverInfo should have version");
-        assertTrue(serverInfo.get("name") instanceof String, "name should be a String");
-        assertTrue(serverInfo.get("version") instanceof String, "version should be a String");
     }
 
     @Test
@@ -1335,8 +1278,11 @@ public class McpApiManagerTest {
 
     @Test
     public void testProcessBatchRequests() {
-        final List<Map<String, Object>> requests = List.of(Map.of("jsonrpc", "2.0", "id", 1, "method", "initialize", "params", Map.of()),
-                Map.of("jsonrpc", "2.0", "id", 2, "method", "tools/list", "params", Map.of()));
+        // "initialize" is retired (MCP 2026-07-28); use two live methods instead so this test
+        // still exercises real batch mechanics rather than the removed handshake.
+        final List<Map<String, Object>> requests =
+                List.of(Map.of("jsonrpc", "2.0", "id", 1, "method", "resources/list", "params", Map.of()),
+                        Map.of("jsonrpc", "2.0", "id", 2, "method", "tools/list", "params", Map.of()));
 
         final List<Map<String, Object>> responses = mcpApiManager.processBatchRequests(requests);
 
@@ -1355,7 +1301,8 @@ public class McpApiManagerTest {
 
         final List<Map<String, Object>> requests = new ArrayList<>();
         requests.add(notification);
-        requests.add(Map.of("jsonrpc", "2.0", "id", 1, "method", "initialize", "params", Map.of()));
+        // "initialize" is retired (MCP 2026-07-28); prompts/list is a live method instead.
+        requests.add(Map.of("jsonrpc", "2.0", "id", 1, "method", "prompts/list", "params", Map.of()));
 
         final List<Map<String, Object>> responses = mcpApiManager.processBatchRequests(requests);
 
@@ -1385,39 +1332,10 @@ public class McpApiManagerTest {
         assertNotNull(responses.get(0).get("error"), "Response should have error");
     }
 
-    // ==================== initialize protocol negotiation tests ====================
-
-    @Test
-    public void testHandleInitialize_NegotiateSupportedVersion() {
-        final Map<String, Object> params = new HashMap<>();
-        params.put("protocolVersion", "2024-11-05");
-        final Map<String, Object> result = mcpApiManager.handleInitialize(params);
-        assertEquals("2024-11-05", result.get("protocolVersion"), "Should echo back supported version");
-    }
-
-    @Test
-    public void testHandleInitialize_FallbackUnsupportedVersion() {
-        final Map<String, Object> params = new HashMap<>();
-        params.put("protocolVersion", "2099-01-01");
-        final Map<String, Object> result = mcpApiManager.handleInitialize(params);
-        assertEquals("2024-11-05", result.get("protocolVersion"), "Should fall back to latest supported version");
-    }
-
-    @Test
-    public void testHandleInitialize_NoParamsUsesLatest() {
-        final Map<String, Object> result = mcpApiManager.handleInitialize(Map.of());
-        assertEquals("2024-11-05", result.get("protocolVersion"), "Should use latest when no protocolVersion provided");
-    }
-
-    @Test
-    public void testHandleInitialize_AcceptsClientInfo() {
-        final Map<String, Object> params = new HashMap<>();
-        params.put("protocolVersion", "2024-11-05");
-        params.put("clientInfo", Map.of("name", "test-client", "version", "0.1"));
-        final Map<String, Object> result = mcpApiManager.handleInitialize(params);
-        assertNotNull(result, "Should still produce a result when clientInfo is present");
-        assertEquals("2024-11-05", result.get("protocolVersion"));
-    }
+    // The old "initialize protocol version negotiation" test group is retired along with
+    // handleInitialize itself: MCP 2026-07-28 has exactly one protocol version and no
+    // negotiation. See the comment above testHandleListTools for where the replacement coverage
+    // lives.
 
     // ==================== completion/complete (Task C) tests ====================
 
@@ -1529,47 +1447,9 @@ public class McpApiManagerTest {
         }
     }
 
-    // ==================== initialize protocolVersion type robustness ====================
-
-    @Test
-    public void testHandleInitialize_NonStringProtocolVersionNumberFallsBackToLatest() {
-        // Non-String protocolVersion (e.g., numeric) must be treated as unsupported
-        // and the server should fall back to the latest supported version.
-        final Map<String, Object> params = new HashMap<>();
-        params.put("protocolVersion", Integer.valueOf(20241105));
-        final Map<String, Object> result = mcpApiManager.handleInitialize(params);
-        assertEquals("2024-11-05", result.get("protocolVersion"), "Non-String protocolVersion should fall back to latest");
-    }
-
-    @Test
-    public void testHandleInitialize_NonStringProtocolVersionMapFallsBackToLatest() {
-        final Map<String, Object> params = new HashMap<>();
-        params.put("protocolVersion", Map.of("major", 2024));
-        final Map<String, Object> result = mcpApiManager.handleInitialize(params);
-        assertEquals("2024-11-05", result.get("protocolVersion"), "Map-typed protocolVersion should fall back to latest");
-    }
-
-    @Test
-    public void testHandleInitialize_EmptyStringProtocolVersionFallsBackToLatest() {
-        final Map<String, Object> params = new HashMap<>();
-        params.put("protocolVersion", "");
-        final Map<String, Object> result = mcpApiManager.handleInitialize(params);
-        assertEquals("2024-11-05", result.get("protocolVersion"), "Empty protocolVersion should fall back to latest");
-    }
-
-    @Test
-    public void testHandleInitialize_ClientInfoNotEchoed() {
-        // The server must NOT retain or echo clientInfo in the initialize response.
-        final Map<String, Object> params = new HashMap<>();
-        params.put("protocolVersion", "2024-11-05");
-        params.put("clientInfo", Map.of("name", "test-client", "version", "0.1"));
-        final Map<String, Object> result = mcpApiManager.handleInitialize(params);
-        assertFalse(result.containsKey("clientInfo"), "Response must not include clientInfo key");
-        // serverInfo must be the fixed server identity, not the client's
-        @SuppressWarnings("unchecked")
-        final Map<String, Object> serverInfo = (Map<String, Object>) result.get("serverInfo");
-        assertEquals("fess-mcp-server", serverInfo.get("name"), "serverInfo.name must be server identity");
-    }
+    // The old "initialize protocolVersion type robustness" test group is retired along with
+    // handleInitialize itself -- there is no protocolVersion parameter to be robust about any
+    // more.
 
     // ==================== completion/complete robustness ====================
 
