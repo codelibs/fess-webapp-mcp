@@ -15,11 +15,12 @@
  */
 package org.codelibs.fess.plugin.webapp.api.mcp;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -28,8 +29,8 @@ import java.util.Map;
 
 import org.codelibs.fess.plugin.webapp.exception.McpApiException;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 /**
  * Test class for McpApiManager.
@@ -41,7 +42,7 @@ public class McpApiManagerTest {
 
     private McpApiManager mcpApiManager;
 
-    @Before
+    @BeforeEach
     public void setUp() {
         mcpApiManager = new TestMcpApiManager();
     }
@@ -66,29 +67,29 @@ public class McpApiManagerTest {
     public void testHandleInitialize() {
         final Map<String, Object> result = mcpApiManager.handleInitialize();
 
-        assertNotNull("Initialize result should not be null", result);
-        assertEquals("Protocol version should be 2024-11-05", "2024-11-05", result.get("protocolVersion"));
+        assertNotNull(result, "Initialize result should not be null");
+        assertEquals("2024-11-05", result.get("protocolVersion"), "Protocol version should be 2024-11-05");
 
         @SuppressWarnings("unchecked")
         final Map<String, Object> capabilities = (Map<String, Object>) result.get("capabilities");
-        assertNotNull("Capabilities should not be null", capabilities);
-        assertTrue("Capabilities should include tools", capabilities.containsKey("tools"));
-        assertTrue("Capabilities should include resources", capabilities.containsKey("resources"));
-        assertTrue("Capabilities should include prompts", capabilities.containsKey("prompts"));
+        assertNotNull(capabilities, "Capabilities should not be null");
+        assertTrue(capabilities.containsKey("tools"), "Capabilities should include tools");
+        assertTrue(capabilities.containsKey("resources"), "Capabilities should include resources");
+        assertTrue(capabilities.containsKey("prompts"), "Capabilities should include prompts");
 
         @SuppressWarnings("unchecked")
         final Map<String, Object> serverInfo = (Map<String, Object>) result.get("serverInfo");
-        assertNotNull("ServerInfo should not be null", serverInfo);
-        assertEquals("Server name should be fess-mcp-server", "fess-mcp-server", serverInfo.get("name"));
-        assertEquals("Server version should be 1.0.0", "1.0.0", serverInfo.get("version"));
+        assertNotNull(serverInfo, "ServerInfo should not be null");
+        assertEquals("fess-mcp-server", serverInfo.get("name"), "Server name should be fess-mcp-server");
+        assertEquals("1.0.0", serverInfo.get("version"), "Server version should be 1.0.0");
     }
 
     @Test
     public void testHandleInitialize_HasInstructions() {
         final Map<String, Object> result = mcpApiManager.handleInitialize();
-        assertNotNull("Should have instructions", result.get("instructions"));
-        assertTrue("Instructions should be a non-empty string",
-                result.get("instructions") instanceof String && !((String) result.get("instructions")).isEmpty());
+        assertNotNull(result.get("instructions"), "Should have instructions");
+        assertTrue(result.get("instructions") instanceof String && !((String) result.get("instructions")).isEmpty(),
+                "Instructions should be a non-empty string");
     }
 
     @Test
@@ -96,8 +97,8 @@ public class McpApiManagerTest {
         final Map<String, Object> result = mcpApiManager.handleInitialize();
         @SuppressWarnings("unchecked")
         final Map<String, Object> capabilities = (Map<String, Object>) result.get("capabilities");
-        assertFalse("Should not advertise logging capability (HTTP request/response server cannot emit notifications/message)",
-                capabilities.containsKey("logging"));
+        assertFalse(capabilities.containsKey("logging"),
+                "Should not advertise logging capability (HTTP request/response server cannot emit notifications/message)");
     }
 
     @Test
@@ -105,131 +106,132 @@ public class McpApiManagerTest {
         final Map<String, Object> result = mcpApiManager.handleInitialize();
         @SuppressWarnings("unchecked")
         final Map<String, Object> capabilities = (Map<String, Object>) result.get("capabilities");
-        assertNotNull("Should have completions capability", capabilities.get("completions"));
+        assertNotNull(capabilities.get("completions"), "Should have completions capability");
     }
 
     @Test
     public void testHandleListTools() {
         final Map<String, Object> result = mcpApiManager.handleListTools();
 
-        assertNotNull("ListTools result should not be null", result);
-        assertTrue("Result should contain tools key", result.containsKey("tools"));
+        assertNotNull(result, "ListTools result should not be null");
+        assertTrue(result.containsKey("tools"), "Result should contain tools key");
 
         @SuppressWarnings("unchecked")
         final List<Map<String, Object>> tools = (List<Map<String, Object>>) result.get("tools");
-        assertNotNull("Tools list should not be null", tools);
-        assertEquals("Should have 4 tools", 4, tools.size());
+        assertNotNull(tools, "Tools list should not be null");
+        assertEquals(4, tools.size(), "Should have 4 tools");
 
         // Check search tool
         final Map<String, Object> searchTool = tools.get(0);
-        assertEquals("First tool should be search", "search", searchTool.get("name"));
-        assertTrue("Search tool description should contain query syntax info",
+        assertEquals("search", searchTool.get("name"), "First tool should be search");
+        assertTrue(
                 ((String) searchTool.get("description")).contains("Search documents via Fess")
-                        && ((String) searchTool.get("description")).contains("AND"));
-        assertNotNull("Search tool should have inputSchema", searchTool.get("inputSchema"));
+                        && ((String) searchTool.get("description")).contains("AND"),
+                "Search tool description should contain query syntax info");
+        assertNotNull(searchTool.get("inputSchema"), "Search tool should have inputSchema");
 
         // Check get_index_stats tool
         final Map<String, Object> statsTool = tools.get(1);
-        assertEquals("Second tool should be get_index_stats", "get_index_stats", statsTool.get("name"));
-        assertEquals("Stats tool description", "Get index statistics and information", statsTool.get("description"));
-        assertNotNull("Stats tool should have inputSchema", statsTool.get("inputSchema"));
+        assertEquals("get_index_stats", statsTool.get("name"), "Second tool should be get_index_stats");
+        assertEquals("Get index statistics and information", statsTool.get("description"), "Stats tool description");
+        assertNotNull(statsTool.get("inputSchema"), "Stats tool should have inputSchema");
     }
 
     @Test
     public void testHandleListResources() {
         final Map<String, Object> result = mcpApiManager.handleListResources();
 
-        assertNotNull("ListResources result should not be null", result);
-        assertTrue("Result should contain resources key", result.containsKey("resources"));
+        assertNotNull(result, "ListResources result should not be null");
+        assertTrue(result.containsKey("resources"), "Result should contain resources key");
 
         @SuppressWarnings("unchecked")
         final List<Map<String, Object>> resources = (List<Map<String, Object>>) result.get("resources");
-        assertNotNull("Resources list should not be null", resources);
-        assertEquals("Should have 1 resource", 1, resources.size());
+        assertNotNull(resources, "Resources list should not be null");
+        assertEquals(1, resources.size(), "Should have 1 resource");
 
         final Map<String, Object> resource = resources.get(0);
-        assertEquals("Resource URI", "fess://index/stats", resource.get("uri"));
-        assertEquals("Resource name", "Index Statistics", resource.get("name"));
-        assertNotNull("Resource should have description", resource.get("description"));
-        assertEquals("Resource mimeType", "application/json", resource.get("mimeType"));
+        assertEquals("fess://index/stats", resource.get("uri"), "Resource URI");
+        assertEquals("Index Statistics", resource.get("name"), "Resource name");
+        assertNotNull(resource.get("description"), "Resource should have description");
+        assertEquals("application/json", resource.get("mimeType"), "Resource mimeType");
     }
 
     @Test
     public void testHandleListPrompts() {
         final Map<String, Object> result = mcpApiManager.handleListPrompts();
 
-        assertNotNull("ListPrompts result should not be null", result);
-        assertTrue("Result should contain prompts key", result.containsKey("prompts"));
+        assertNotNull(result, "ListPrompts result should not be null");
+        assertTrue(result.containsKey("prompts"), "Result should contain prompts key");
 
         @SuppressWarnings("unchecked")
         final List<Map<String, Object>> prompts = (List<Map<String, Object>>) result.get("prompts");
-        assertNotNull("Prompts list should not be null", prompts);
-        assertEquals("Should have 2 prompts", 2, prompts.size());
+        assertNotNull(prompts, "Prompts list should not be null");
+        assertEquals(2, prompts.size(), "Should have 2 prompts");
 
         // Check basic_search prompt
         final Map<String, Object> basicPrompt = prompts.get(0);
-        assertEquals("First prompt should be basic_search", "basic_search", basicPrompt.get("name"));
-        assertNotNull("Basic prompt should have description", basicPrompt.get("description"));
-        assertNotNull("Basic prompt should have arguments", basicPrompt.get("arguments"));
+        assertEquals("basic_search", basicPrompt.get("name"), "First prompt should be basic_search");
+        assertNotNull(basicPrompt.get("description"), "Basic prompt should have description");
+        assertNotNull(basicPrompt.get("arguments"), "Basic prompt should have arguments");
 
         // Check advanced_search prompt
         final Map<String, Object> advancedPrompt = prompts.get(1);
-        assertEquals("Second prompt should be advanced_search", "advanced_search", advancedPrompt.get("name"));
-        assertNotNull("Advanced prompt should have description", advancedPrompt.get("description"));
-        assertNotNull("Advanced prompt should have arguments", advancedPrompt.get("arguments"));
+        assertEquals("advanced_search", advancedPrompt.get("name"), "Second prompt should be advanced_search");
+        assertNotNull(advancedPrompt.get("description"), "Advanced prompt should have description");
+        assertNotNull(advancedPrompt.get("arguments"), "Advanced prompt should have arguments");
     }
 
     @Test
     public void testDispatchRpcMethod_Initialize() {
         final Object result = mcpApiManager.dispatchRpcMethod("initialize", Map.of());
-        assertNotNull("Dispatch result should not be null", result);
-        assertTrue("Result should be a Map", result instanceof Map);
+        assertNotNull(result, "Dispatch result should not be null");
+        assertTrue(result instanceof Map, "Result should be a Map");
     }
 
     @Test
     public void testDispatchRpcMethod_ToolsList() {
         final Object result = mcpApiManager.dispatchRpcMethod("tools/list", Map.of());
-        assertNotNull("Dispatch result should not be null", result);
-        assertTrue("Result should be a Map", result instanceof Map);
+        assertNotNull(result, "Dispatch result should not be null");
+        assertTrue(result instanceof Map, "Result should be a Map");
     }
 
     @Test
     public void testDispatchRpcMethod_ResourcesList() {
         final Object result = mcpApiManager.dispatchRpcMethod("resources/list", Map.of());
-        assertNotNull("Dispatch result should not be null", result);
-        assertTrue("Result should be a Map", result instanceof Map);
+        assertNotNull(result, "Dispatch result should not be null");
+        assertTrue(result instanceof Map, "Result should be a Map");
     }
 
     @Test
     public void testDispatchRpcMethod_PromptsList() {
         final Object result = mcpApiManager.dispatchRpcMethod("prompts/list", Map.of());
-        assertNotNull("Dispatch result should not be null", result);
-        assertTrue("Result should be a Map", result instanceof Map);
+        assertNotNull(result, "Dispatch result should not be null");
+        assertTrue(result instanceof Map, "Result should be a Map");
     }
 
-    @Test(expected = McpApiException.class)
+    @Test
     public void testDispatchRpcMethod_UnknownMethod() {
-        mcpApiManager.dispatchRpcMethod("unknown_method", Map.of());
+        assertThrows(McpApiException.class, () -> mcpApiManager.dispatchRpcMethod("unknown_method", Map.of()));
     }
 
-    @Test(expected = McpApiException.class)
+    @Test
     public void testHandleInvoke_MissingName() {
-        mcpApiManager.handleInvoke(Map.of());
+        assertThrows(McpApiException.class, () -> mcpApiManager.handleInvoke(Map.of()));
     }
 
-    @Test(expected = McpApiException.class)
+    @Test
     public void testHandleInvoke_MissingArguments() {
-        mcpApiManager.handleInvoke(Map.of("name", "search"));
+        assertThrows(McpApiException.class, () -> mcpApiManager.handleInvoke(Map.of("name", "search")));
     }
 
-    @Test(expected = McpApiException.class)
+    @Test
     public void testHandleInvoke_UnknownTool() {
-        mcpApiManager.handleInvoke(Map.of("name", "unknown_tool", "arguments", Map.of()));
+        assertThrows(McpApiException.class, () -> mcpApiManager.handleInvoke(Map.of("name", "unknown_tool", "arguments", Map.of())));
     }
 
-    @Test(expected = McpApiException.class)
+    @Test
     public void testHandleInvoke_EmptyToolName() {
-        mcpApiManager.handleInvoke(Map.of("name", "", "arguments", Map.of()));
+        assertThrows(McpApiException.class, () -> mcpApiManager.handleInvoke(Map.of("name", "", "arguments", Map.of())));
     }
 
     @Test
@@ -244,36 +246,36 @@ public class McpApiManagerTest {
         @SuppressWarnings("unchecked")
         final Map<String, Object> searchSchema = (Map<String, Object>) searchTool.get("inputSchema");
 
-        assertNotNull("Search schema should not be null", searchSchema);
-        assertEquals("Schema type should be object", "object", searchSchema.get("type"));
+        assertNotNull(searchSchema, "Search schema should not be null");
+        assertEquals("object", searchSchema.get("type"), "Schema type should be object");
 
         @SuppressWarnings("unchecked")
         final Map<String, Object> searchProperties = (Map<String, Object>) searchSchema.get("properties");
-        assertNotNull("Properties should not be null", searchProperties);
-        assertTrue("Should have 'q' property", searchProperties.containsKey("q"));
-        assertTrue("Should have 'start' property", searchProperties.containsKey("start"));
-        assertTrue("Should have 'num' property", searchProperties.containsKey("num"));
-        assertTrue("Should have 'sort' property", searchProperties.containsKey("sort"));
-        assertTrue("Should have 'lang' property", searchProperties.containsKey("lang"));
+        assertNotNull(searchProperties, "Properties should not be null");
+        assertTrue(searchProperties.containsKey("q"), "Should have 'q' property");
+        assertTrue(searchProperties.containsKey("start"), "Should have 'start' property");
+        assertTrue(searchProperties.containsKey("num"), "Should have 'num' property");
+        assertTrue(searchProperties.containsKey("sort"), "Should have 'sort' property");
+        assertTrue(searchProperties.containsKey("lang"), "Should have 'lang' property");
 
         @SuppressWarnings("unchecked")
         final List<String> required = (List<String>) searchSchema.get("required");
-        assertNotNull("Required array should not be null", required);
-        assertEquals("Should have 1 required field", 1, required.size());
-        assertEquals("Query 'q' should be required", "q", required.get(0));
+        assertNotNull(required, "Required array should not be null");
+        assertEquals(1, required.size(), "Should have 1 required field");
+        assertEquals("q", required.get(0), "Query 'q' should be required");
 
         // Verify get_index_stats tool schema
         final Map<String, Object> statsTool = tools.get(1);
         @SuppressWarnings("unchecked")
         final Map<String, Object> statsSchema = (Map<String, Object>) statsTool.get("inputSchema");
 
-        assertNotNull("Stats schema should not be null", statsSchema);
-        assertEquals("Stats schema type should be object", "object", statsSchema.get("type"));
+        assertNotNull(statsSchema, "Stats schema should not be null");
+        assertEquals("object", statsSchema.get("type"), "Stats schema type should be object");
 
         @SuppressWarnings("unchecked")
         final Map<String, Object> statsProperties = (Map<String, Object>) statsSchema.get("properties");
-        assertNotNull("Stats properties should not be null", statsProperties);
-        assertTrue("Stats properties should be empty", statsProperties.isEmpty());
+        assertNotNull(statsProperties, "Stats properties should not be null");
+        assertTrue(statsProperties.isEmpty(), "Stats properties should be empty");
     }
 
     @Test
@@ -285,42 +287,42 @@ public class McpApiManagerTest {
 
         // Verify basic_search prompt arguments
         final Map<String, Object> basicPrompt = prompts.get(0);
-        assertEquals("Prompt name should be basic_search", "basic_search", basicPrompt.get("name"));
-        assertEquals("Description should match", "Perform a basic search with a query string", basicPrompt.get("description"));
+        assertEquals("basic_search", basicPrompt.get("name"), "Prompt name should be basic_search");
+        assertEquals("Perform a basic search with a query string", basicPrompt.get("description"), "Description should match");
 
         @SuppressWarnings("unchecked")
         final List<Map<String, Object>> basicArgs = (List<Map<String, Object>>) basicPrompt.get("arguments");
-        assertNotNull("Arguments should not be null", basicArgs);
-        assertEquals("Should have 1 argument", 1, basicArgs.size());
+        assertNotNull(basicArgs, "Arguments should not be null");
+        assertEquals(1, basicArgs.size(), "Should have 1 argument");
 
         final Map<String, Object> queryArg = basicArgs.get(0);
-        assertEquals("Argument name should be query", "query", queryArg.get("name"));
-        assertEquals("Argument description should match", "The search query", queryArg.get("description"));
-        assertEquals("Argument should be required", true, queryArg.get("required"));
+        assertEquals("query", queryArg.get("name"), "Argument name should be query");
+        assertEquals("The search query", queryArg.get("description"), "Argument description should match");
+        assertEquals(true, queryArg.get("required"), "Argument should be required");
 
         // Verify advanced_search prompt arguments
         final Map<String, Object> advancedPrompt = prompts.get(1);
-        assertEquals("Prompt name should be advanced_search", "advanced_search", advancedPrompt.get("name"));
+        assertEquals("advanced_search", advancedPrompt.get("name"), "Prompt name should be advanced_search");
 
         @SuppressWarnings("unchecked")
         final List<Map<String, Object>> advancedArgs = (List<Map<String, Object>>) advancedPrompt.get("arguments");
-        assertNotNull("Arguments should not be null", advancedArgs);
-        assertEquals("Should have 3 arguments", 3, advancedArgs.size());
+        assertNotNull(advancedArgs, "Arguments should not be null");
+        assertEquals(3, advancedArgs.size(), "Should have 3 arguments");
 
         // Check first argument (query)
         final Map<String, Object> advQueryArg = advancedArgs.get(0);
-        assertEquals("First argument should be query", "query", advQueryArg.get("name"));
-        assertEquals("Query should be required", true, advQueryArg.get("required"));
+        assertEquals("query", advQueryArg.get("name"), "First argument should be query");
+        assertEquals(true, advQueryArg.get("required"), "Query should be required");
 
         // Check second argument (sort)
         final Map<String, Object> sortArg = advancedArgs.get(1);
-        assertEquals("Second argument should be sort", "sort", sortArg.get("name"));
-        assertEquals("Sort should not be required", false, sortArg.get("required"));
+        assertEquals("sort", sortArg.get("name"), "Second argument should be sort");
+        assertEquals(false, sortArg.get("required"), "Sort should not be required");
 
         // Check third argument (num)
         final Map<String, Object> numArg = advancedArgs.get(2);
-        assertEquals("Third argument should be num", "num", numArg.get("name"));
-        assertEquals("Num should not be required", false, numArg.get("required"));
+        assertEquals("num", numArg.get("name"), "Third argument should be num");
+        assertEquals(false, numArg.get("required"), "Num should not be required");
     }
 
     @Test
@@ -331,21 +333,21 @@ public class McpApiManagerTest {
 
         final Map<String, Object> result = mcpApiManager.handleGetPrompt(params);
 
-        assertNotNull("GetPrompt result should not be null", result);
-        assertTrue("Result should contain messages key", result.containsKey("messages"));
+        assertNotNull(result, "GetPrompt result should not be null");
+        assertTrue(result.containsKey("messages"), "Result should contain messages key");
 
         @SuppressWarnings("unchecked")
         final List<Map<String, Object>> messages = (List<Map<String, Object>>) result.get("messages");
-        assertNotNull("Messages list should not be null", messages);
-        assertEquals("Should have 1 message", 1, messages.size());
+        assertNotNull(messages, "Messages list should not be null");
+        assertEquals(1, messages.size(), "Should have 1 message");
 
         final Map<String, Object> message = messages.get(0);
-        assertEquals("Message role should be user", "user", message.get("role"));
+        assertEquals("user", message.get("role"), "Message role should be user");
 
         @SuppressWarnings("unchecked")
         final Map<String, Object> content = (Map<String, Object>) message.get("content");
-        assertEquals("Content type should be text", "text", content.get("type"));
-        assertTrue("Content text should contain query", content.get("text").toString().contains("test query"));
+        assertEquals("text", content.get("type"), "Content type should be text");
+        assertTrue(content.get("text").toString().contains("test query"), "Content text should contain query");
     }
 
     @Test
@@ -356,23 +358,23 @@ public class McpApiManagerTest {
 
         final Map<String, Object> result = mcpApiManager.handleGetPrompt(params);
 
-        assertNotNull("GetPrompt result should not be null", result);
-        assertTrue("Result should contain messages key", result.containsKey("messages"));
+        assertNotNull(result, "GetPrompt result should not be null");
+        assertTrue(result.containsKey("messages"), "Result should contain messages key");
 
         @SuppressWarnings("unchecked")
         final List<Map<String, Object>> messages = (List<Map<String, Object>>) result.get("messages");
-        assertEquals("Should have 1 message", 1, messages.size());
+        assertEquals(1, messages.size(), "Should have 1 message");
 
         final Map<String, Object> message = messages.get(0);
-        assertEquals("Message role should be user", "user", message.get("role"));
+        assertEquals("user", message.get("role"), "Message role should be user");
 
         @SuppressWarnings("unchecked")
         final Map<String, Object> content = (Map<String, Object>) message.get("content");
-        assertEquals("Content type should be text", "text", content.get("type"));
+        assertEquals("text", content.get("type"), "Content type should be text");
         final String text = content.get("text").toString();
-        assertTrue("Content text should contain query", text.contains("test query"));
-        assertTrue("Content text should contain sort", text.contains("score.desc"));
-        assertTrue("Content text should contain num", text.contains("10"));
+        assertTrue(text.contains("test query"), "Content text should contain query");
+        assertTrue(text.contains("score.desc"), "Content text should contain sort");
+        assertTrue(text.contains("10"), "Content text should contain num");
     }
 
     @Test
@@ -383,48 +385,48 @@ public class McpApiManagerTest {
 
         final Map<String, Object> result = mcpApiManager.handleGetPrompt(params);
 
-        assertNotNull("GetPrompt result should not be null", result);
-        assertTrue("Result should contain messages key", result.containsKey("messages"));
+        assertNotNull(result, "GetPrompt result should not be null");
+        assertTrue(result.containsKey("messages"), "Result should contain messages key");
 
         @SuppressWarnings("unchecked")
         final List<Map<String, Object>> messages = (List<Map<String, Object>>) result.get("messages");
-        assertEquals("Should have 1 message", 1, messages.size());
+        assertEquals(1, messages.size(), "Should have 1 message");
 
         @SuppressWarnings("unchecked")
         final Map<String, Object> content = (Map<String, Object>) messages.get(0).get("content");
         final String text = content.get("text").toString();
-        assertTrue("Content text should contain query", text.contains("minimal query"));
+        assertTrue(text.contains("minimal query"), "Content text should contain query");
     }
 
-    @Test(expected = McpApiException.class)
+    @Test
     public void testHandleGetPrompt_MissingName() {
         final Map<String, Object> params = new HashMap<>();
         params.put("arguments", Map.of("query", "test"));
-        mcpApiManager.handleGetPrompt(params);
+        assertThrows(McpApiException.class, () -> mcpApiManager.handleGetPrompt(params));
     }
 
-    @Test(expected = McpApiException.class)
+    @Test
     public void testHandleGetPrompt_EmptyName() {
         final Map<String, Object> params = new HashMap<>();
         params.put("name", "");
         params.put("arguments", Map.of("query", "test"));
-        mcpApiManager.handleGetPrompt(params);
+        assertThrows(McpApiException.class, () -> mcpApiManager.handleGetPrompt(params));
     }
 
-    @Test(expected = McpApiException.class)
+    @Test
     public void testHandleGetPrompt_UnknownPrompt() {
         final Map<String, Object> params = new HashMap<>();
         params.put("name", "unknown_prompt");
         params.put("arguments", Map.of("query", "test"));
-        mcpApiManager.handleGetPrompt(params);
+        assertThrows(McpApiException.class, () -> mcpApiManager.handleGetPrompt(params));
     }
 
-    @Test(expected = McpApiException.class)
+    @Test
     public void testHandleGetPrompt_MissingRequiredArgument() {
         final Map<String, Object> params = new HashMap<>();
         params.put("name", "basic_search");
         params.put("arguments", Map.of());
-        mcpApiManager.handleGetPrompt(params);
+        assertThrows(McpApiException.class, () -> mcpApiManager.handleGetPrompt(params));
     }
 
     @Test
@@ -435,12 +437,12 @@ public class McpApiManagerTest {
 
         final Object result = mcpApiManager.dispatchRpcMethod("prompts/get", params);
 
-        assertNotNull("dispatchRpcMethod should return non-null result for prompts/get", result);
-        assertTrue("Result should be a Map", result instanceof Map);
+        assertNotNull(result, "dispatchRpcMethod should return non-null result for prompts/get");
+        assertTrue(result instanceof Map, "Result should be a Map");
 
         @SuppressWarnings("unchecked")
         final Map<String, Object> resultMap = (Map<String, Object>) result;
-        assertTrue("Result should contain messages key", resultMap.containsKey("messages"));
+        assertTrue(resultMap.containsKey("messages"), "Result should contain messages key");
     }
 
     // ==================== Comprehensive prompts/get Tests ====================
@@ -453,12 +455,12 @@ public class McpApiManagerTest {
 
         final Map<String, Object> result = mcpApiManager.handleGetPrompt(params);
 
-        assertNotNull("Result should not be null", result);
+        assertNotNull(result, "Result should not be null");
         @SuppressWarnings("unchecked")
         final List<Map<String, Object>> messages = (List<Map<String, Object>>) result.get("messages");
         @SuppressWarnings("unchecked")
         final Map<String, Object> content = (Map<String, Object>) messages.get(0).get("content");
-        assertTrue("Content should contain Japanese query", content.get("text").toString().contains("インストール方法"));
+        assertTrue(content.get("text").toString().contains("インストール方法"), "Content should contain Japanese query");
     }
 
     @Test
@@ -469,13 +471,13 @@ public class McpApiManagerTest {
 
         final Map<String, Object> result = mcpApiManager.handleGetPrompt(params);
 
-        assertNotNull("Result should not be null", result);
+        assertNotNull(result, "Result should not be null");
         @SuppressWarnings("unchecked")
         final List<Map<String, Object>> messages = (List<Map<String, Object>>) result.get("messages");
         @SuppressWarnings("unchecked")
         final Map<String, Object> content = (Map<String, Object>) messages.get(0).get("content");
-        assertTrue("Content should contain special characters", content.get("text").toString().contains("AND"));
-        assertTrue("Content should contain special characters", content.get("text").toString().contains("\"exact phrase\""));
+        assertTrue(content.get("text").toString().contains("AND"), "Content should contain special characters");
+        assertTrue(content.get("text").toString().contains("\"exact phrase\""), "Content should contain special characters");
     }
 
     @Test
@@ -486,19 +488,19 @@ public class McpApiManagerTest {
 
         final Map<String, Object> result = mcpApiManager.handleGetPrompt(params);
 
-        assertTrue("Result should have messages key", result.containsKey("messages"));
+        assertTrue(result.containsKey("messages"), "Result should have messages key");
         @SuppressWarnings("unchecked")
         final List<Map<String, Object>> messages = (List<Map<String, Object>>) result.get("messages");
-        assertEquals("Should have exactly 1 message", 1, messages.size());
+        assertEquals(1, messages.size(), "Should have exactly 1 message");
 
         final Map<String, Object> message = messages.get(0);
-        assertEquals("Message role should be 'user'", "user", message.get("role"));
-        assertTrue("Message should have content", message.containsKey("content"));
+        assertEquals("user", message.get("role"), "Message role should be 'user'");
+        assertTrue(message.containsKey("content"), "Message should have content");
 
         @SuppressWarnings("unchecked")
         final Map<String, Object> content = (Map<String, Object>) message.get("content");
-        assertEquals("Content type should be 'text'", "text", content.get("type"));
-        assertNotNull("Content text should not be null", content.get("text"));
+        assertEquals("text", content.get("type"), "Content type should be 'text'");
+        assertNotNull(content.get("text"), "Content text should not be null");
     }
 
     @Test
@@ -511,7 +513,7 @@ public class McpApiManagerTest {
             mcpApiManager.handleGetPrompt(params);
             fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
-            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+            assertEquals(ErrorCode.InvalidParams, e.getCode(), "Should be InvalidParams error");
         }
     }
 
@@ -525,8 +527,8 @@ public class McpApiManagerTest {
             mcpApiManager.handleGetPrompt(params);
             fail("Should have thrown McpApiException for empty query");
         } catch (final McpApiException e) {
-            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
-            assertTrue("Error message should mention query", e.getMessage().contains("query"));
+            assertEquals(ErrorCode.InvalidParams, e.getCode(), "Should be InvalidParams error");
+            assertTrue(e.getMessage().contains("query"), "Error message should mention query");
         }
     }
 
@@ -548,9 +550,9 @@ public class McpApiManagerTest {
         final Map<String, Object> content = (Map<String, Object>) messages.get(0).get("content");
         final String text = content.get("text").toString();
 
-        assertTrue("Content should contain query", text.contains("検索テスト"));
-        assertTrue("Content should contain sort", text.contains("last_modified.desc"));
-        assertTrue("Content should contain num", text.contains("25"));
+        assertTrue(text.contains("検索テスト"), "Content should contain query");
+        assertTrue(text.contains("last_modified.desc"), "Content should contain sort");
+        assertTrue(text.contains("25"), "Content should contain num");
     }
 
     @Test
@@ -570,8 +572,8 @@ public class McpApiManagerTest {
         final Map<String, Object> content = (Map<String, Object>) messages.get(0).get("content");
         final String text = content.get("text").toString();
 
-        assertTrue("Content should contain query", text.contains("test query"));
-        assertTrue("Content should contain sort", text.contains("score.desc"));
+        assertTrue(text.contains("test query"), "Content should contain query");
+        assertTrue(text.contains("score.desc"), "Content should contain sort");
     }
 
     @Test
@@ -591,8 +593,8 @@ public class McpApiManagerTest {
         final Map<String, Object> content = (Map<String, Object>) messages.get(0).get("content");
         final String text = content.get("text").toString();
 
-        assertTrue("Content should contain query", text.contains("test query"));
-        assertTrue("Content should contain num", text.contains("50"));
+        assertTrue(text.contains("test query"), "Content should contain query");
+        assertTrue(text.contains("50"), "Content should contain num");
     }
 
     @Test
@@ -613,7 +615,7 @@ public class McpApiManagerTest {
         final Map<String, Object> content = (Map<String, Object>) messages.get(0).get("content");
         final String text = content.get("text").toString();
 
-        assertTrue("Content should contain query", text.contains("test"));
+        assertTrue(text.contains("test"), "Content should contain query");
         // Empty optional args should not appear in text
     }
 
@@ -634,7 +636,7 @@ public class McpApiManagerTest {
         final Map<String, Object> content = (Map<String, Object>) messages.get(0).get("content");
         final String text = content.get("text").toString();
 
-        assertTrue("Content should contain num as string", text.contains("100"));
+        assertTrue(text.contains("100"), "Content should contain num as string");
     }
 
     @Test
@@ -647,8 +649,8 @@ public class McpApiManagerTest {
             mcpApiManager.handleGetPrompt(params);
             fail("Should have thrown McpApiException for missing query");
         } catch (final McpApiException e) {
-            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
-            assertTrue("Error message should mention query", e.getMessage().contains("query"));
+            assertEquals(ErrorCode.InvalidParams, e.getCode(), "Should be InvalidParams error");
+            assertTrue(e.getMessage().contains("query"), "Error message should mention query");
         }
     }
 
@@ -662,8 +664,8 @@ public class McpApiManagerTest {
             mcpApiManager.handleGetPrompt(params);
             fail("Should have thrown McpApiException for null name");
         } catch (final McpApiException e) {
-            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
-            assertTrue("Error message should mention name", e.getMessage().contains("name"));
+            assertEquals(ErrorCode.InvalidParams, e.getCode(), "Should be InvalidParams error");
+            assertTrue(e.getMessage().contains("name"), "Error message should mention name");
         }
     }
 
@@ -677,8 +679,8 @@ public class McpApiManagerTest {
             mcpApiManager.handleGetPrompt(params);
             fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
-            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
-            assertTrue("Error message should mention unknown prompt", e.getMessage().contains("Unknown prompt"));
+            assertEquals(ErrorCode.InvalidParams, e.getCode(), "Should be InvalidParams error");
+            assertTrue(e.getMessage().contains("Unknown prompt"), "Error message should mention unknown prompt");
         }
     }
 
@@ -694,11 +696,11 @@ public class McpApiManagerTest {
 
         final Object result = mcpApiManager.dispatchRpcMethod("prompts/get", params);
 
-        assertNotNull("Result should not be null", result);
-        assertTrue("Result should be a Map", result instanceof Map);
+        assertNotNull(result, "Result should not be null");
+        assertTrue(result instanceof Map, "Result should be a Map");
         @SuppressWarnings("unchecked")
         final Map<String, Object> resultMap = (Map<String, Object>) result;
-        assertTrue("Result should contain messages key", resultMap.containsKey("messages"));
+        assertTrue(resultMap.containsKey("messages"), "Result should contain messages key");
     }
 
     @Test
@@ -709,16 +711,16 @@ public class McpApiManagerTest {
         final List<Map<String, Object>> resources = (List<Map<String, Object>>) result.get("resources");
 
         final Map<String, Object> resource = resources.get(0);
-        assertEquals("URI should match", "fess://index/stats", resource.get("uri"));
-        assertEquals("Name should match", "Index Statistics", resource.get("name"));
-        assertEquals("Description should not be null", "Fess index statistics and configuration information", resource.get("description"));
-        assertEquals("MimeType should be application/json", "application/json", resource.get("mimeType"));
+        assertEquals("fess://index/stats", resource.get("uri"), "URI should match");
+        assertEquals("Index Statistics", resource.get("name"), "Name should match");
+        assertEquals("Fess index statistics and configuration information", resource.get("description"), "Description should not be null");
+        assertEquals("application/json", resource.get("mimeType"), "MimeType should be application/json");
 
         // Verify all expected keys are present
-        assertTrue("Resource should have uri", resource.containsKey("uri"));
-        assertTrue("Resource should have name", resource.containsKey("name"));
-        assertTrue("Resource should have description", resource.containsKey("description"));
-        assertTrue("Resource should have mimeType", resource.containsKey("mimeType"));
+        assertTrue(resource.containsKey("uri"), "Resource should have uri");
+        assertTrue(resource.containsKey("name"), "Resource should have name");
+        assertTrue(resource.containsKey("description"), "Resource should have description");
+        assertTrue(resource.containsKey("mimeType"), "Resource should have mimeType");
     }
 
     @Test
@@ -733,28 +735,28 @@ public class McpApiManagerTest {
             // If container is initialized, we would get a valid result
         } catch (final IllegalStateException e) {
             // Expected in unit test when DI container is not initialized
-            assertTrue("Should fail due to container not initialized", e.getMessage().contains("container"));
+            assertTrue(e.getMessage().contains("container"), "Should fail due to container not initialized");
         }
     }
 
-    @Test(expected = McpApiException.class)
+    @Test
     public void testHandleReadResource_MissingUri() {
         final Map<String, Object> params = new HashMap<>();
-        mcpApiManager.handleReadResource(params);
+        assertThrows(McpApiException.class, () -> mcpApiManager.handleReadResource(params));
     }
 
-    @Test(expected = McpApiException.class)
+    @Test
     public void testHandleReadResource_EmptyUri() {
         final Map<String, Object> params = new HashMap<>();
         params.put("uri", "");
-        mcpApiManager.handleReadResource(params);
+        assertThrows(McpApiException.class, () -> mcpApiManager.handleReadResource(params));
     }
 
-    @Test(expected = McpApiException.class)
+    @Test
     public void testHandleReadResource_UnknownResource() {
         final Map<String, Object> params = new HashMap<>();
         params.put("uri", "fess://unknown/resource");
-        mcpApiManager.handleReadResource(params);
+        assertThrows(McpApiException.class, () -> mcpApiManager.handleReadResource(params));
     }
 
     @Test
@@ -767,11 +769,11 @@ public class McpApiManagerTest {
         try {
             final Object result = mcpApiManager.dispatchRpcMethod("resources/read", params);
             // If container is initialized, verify the result
-            assertNotNull("dispatchRpcMethod should return non-null result for resources/read", result);
-            assertTrue("Result should be a Map", result instanceof Map);
+            assertNotNull(result, "dispatchRpcMethod should return non-null result for resources/read");
+            assertTrue(result instanceof Map, "Result should be a Map");
         } catch (final IllegalStateException e) {
             // Expected in unit test when DI container is not initialized
-            assertTrue("Should fail due to container not initialized", e.getMessage().contains("container"));
+            assertTrue(e.getMessage().contains("container"), "Should fail due to container not initialized");
         }
     }
 
@@ -786,8 +788,8 @@ public class McpApiManagerTest {
             mcpApiManager.handleReadResource(params);
             fail("Should have thrown McpApiException for null URI");
         } catch (final McpApiException e) {
-            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
-            assertTrue("Error message should mention uri", e.getMessage().contains("uri"));
+            assertEquals(ErrorCode.InvalidParams, e.getCode(), "Should be InvalidParams error");
+            assertTrue(e.getMessage().contains("uri"), "Error message should mention uri");
         }
     }
 
@@ -799,8 +801,8 @@ public class McpApiManagerTest {
             mcpApiManager.handleReadResource(params);
             fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
-            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
-            assertTrue("Error message should mention missing parameter", e.getMessage().contains("Missing"));
+            assertEquals(ErrorCode.InvalidParams, e.getCode(), "Should be InvalidParams error");
+            assertTrue(e.getMessage().contains("Missing"), "Error message should mention missing parameter");
         }
     }
 
@@ -813,8 +815,8 @@ public class McpApiManagerTest {
             mcpApiManager.handleReadResource(params);
             fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
-            assertEquals("Should be ResourceNotFound error", ErrorCode.ResourceNotFound, e.getCode());
-            assertTrue("Error message should mention unknown resource", e.getMessage().contains("Unknown resource"));
+            assertEquals(ErrorCode.ResourceNotFound, e.getCode(), "Should be ResourceNotFound error");
+            assertTrue(e.getMessage().contains("Unknown resource"), "Error message should mention unknown resource");
         }
     }
 
@@ -827,7 +829,7 @@ public class McpApiManagerTest {
             mcpApiManager.handleReadResource(params);
             fail("Should have thrown McpApiException for invalid scheme");
         } catch (final McpApiException e) {
-            assertEquals("Should be ResourceNotFound error", ErrorCode.ResourceNotFound, e.getCode());
+            assertEquals(ErrorCode.ResourceNotFound, e.getCode(), "Should be ResourceNotFound error");
         }
     }
 
@@ -840,7 +842,7 @@ public class McpApiManagerTest {
             mcpApiManager.handleReadResource(params);
             fail("Should have thrown McpApiException for whitespace URI");
         } catch (final McpApiException e) {
-            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+            assertEquals(ErrorCode.InvalidParams, e.getCode(), "Should be InvalidParams error");
         }
     }
 
@@ -853,7 +855,7 @@ public class McpApiManagerTest {
             mcpApiManager.handleReadResource(params);
             fail("Should have thrown McpApiException for partial URI");
         } catch (final McpApiException e) {
-            assertEquals("Should be ResourceNotFound error", ErrorCode.ResourceNotFound, e.getCode());
+            assertEquals(ErrorCode.ResourceNotFound, e.getCode(), "Should be ResourceNotFound error");
         }
     }
 
@@ -866,7 +868,7 @@ public class McpApiManagerTest {
             mcpApiManager.handleReadResource(params);
             fail("Should have thrown McpApiException for case mismatch URI");
         } catch (final McpApiException e) {
-            assertEquals("Should be ResourceNotFound error", ErrorCode.ResourceNotFound, e.getCode());
+            assertEquals(ErrorCode.ResourceNotFound, e.getCode(), "Should be ResourceNotFound error");
         }
     }
 
@@ -879,7 +881,7 @@ public class McpApiManagerTest {
             mcpApiManager.handleReadResource(params);
             fail("Should have thrown McpApiException for unknown resource");
         } catch (final McpApiException e) {
-            assertEquals("Should be ResourceNotFound error", ErrorCode.ResourceNotFound, e.getCode());
+            assertEquals(ErrorCode.ResourceNotFound, e.getCode(), "Should be ResourceNotFound error");
         }
     }
 
@@ -889,7 +891,7 @@ public class McpApiManagerTest {
             mcpApiManager.dispatchRpcMethod("resources/read", Map.of());
             fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
-            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
+            assertEquals(ErrorCode.InvalidParams, e.getCode(), "Should be InvalidParams error");
         }
     }
 
@@ -902,7 +904,7 @@ public class McpApiManagerTest {
             mcpApiManager.dispatchRpcMethod("resources/read", params);
             fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
-            assertEquals("Should be ResourceNotFound error", ErrorCode.ResourceNotFound, e.getCode());
+            assertEquals(ErrorCode.ResourceNotFound, e.getCode(), "Should be ResourceNotFound error");
         }
     }
 
@@ -913,8 +915,8 @@ public class McpApiManagerTest {
             mcpApiManager.dispatchRpcMethod("tools/call", Map.of());
             fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
-            assertEquals("Should be InvalidParams error", ErrorCode.InvalidParams, e.getCode());
-            assertTrue("Error message should mention missing name", e.getMessage().contains("name"));
+            assertEquals(ErrorCode.InvalidParams, e.getCode(), "Should be InvalidParams error");
+            assertTrue(e.getMessage().contains("name"), "Error message should mention missing name");
         }
     }
 
@@ -925,8 +927,8 @@ public class McpApiManagerTest {
 
         for (final String method : methods) {
             final Object result = mcpApiManager.dispatchRpcMethod(method, Map.of());
-            assertNotNull("Result for method '" + method + "' should not be null", result);
-            assertTrue("Result for method '" + method + "' should be a Map", result instanceof Map);
+            assertNotNull(result, "Result for method '" + method + "' should not be null");
+            assertTrue(result instanceof Map, "Result for method '" + method + "' should be a Map");
         }
     }
 
@@ -938,27 +940,27 @@ public class McpApiManagerTest {
         final Map<String, Object> capabilities = (Map<String, Object>) result.get("capabilities");
 
         // Verify capabilities structure
-        assertNotNull("tools capability should not be null", capabilities.get("tools"));
-        assertNotNull("resources capability should not be null", capabilities.get("resources"));
-        assertNotNull("prompts capability should not be null", capabilities.get("prompts"));
+        assertNotNull(capabilities.get("tools"), "tools capability should not be null");
+        assertNotNull(capabilities.get("resources"), "resources capability should not be null");
+        assertNotNull(capabilities.get("prompts"), "prompts capability should not be null");
 
-        assertTrue("tools should be a Map", capabilities.get("tools") instanceof Map);
-        assertTrue("resources should be a Map", capabilities.get("resources") instanceof Map);
-        assertTrue("prompts should be a Map", capabilities.get("prompts") instanceof Map);
+        assertTrue(capabilities.get("tools") instanceof Map, "tools should be a Map");
+        assertTrue(capabilities.get("resources") instanceof Map, "resources should be a Map");
+        assertTrue(capabilities.get("prompts") instanceof Map, "prompts should be a Map");
 
         // Verify serverInfo structure
         @SuppressWarnings("unchecked")
         final Map<String, Object> serverInfo = (Map<String, Object>) result.get("serverInfo");
 
-        assertTrue("serverInfo should have name", serverInfo.containsKey("name"));
-        assertTrue("serverInfo should have version", serverInfo.containsKey("version"));
-        assertTrue("name should be a String", serverInfo.get("name") instanceof String);
-        assertTrue("version should be a String", serverInfo.get("version") instanceof String);
+        assertTrue(serverInfo.containsKey("name"), "serverInfo should have name");
+        assertTrue(serverInfo.containsKey("version"), "serverInfo should have version");
+        assertTrue(serverInfo.get("name") instanceof String, "name should be a String");
+        assertTrue(serverInfo.get("version") instanceof String, "version should be a String");
     }
 
-    @Test(expected = NullPointerException.class)
+    @Test
     public void testDispatchRpcMethod_NullMethod() {
-        mcpApiManager.dispatchRpcMethod(null, Map.of());
+        assertThrows(NullPointerException.class, () -> mcpApiManager.dispatchRpcMethod(null, Map.of()));
     }
 
     @Test
@@ -968,21 +970,21 @@ public class McpApiManagerTest {
             mcpApiManager.dispatchRpcMethod("unknown_method", Map.of());
             fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
-            assertEquals("Error code should be MethodNotFound", ErrorCode.MethodNotFound, e.getCode());
+            assertEquals(ErrorCode.MethodNotFound, e.getCode(), "Error code should be MethodNotFound");
         }
 
         try {
             mcpApiManager.handleInvoke(Map.of());
             fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
-            assertEquals("Error code should be InvalidParams", ErrorCode.InvalidParams, e.getCode());
+            assertEquals(ErrorCode.InvalidParams, e.getCode(), "Error code should be InvalidParams");
         }
     }
 
     @Test
     public void testConstructor() {
         final McpApiManager manager = new McpApiManager();
-        assertNotNull("McpApiManager should be created", manager);
+        assertNotNull(manager, "McpApiManager should be created");
     }
 
     @Test
@@ -992,15 +994,15 @@ public class McpApiManagerTest {
 
         final Map<String, Object> result = mcpApiManager.createDocumentContent(doc, 1);
 
-        assertNotNull("Result should not be null", result);
-        assertEquals("Type should be text", "text", result.get("type"));
+        assertNotNull(result, "Result should not be null");
+        assertEquals("text", result.get("type"), "Type should be text");
 
         final String text = (String) result.get("text");
-        assertNotNull("Text should not be null", text);
-        assertTrue("Text should contain Title", text.contains("**Title**: Test Document"));
-        assertTrue("Text should contain URL", text.contains("**URL**: https://example.com/test"));
-        assertTrue("Text should contain Score", text.contains("**Score**: 10.5"));
-        assertTrue("Text should contain content", text.contains("This is test content."));
+        assertNotNull(text, "Text should not be null");
+        assertTrue(text.contains("**Title**: Test Document"), "Text should contain Title");
+        assertTrue(text.contains("**URL**: https://example.com/test"), "Text should contain URL");
+        assertTrue(text.contains("**Score**: 10.5"), "Text should contain Score");
+        assertTrue(text.contains("This is test content."), "Text should contain content");
     }
 
     @Test
@@ -1011,27 +1013,27 @@ public class McpApiManagerTest {
         final Map<String, Object> result = mcpApiManager.createDocumentContent(doc, 2);
 
         final String text = (String) result.get("text");
-        assertTrue("Text should contain Title", text.contains("**Title**: Test Document"));
-        assertTrue("Text should not contain Score", !text.contains("**Score**:"));
+        assertTrue(text.contains("**Title**: Test Document"), "Text should contain Title");
+        assertTrue(!text.contains("**Score**:"), "Text should not contain Score");
     }
 
     @Test
     public void testTruncateContent() {
         // Test with null
-        assertEquals("Null should return null", null, mcpApiManager.truncateContent(null, 100));
+        assertEquals(null, mcpApiManager.truncateContent(null, 100), "Null should return null");
 
         // Test with short content
         final String shortContent = "Short";
-        assertEquals("Short content should not be truncated", shortContent, mcpApiManager.truncateContent(shortContent, 100));
+        assertEquals(shortContent, mcpApiManager.truncateContent(shortContent, 100), "Short content should not be truncated");
 
         // Test with exact length content
         final String exactContent = "12345";
-        assertEquals("Exact length content should not be truncated", exactContent, mcpApiManager.truncateContent(exactContent, 5));
+        assertEquals(exactContent, mcpApiManager.truncateContent(exactContent, 5), "Exact length content should not be truncated");
 
         // Test with long content
         final String longContent = "This is a long content that should be truncated";
         final String truncated = mcpApiManager.truncateContent(longContent, 10);
-        assertEquals("Truncated content should be 10 chars + ...", "This is a ...", truncated);
+        assertEquals("This is a ...", truncated, "Truncated content should be 10 chars + ...");
     }
 
     @Test
@@ -1071,18 +1073,18 @@ public class McpApiManagerTest {
 
         final Map<String, Object> result = mcpApiManager.createDocumentContent(doc, 1);
 
-        assertNotNull("Result should not be null", result);
-        assertEquals("Type should be text", "text", result.get("type"));
+        assertNotNull(result, "Result should not be null");
+        assertEquals("text", result.get("type"), "Type should be text");
 
         final String text = (String) result.get("text");
-        assertNotNull("Text should not be null", text);
-        assertTrue("Text should contain Title", text.contains("**Title**: Test Document"));
-        assertTrue("Text should contain URL", text.contains("**URL**: https://example.com/test"));
-        assertTrue("Text should contain Score", text.contains("**Score**: 10.5"));
+        assertNotNull(text, "Text should not be null");
+        assertTrue(text.contains("**Title**: Test Document"), "Text should contain Title");
+        assertTrue(text.contains("**URL**: https://example.com/test"), "Text should contain URL");
+        assertTrue(text.contains("**Score**: 10.5"), "Text should contain Score");
         // Verify content_description is used and tags are stripped
-        assertTrue("Text should contain stripped highlighted content", text.contains("highlighted search result content"));
-        assertFalse("Text should not contain HTML tags", text.contains("<em>"));
-        assertFalse("Text should not contain raw content", text.contains("raw content that should not appear"));
+        assertTrue(text.contains("highlighted search result content"), "Text should contain stripped highlighted content");
+        assertFalse(text.contains("<em>"), "Text should not contain HTML tags");
+        assertFalse(text.contains("raw content that should not appear"), "Text should not contain raw content");
     }
 
     @Test
@@ -1098,13 +1100,13 @@ public class McpApiManagerTest {
         final Map<String, Object> result = mcpApiManager.createDocumentContent(doc, 1);
 
         final String text = (String) result.get("text");
-        assertTrue("Text should contain raw content as fallback", text.contains("This is the raw content used as fallback."));
+        assertTrue(text.contains("This is the raw content used as fallback."), "Text should contain raw content as fallback");
     }
 
     @Test
     public void testGetContentMaxLength() {
         // TestMcpApiManager returns default value 10000
-        assertEquals("Default max length should be 10000", 10000, mcpApiManager.getContentMaxLength());
+        assertEquals(10000, mcpApiManager.getContentMaxLength(), "Default max length should be 10000");
     }
 
     @Test
@@ -1112,7 +1114,7 @@ public class McpApiManagerTest {
         // Note: This test verifies TestMcpApiManager behavior.
         // Actual FessConfig integration requires DI container and is tested in integration tests.
         // TestMcpApiManager always returns 10000 regardless of system property.
-        assertEquals("TestMcpApiManager should return 10000", 10000, mcpApiManager.getContentMaxLength());
+        assertEquals(10000, mcpApiManager.getContentMaxLength(), "TestMcpApiManager should return 10000");
     }
 
     @Test
@@ -1124,25 +1126,25 @@ public class McpApiManagerTest {
         final Map<String, Object> searchTool = tools.get(0);
         final String description = (String) searchTool.get("description");
 
-        assertTrue("Description should mention Lucene", description.contains("Lucene"));
-        assertTrue("Description should mention AND", description.contains("AND"));
-        assertTrue("Description should mention OR", description.contains("OR"));
-        assertTrue("Description should mention phrase search", description.contains("phrase"));
-        assertTrue("Description should mention exclusion", description.contains("exclusion") || description.contains("-"));
+        assertTrue(description.contains("Lucene"), "Description should mention Lucene");
+        assertTrue(description.contains("AND"), "Description should mention AND");
+        assertTrue(description.contains("OR"), "Description should mention OR");
+        assertTrue(description.contains("phrase"), "Description should mention phrase search");
+        assertTrue(description.contains("exclusion") || description.contains("-"), "Description should mention exclusion");
     }
 
     @Test
     public void testProcessDocumentItems_Null() {
         final List<Map<String, Object>> result = mcpApiManager.processDocumentItems(null);
-        assertNotNull("Result should not be null", result);
-        assertTrue("Result should be empty", result.isEmpty());
+        assertNotNull(result, "Result should not be null");
+        assertTrue(result.isEmpty(), "Result should be empty");
     }
 
     @Test
     public void testProcessDocumentItems_EmptyList() {
         final List<Map<String, Object>> result = mcpApiManager.processDocumentItems(List.of());
-        assertNotNull("Result should not be null", result);
-        assertTrue("Result should be empty", result.isEmpty());
+        assertNotNull(result, "Result should not be null");
+        assertTrue(result.isEmpty(), "Result should be empty");
     }
 
     @Test
@@ -1152,25 +1154,25 @@ public class McpApiManagerTest {
 
         final List<Map<String, Object>> result = mcpApiManager.processDocumentItems(docs);
 
-        assertEquals("Should have 2 documents", 2, result.size());
-        assertEquals("First doc title", "Doc1", result.get(0).get("title"));
-        assertEquals("Second doc title", "Doc2", result.get(1).get("title"));
+        assertEquals(2, result.size(), "Should have 2 documents");
+        assertEquals("Doc1", result.get(0).get("title"), "First doc title");
+        assertEquals("Doc2", result.get(1).get("title"), "Second doc title");
     }
 
     @Test
     public void testProcessValue_Null() {
-        assertEquals("Null should return null", null, mcpApiManager.processValue(null));
+        assertEquals(null, mcpApiManager.processValue(null), "Null should return null");
     }
 
     @Test
     public void testProcessValue_String() {
-        assertEquals("String should be unchanged", "test", mcpApiManager.processValue("test"));
+        assertEquals("test", mcpApiManager.processValue("test"), "String should be unchanged");
     }
 
     @Test
     public void testProcessValue_Number() {
-        assertEquals("Number should be unchanged", 123, mcpApiManager.processValue(123));
-        assertEquals("Double should be unchanged", 1.5, mcpApiManager.processValue(1.5));
+        assertEquals(123, mcpApiManager.processValue(123), "Number should be unchanged");
+        assertEquals(1.5, mcpApiManager.processValue(1.5), "Double should be unchanged");
     }
 
     @Test
@@ -1179,10 +1181,10 @@ public class McpApiManagerTest {
         @SuppressWarnings("unchecked")
         final List<Object> result = (List<Object>) mcpApiManager.processValue(input);
 
-        assertEquals("List size should be 3", 3, result.size());
-        assertEquals("First element", "a", result.get(0));
-        assertEquals("Second element", "b", result.get(1));
-        assertEquals("Third element", 1, result.get(2));
+        assertEquals(3, result.size(), "List size should be 3");
+        assertEquals("a", result.get(0), "First element");
+        assertEquals("b", result.get(1), "Second element");
+        assertEquals(1, result.get(2), "Third element");
     }
 
     @Test
@@ -1191,9 +1193,9 @@ public class McpApiManagerTest {
         @SuppressWarnings("unchecked")
         final Map<String, Object> result = (Map<String, Object>) mcpApiManager.processValue(input);
 
-        assertEquals("Map size should be 2", 2, result.size());
-        assertEquals("key1 value", "value1", result.get("key1"));
-        assertEquals("key2 value", 123, result.get("key2"));
+        assertEquals(2, result.size(), "Map size should be 2");
+        assertEquals("value1", result.get("key1"), "key1 value");
+        assertEquals(123, result.get("key2"), "key2 value");
     }
 
     @Test
@@ -1202,8 +1204,8 @@ public class McpApiManagerTest {
         @SuppressWarnings("unchecked")
         final List<Object> result = (List<Object>) mcpApiManager.processValue(input);
 
-        assertEquals("Array should be converted to List with size 3", 3, result.size());
-        assertEquals("First element", "a", result.get(0));
+        assertEquals(3, result.size(), "Array should be converted to List with size 3");
+        assertEquals("a", result.get(0), "First element");
     }
 
     @Test
@@ -1212,12 +1214,12 @@ public class McpApiManagerTest {
 
         final Map<String, Object> result = mcpApiManager.createDocumentContent(doc, 1);
 
-        assertNotNull("Result should not be null", result);
-        assertEquals("Type should be text", "text", result.get("type"));
+        assertNotNull(result, "Result should not be null");
+        assertEquals("text", result.get("type"), "Type should be text");
 
         final String text = (String) result.get("text");
-        assertTrue("Text should contain Title label", text.contains("**Title**:"));
-        assertTrue("Text should contain URL label", text.contains("**URL**:"));
+        assertTrue(text.contains("**Title**:"), "Text should contain Title label");
+        assertTrue(text.contains("**URL**:"), "Text should contain URL label");
     }
 
     @Test
@@ -1237,8 +1239,8 @@ public class McpApiManagerTest {
             final Map<String, Object> result = mcpApiManager.createDocumentContent(doc, 1);
             final String text = (String) result.get("text");
 
-            assertTrue("Content should be truncated with ...", text.contains("..."));
-            assertFalse("Full content should not be present", text.contains("should be truncated"));
+            assertTrue(text.contains("..."), "Content should be truncated with ...");
+            assertFalse(text.contains("should be truncated"), "Full content should not be present");
         } finally {
             // Reset to default
             ((TestMcpApiManager) mcpApiManager).setContentMaxLength(10000);
@@ -1247,14 +1249,14 @@ public class McpApiManagerTest {
 
     @Test
     public void testTruncateContent_EmptyString() {
-        assertEquals("Empty string should return empty", "", mcpApiManager.truncateContent("", 100));
+        assertEquals("", mcpApiManager.truncateContent("", 100), "Empty string should return empty");
     }
 
     @Test
     public void testTruncateContent_ZeroMaxLength() {
         final String content = "test";
         final String result = mcpApiManager.truncateContent(content, 0);
-        assertEquals("Zero max length should return ...", "...", result);
+        assertEquals("...", result, "Zero max length should return ...");
     }
 
     @Test
@@ -1273,15 +1275,15 @@ public class McpApiManagerTest {
 
         @SuppressWarnings("unchecked")
         final Map<String, Object> numProperty = (Map<String, Object>) searchProperties.get("num");
-        assertNotNull("num property should exist", numProperty);
+        assertNotNull(numProperty, "num property should exist");
 
         final String numDescription = (String) numProperty.get("description");
-        assertNotNull("num description should not be null", numDescription);
+        assertNotNull(numDescription, "num description should not be null");
         assertEquals("number of results", numDescription);
 
         final Object defaultValue = numProperty.get("default");
-        assertNotNull("num default should exist in schema", defaultValue);
-        assertEquals("num default should be 3", 3, defaultValue);
+        assertNotNull(defaultValue, "num default should exist in schema");
+        assertEquals(3, defaultValue, "num default should be 3");
     }
 
     // ==================== Index Stats Tests ====================
@@ -1295,7 +1297,7 @@ public class McpApiManagerTest {
             fail("Should fail due to DI container not initialized in unit test");
         } catch (final IllegalStateException e) {
             // Expected in unit test when DI container is not initialized
-            assertTrue("Should fail due to container not initialized", e.getMessage().contains("container"));
+            assertTrue(e.getMessage().contains("container"), "Should fail due to container not initialized");
         }
     }
 
@@ -1308,7 +1310,7 @@ public class McpApiManagerTest {
             fail("Should fail due to DI container not initialized in unit test");
         } catch (final IllegalStateException e) {
             // Expected in unit test when DI container is not initialized
-            assertTrue("Should fail due to container not initialized", e.getMessage().contains("container"));
+            assertTrue(e.getMessage().contains("container"), "Should fail due to container not initialized");
         }
     }
 
@@ -1321,7 +1323,7 @@ public class McpApiManagerTest {
             fail("Should fail due to DI container not initialized in unit test");
         } catch (final IllegalStateException e) {
             // Expected in unit test when DI container is not initialized
-            assertTrue("Should fail due to container not initialized", e.getMessage().contains("container"));
+            assertTrue(e.getMessage().contains("container"), "Should fail due to container not initialized");
         }
     }
 
@@ -1332,14 +1334,12 @@ public class McpApiManagerTest {
         params.put("name", "get_index_stats");
         params.put("arguments", Map.of());
 
-        try {
-            mcpApiManager.dispatchRpcMethod("tools/call", params);
-            // If container is initialized, we would get a valid result
-            fail("Should fail due to DI container not initialized in unit test");
-        } catch (final IllegalStateException e) {
-            // Expected in unit test when DI container is not initialized
-            assertTrue("Should fail due to container not initialized", e.getMessage().contains("container"));
-        }
+        // Without DI container, get_index_stats throws IllegalStateException, which handleInvoke's
+        // tool-level error handling (see testHandleInvoke_Search_ToolLevelError_ReturnsIsError) catches
+        // and converts into a graceful isError response rather than letting it propagate.
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> result = (Map<String, Object>) mcpApiManager.dispatchRpcMethod("tools/call", params);
+        assertEquals(true, result.get("isError"), "Should have isError true");
     }
 
     @Test
@@ -1349,14 +1349,11 @@ public class McpApiManagerTest {
         params.put("name", "get_index_stats");
         params.put("arguments", Map.of());
 
-        try {
-            mcpApiManager.handleInvoke(params);
-            // If container is initialized, we would get a valid result
-            fail("Should fail due to DI container not initialized in unit test");
-        } catch (final IllegalStateException e) {
-            // Expected in unit test when DI container is not initialized
-            assertTrue("Should fail due to container not initialized", e.getMessage().contains("container"));
-        }
+        // Without DI container, get_index_stats throws IllegalStateException, which handleInvoke's
+        // tool-level error handling (see testHandleInvoke_Search_ToolLevelError_ReturnsIsError) catches
+        // and converts into a graceful isError response rather than letting it propagate.
+        final Map<String, Object> result = mcpApiManager.handleInvoke(params);
+        assertEquals(true, result.get("isError"), "Should have isError true");
     }
 
     @Test
@@ -1375,14 +1372,14 @@ public class McpApiManagerTest {
             }
         }
 
-        assertNotNull("get_index_stats tool should exist", indexStatsTool);
-        assertEquals("Tool name should be get_index_stats", "get_index_stats", indexStatsTool.get("name"));
-        assertEquals("Tool description", "Get index statistics and information", indexStatsTool.get("description"));
+        assertNotNull(indexStatsTool, "get_index_stats tool should exist");
+        assertEquals("get_index_stats", indexStatsTool.get("name"), "Tool name should be get_index_stats");
+        assertEquals("Get index statistics and information", indexStatsTool.get("description"), "Tool description");
 
         @SuppressWarnings("unchecked")
         final Map<String, Object> inputSchema = (Map<String, Object>) indexStatsTool.get("inputSchema");
-        assertNotNull("inputSchema should not be null", inputSchema);
-        assertEquals("inputSchema type should be object", "object", inputSchema.get("type"));
+        assertNotNull(inputSchema, "inputSchema should not be null");
+        assertEquals("object", inputSchema.get("type"), "inputSchema type should be object");
     }
 
     @Test
@@ -1392,14 +1389,14 @@ public class McpApiManagerTest {
         @SuppressWarnings("unchecked")
         final List<Map<String, Object>> resources = (List<Map<String, Object>>) result.get("resources");
 
-        assertNotNull("resources should not be null", resources);
-        assertEquals("Should have 1 resource", 1, resources.size());
+        assertNotNull(resources, "resources should not be null");
+        assertEquals(1, resources.size(), "Should have 1 resource");
 
         final Map<String, Object> indexStatsResource = resources.get(0);
-        assertEquals("Resource URI", "fess://index/stats", indexStatsResource.get("uri"));
-        assertEquals("Resource name", "Index Statistics", indexStatsResource.get("name"));
-        assertEquals("Resource mimeType", "application/json", indexStatsResource.get("mimeType"));
-        assertNotNull("Resource should have description", indexStatsResource.get("description"));
+        assertEquals("fess://index/stats", indexStatsResource.get("uri"), "Resource URI");
+        assertEquals("Index Statistics", indexStatsResource.get("name"), "Resource name");
+        assertEquals("application/json", indexStatsResource.get("mimeType"), "Resource mimeType");
+        assertNotNull(indexStatsResource.get("description"), "Resource should have description");
     }
 
     @Test
@@ -1411,10 +1408,10 @@ public class McpApiManagerTest {
 
         @SuppressWarnings("unchecked")
         final Map<String, Object> annotations = (Map<String, Object>) searchTool.get("annotations");
-        assertNotNull("Search tool should have annotations", annotations);
-        assertEquals("Search should be read-only", true, annotations.get("readOnlyHint"));
-        assertEquals("Search should not be destructive", false, annotations.get("destructiveHint"));
-        assertEquals("Search should not be open-world", false, annotations.get("openWorldHint"));
+        assertNotNull(annotations, "Search tool should have annotations");
+        assertEquals(true, annotations.get("readOnlyHint"), "Search should be read-only");
+        assertEquals(false, annotations.get("destructiveHint"), "Search should not be destructive");
+        assertEquals(false, annotations.get("openWorldHint"), "Search should not be open-world");
     }
 
     @Test
@@ -1430,13 +1427,13 @@ public class McpApiManagerTest {
                 break;
             }
         }
-        assertNotNull("get_index_stats tool should exist", statsTool);
+        assertNotNull(statsTool, "get_index_stats tool should exist");
 
         @SuppressWarnings("unchecked")
         final Map<String, Object> annotations = (Map<String, Object>) statsTool.get("annotations");
-        assertNotNull("Stats tool should have annotations", annotations);
-        assertEquals("Stats should be read-only", true, annotations.get("readOnlyHint"));
-        assertEquals("Stats should not be destructive", false, annotations.get("destructiveHint"));
+        assertNotNull(annotations, "Stats tool should have annotations");
+        assertEquals(true, annotations.get("readOnlyHint"), "Stats should be read-only");
+        assertEquals(false, annotations.get("destructiveHint"), "Stats should not be destructive");
     }
 
     @Test
@@ -1447,14 +1444,14 @@ public class McpApiManagerTest {
 
         // Without DI container, search will throw IllegalStateException caught by tool-level error handling
         final Map<String, Object> result = mcpApiManager.handleInvoke(params);
-        assertEquals("Should have isError true", true, result.get("isError"));
+        assertEquals(true, result.get("isError"), "Should have isError true");
 
         @SuppressWarnings("unchecked")
         final List<Map<String, Object>> content = (List<Map<String, Object>>) result.get("content");
-        assertNotNull("Should have content", content);
-        assertFalse("Content should not be empty", content.isEmpty());
-        assertEquals("Content type should be text", "text", content.get(0).get("type"));
-        assertTrue("Error text should contain error info", ((String) content.get(0).get("text")).startsWith("Error:"));
+        assertNotNull(content, "Should have content");
+        assertFalse(content.isEmpty(), "Content should not be empty");
+        assertEquals("text", content.get(0).get("type"), "Content type should be text");
+        assertTrue(((String) content.get(0).get("text")).startsWith("Error:"), "Error text should contain error info");
     }
 
     @Test
@@ -1470,15 +1467,15 @@ public class McpApiManagerTest {
                 break;
             }
         }
-        assertNotNull("suggest tool should exist", suggestTool);
-        assertNotNull("suggest tool should have inputSchema", suggestTool.get("inputSchema"));
-        assertNotNull("suggest tool should have annotations", suggestTool.get("annotations"));
+        assertNotNull(suggestTool, "suggest tool should exist");
+        assertNotNull(suggestTool.get("inputSchema"), "suggest tool should have inputSchema");
+        assertNotNull(suggestTool.get("annotations"), "suggest tool should have annotations");
 
         @SuppressWarnings("unchecked")
         final Map<String, Object> schema = (Map<String, Object>) suggestTool.get("inputSchema");
         @SuppressWarnings("unchecked")
         final List<String> required = (List<String>) schema.get("required");
-        assertTrue("q should be required", required.contains("q"));
+        assertTrue(required.contains("q"), "q should be required");
     }
 
     @Test
@@ -1491,7 +1488,7 @@ public class McpApiManagerTest {
             mcpApiManager.handleInvoke(params);
             fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
-            assertEquals("Should be InvalidParams", ErrorCode.InvalidParams, e.getCode());
+            assertEquals(ErrorCode.InvalidParams, e.getCode(), "Should be InvalidParams");
         }
     }
 
@@ -1508,13 +1505,13 @@ public class McpApiManagerTest {
                 break;
             }
         }
-        assertNotNull("get_document tool should exist", getDocTool);
+        assertNotNull(getDocTool, "get_document tool should exist");
 
         @SuppressWarnings("unchecked")
         final Map<String, Object> schema = (Map<String, Object>) getDocTool.get("inputSchema");
         @SuppressWarnings("unchecked")
         final List<String> required = (List<String>) schema.get("required");
-        assertTrue("doc_id should be required", required.contains("doc_id"));
+        assertTrue(required.contains("doc_id"), "doc_id should be required");
     }
 
     @Test
@@ -1527,7 +1524,7 @@ public class McpApiManagerTest {
             mcpApiManager.handleInvoke(params);
             fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
-            assertEquals("Should be InvalidParams", ErrorCode.InvalidParams, e.getCode());
+            assertEquals(ErrorCode.InvalidParams, e.getCode(), "Should be InvalidParams");
         }
     }
 
@@ -1536,19 +1533,19 @@ public class McpApiManagerTest {
     @Test
     public void testHandleListTools_AcceptsCursorParam() {
         final Object result = mcpApiManager.dispatchRpcMethod("tools/list", Map.of("cursor", "some_cursor"));
-        assertNotNull("Should handle cursor param gracefully", result);
+        assertNotNull(result, "Should handle cursor param gracefully");
     }
 
     @Test
     public void testHandleListResources_AcceptsCursorParam() {
         final Object result = mcpApiManager.dispatchRpcMethod("resources/list", Map.of("cursor", "some_cursor"));
-        assertNotNull("Should handle cursor param gracefully", result);
+        assertNotNull(result, "Should handle cursor param gracefully");
     }
 
     @Test
     public void testHandleListPrompts_AcceptsCursorParam() {
         final Object result = mcpApiManager.dispatchRpcMethod("prompts/list", Map.of("cursor", "some_cursor"));
-        assertNotNull("Should handle cursor param gracefully", result);
+        assertNotNull(result, "Should handle cursor param gracefully");
     }
 
     // ==================== Resource Templates Tests ====================
@@ -1556,21 +1553,21 @@ public class McpApiManagerTest {
     @Test
     public void testDispatchRpcMethod_ResourcesTemplatesList() {
         final Object result = mcpApiManager.dispatchRpcMethod("resources/templates/list", Map.of());
-        assertNotNull("Result should not be null", result);
-        assertTrue("Result should be a Map", result instanceof Map);
+        assertNotNull(result, "Result should not be null");
+        assertTrue(result instanceof Map, "Result should be a Map");
 
         @SuppressWarnings("unchecked")
         final Map<String, Object> resultMap = (Map<String, Object>) result;
-        assertTrue("Result should have resourceTemplates key", resultMap.containsKey("resourceTemplates"));
+        assertTrue(resultMap.containsKey("resourceTemplates"), "Result should have resourceTemplates key");
 
         @SuppressWarnings("unchecked")
         final List<Map<String, Object>> templates = (List<Map<String, Object>>) resultMap.get("resourceTemplates");
-        assertFalse("Templates list should not be empty", templates.isEmpty());
+        assertFalse(templates.isEmpty(), "Templates list should not be empty");
 
         final Map<String, Object> template = templates.get(0);
-        assertNotNull("Template should have uriTemplate", template.get("uriTemplate"));
+        assertNotNull(template.get("uriTemplate"), "Template should have uriTemplate");
         assertEquals("fess://document/{doc_id}", template.get("uriTemplate"));
-        assertNotNull("Template should have name", template.get("name"));
+        assertNotNull(template.get("name"), "Template should have name");
     }
 
     @Test
@@ -1581,7 +1578,7 @@ public class McpApiManagerTest {
         try {
             mcpApiManager.handleReadResource(params);
         } catch (final IllegalStateException e) {
-            assertTrue("Should fail due to container not initialized", e.getMessage().contains("container"));
+            assertTrue(e.getMessage().contains("container"), "Should fail due to container not initialized");
         } catch (final McpApiException e) {
             // ResourceNotFound is also acceptable if container is available but doc doesn't exist
         }
@@ -1596,7 +1593,7 @@ public class McpApiManagerTest {
             mcpApiManager.handleReadResource(params);
             fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
-            assertEquals("Should be InvalidParams", ErrorCode.InvalidParams, e.getCode());
+            assertEquals(ErrorCode.InvalidParams, e.getCode(), "Should be InvalidParams");
         }
     }
 
@@ -1608,7 +1605,7 @@ public class McpApiManagerTest {
             mcpApiManager.dispatchRpcMethod("completion/complete", Map.of());
             fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
-            assertEquals("Should be InvalidParams", ErrorCode.InvalidParams, e.getCode());
+            assertEquals(ErrorCode.InvalidParams, e.getCode(), "Should be InvalidParams");
         }
     }
 
@@ -1621,7 +1618,7 @@ public class McpApiManagerTest {
             mcpApiManager.dispatchRpcMethod("completion/complete", params);
             fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
-            assertEquals("Should be InvalidParams", ErrorCode.InvalidParams, e.getCode());
+            assertEquals(ErrorCode.InvalidParams, e.getCode(), "Should be InvalidParams");
         }
     }
 
@@ -1632,18 +1629,18 @@ public class McpApiManagerTest {
         params.put("argument", Map.of("name", "query", "value", ""));
 
         final Object result = mcpApiManager.dispatchRpcMethod("completion/complete", params);
-        assertNotNull("Result should not be null", result);
+        assertNotNull(result, "Result should not be null");
 
         @SuppressWarnings("unchecked")
         final Map<String, Object> resultMap = (Map<String, Object>) result;
-        assertNotNull("Should have completion", resultMap.get("completion"));
+        assertNotNull(resultMap.get("completion"), "Should have completion");
 
         @SuppressWarnings("unchecked")
         final Map<String, Object> completion = (Map<String, Object>) resultMap.get("completion");
         @SuppressWarnings("unchecked")
         final List<String> values = (List<String>) completion.get("values");
-        assertTrue("Values should be empty for empty input", values.isEmpty());
-        assertEquals("hasMore should be false", false, completion.get("hasMore"));
+        assertTrue(values.isEmpty(), "Values should be empty for empty input");
+        assertEquals(false, completion.get("hasMore"), "hasMore should be false");
     }
 
     @Test
@@ -1655,7 +1652,7 @@ public class McpApiManagerTest {
         try {
             mcpApiManager.dispatchRpcMethod("completion/complete", params);
         } catch (final IllegalStateException e) {
-            assertTrue("Should fail due to container", e.getMessage().contains("container"));
+            assertTrue(e.getMessage().contains("container"), "Should fail due to container");
         }
     }
 
@@ -1668,11 +1665,11 @@ public class McpApiManagerTest {
 
         final List<Map<String, Object>> responses = mcpApiManager.processBatchRequests(requests);
 
-        assertEquals("Should have 2 responses", 2, responses.size());
-        assertEquals("First response id should be 1", 1, responses.get(0).get("id"));
-        assertEquals("Second response id should be 2", 2, responses.get(1).get("id"));
-        assertNotNull("First response should have result", responses.get(0).get("result"));
-        assertNotNull("Second response should have result", responses.get(1).get("result"));
+        assertEquals(2, responses.size(), "Should have 2 responses");
+        assertEquals(1, responses.get(0).get("id"), "First response id should be 1");
+        assertEquals(2, responses.get(1).get("id"), "Second response id should be 2");
+        assertNotNull(responses.get(0).get("result"), "First response should have result");
+        assertNotNull(responses.get(1).get("result"), "Second response should have result");
     }
 
     @Test
@@ -1687,8 +1684,8 @@ public class McpApiManagerTest {
 
         final List<Map<String, Object>> responses = mcpApiManager.processBatchRequests(requests);
 
-        assertEquals("Should have 1 response (notification excluded)", 1, responses.size());
-        assertEquals("Response id should be 1", 1, responses.get(0).get("id"));
+        assertEquals(1, responses.size(), "Should have 1 response (notification excluded)");
+        assertEquals(1, responses.get(0).get("id"), "Response id should be 1");
     }
 
     @Test
@@ -1698,8 +1695,8 @@ public class McpApiManagerTest {
 
         final List<Map<String, Object>> responses = mcpApiManager.processBatchRequests(requests);
 
-        assertEquals("Should have 1 response", 1, responses.size());
-        assertNotNull("Response should have error", responses.get(0).get("error"));
+        assertEquals(1, responses.size(), "Should have 1 response");
+        assertNotNull(responses.get(0).get("error"), "Response should have error");
     }
 
     @Test
@@ -1709,8 +1706,8 @@ public class McpApiManagerTest {
 
         final List<Map<String, Object>> responses = mcpApiManager.processBatchRequests(requests);
 
-        assertEquals("Should have 1 error response", 1, responses.size());
-        assertNotNull("Response should have error", responses.get(0).get("error"));
+        assertEquals(1, responses.size(), "Should have 1 error response");
+        assertNotNull(responses.get(0).get("error"), "Response should have error");
     }
 
     // ==================== initialize protocol negotiation tests ====================
@@ -1720,7 +1717,7 @@ public class McpApiManagerTest {
         final Map<String, Object> params = new HashMap<>();
         params.put("protocolVersion", "2024-11-05");
         final Map<String, Object> result = mcpApiManager.handleInitialize(params);
-        assertEquals("Should echo back supported version", "2024-11-05", result.get("protocolVersion"));
+        assertEquals("2024-11-05", result.get("protocolVersion"), "Should echo back supported version");
     }
 
     @Test
@@ -1728,13 +1725,13 @@ public class McpApiManagerTest {
         final Map<String, Object> params = new HashMap<>();
         params.put("protocolVersion", "2099-01-01");
         final Map<String, Object> result = mcpApiManager.handleInitialize(params);
-        assertEquals("Should fall back to latest supported version", "2024-11-05", result.get("protocolVersion"));
+        assertEquals("2024-11-05", result.get("protocolVersion"), "Should fall back to latest supported version");
     }
 
     @Test
     public void testHandleInitialize_NoParamsUsesLatest() {
         final Map<String, Object> result = mcpApiManager.handleInitialize(Map.of());
-        assertEquals("Should use latest when no protocolVersion provided", "2024-11-05", result.get("protocolVersion"));
+        assertEquals("2024-11-05", result.get("protocolVersion"), "Should use latest when no protocolVersion provided");
     }
 
     @Test
@@ -1743,7 +1740,7 @@ public class McpApiManagerTest {
         params.put("protocolVersion", "2024-11-05");
         params.put("clientInfo", Map.of("name", "test-client", "version", "0.1"));
         final Map<String, Object> result = mcpApiManager.handleInitialize(params);
-        assertNotNull("Should still produce a result when clientInfo is present", result);
+        assertNotNull(result, "Should still produce a result when clientInfo is present");
         assertEquals("2024-11-05", result.get("protocolVersion"));
     }
 
@@ -1761,7 +1758,7 @@ public class McpApiManagerTest {
         final Map<String, Object> completion = (Map<String, Object>) result.get("completion");
         @SuppressWarnings("unchecked")
         final List<String> values = (List<String>) completion.get("values");
-        assertEquals("Should return 2 score entries", 2, values.size());
+        assertEquals(2, values.size(), "Should return 2 score entries");
         assertTrue(values.contains("score.desc"));
         assertTrue(values.contains("score.asc"));
         assertEquals(false, completion.get("hasMore"));
@@ -1779,7 +1776,7 @@ public class McpApiManagerTest {
         final Map<String, Object> completion = (Map<String, Object>) result.get("completion");
         @SuppressWarnings("unchecked")
         final List<String> values = (List<String>) completion.get("values");
-        assertEquals("Empty prefix should return all 6 sort values", 6, values.size());
+        assertEquals(6, values.size(), "Empty prefix should return all 6 sort values");
     }
 
     @Test
@@ -1794,7 +1791,7 @@ public class McpApiManagerTest {
         final Map<String, Object> completion = (Map<String, Object>) result.get("completion");
         @SuppressWarnings("unchecked")
         final List<String> values = (List<String>) completion.get("values");
-        assertTrue("num argument should produce no completions", values.isEmpty());
+        assertTrue(values.isEmpty(), "num argument should produce no completions");
         assertEquals(false, completion.get("hasMore"));
     }
 
@@ -1810,7 +1807,7 @@ public class McpApiManagerTest {
         final Map<String, Object> completion = (Map<String, Object>) result.get("completion");
         @SuppressWarnings("unchecked")
         final List<String> values = (List<String>) completion.get("values");
-        assertTrue("Unknown prompt should produce no completions", values.isEmpty());
+        assertTrue(values.isEmpty(), "Unknown prompt should produce no completions");
     }
 
     @Test
@@ -1825,7 +1822,7 @@ public class McpApiManagerTest {
         final Map<String, Object> completion = (Map<String, Object>) result.get("completion");
         @SuppressWarnings("unchecked")
         final List<String> values = (List<String>) completion.get("values");
-        assertTrue("ref/resource should produce no completions", values.isEmpty());
+        assertTrue(values.isEmpty(), "ref/resource should produce no completions");
     }
 
     @Test
@@ -1840,7 +1837,7 @@ public class McpApiManagerTest {
         final Map<String, Object> completion = (Map<String, Object>) result.get("completion");
         @SuppressWarnings("unchecked")
         final List<String> values = (List<String>) completion.get("values");
-        assertTrue("Unknown ref.type should produce no completions", values.isEmpty());
+        assertTrue(values.isEmpty(), "Unknown ref.type should produce no completions");
     }
 
     // ==================== Regression: logging/setLevel removed ====================
@@ -1853,7 +1850,7 @@ public class McpApiManagerTest {
             mcpApiManager.dispatchRpcMethod("logging/setLevel", Map.of("level", "debug"));
             fail("Should have thrown McpApiException for removed method logging/setLevel");
         } catch (final McpApiException e) {
-            assertEquals("Should be MethodNotFound", ErrorCode.MethodNotFound, e.getCode());
+            assertEquals(ErrorCode.MethodNotFound, e.getCode(), "Should be MethodNotFound");
         }
     }
 
@@ -1866,7 +1863,7 @@ public class McpApiManagerTest {
         final Map<String, Object> params = new HashMap<>();
         params.put("protocolVersion", Integer.valueOf(20241105));
         final Map<String, Object> result = mcpApiManager.handleInitialize(params);
-        assertEquals("Non-String protocolVersion should fall back to latest", "2024-11-05", result.get("protocolVersion"));
+        assertEquals("2024-11-05", result.get("protocolVersion"), "Non-String protocolVersion should fall back to latest");
     }
 
     @Test
@@ -1874,7 +1871,7 @@ public class McpApiManagerTest {
         final Map<String, Object> params = new HashMap<>();
         params.put("protocolVersion", Map.of("major", 2024));
         final Map<String, Object> result = mcpApiManager.handleInitialize(params);
-        assertEquals("Map-typed protocolVersion should fall back to latest", "2024-11-05", result.get("protocolVersion"));
+        assertEquals("2024-11-05", result.get("protocolVersion"), "Map-typed protocolVersion should fall back to latest");
     }
 
     @Test
@@ -1882,7 +1879,7 @@ public class McpApiManagerTest {
         final Map<String, Object> params = new HashMap<>();
         params.put("protocolVersion", "");
         final Map<String, Object> result = mcpApiManager.handleInitialize(params);
-        assertEquals("Empty protocolVersion should fall back to latest", "2024-11-05", result.get("protocolVersion"));
+        assertEquals("2024-11-05", result.get("protocolVersion"), "Empty protocolVersion should fall back to latest");
     }
 
     @Test
@@ -1892,11 +1889,11 @@ public class McpApiManagerTest {
         params.put("protocolVersion", "2024-11-05");
         params.put("clientInfo", Map.of("name", "test-client", "version", "0.1"));
         final Map<String, Object> result = mcpApiManager.handleInitialize(params);
-        assertFalse("Response must not include clientInfo key", result.containsKey("clientInfo"));
+        assertFalse(result.containsKey("clientInfo"), "Response must not include clientInfo key");
         // serverInfo must be the fixed server identity, not the client's
         @SuppressWarnings("unchecked")
         final Map<String, Object> serverInfo = (Map<String, Object>) result.get("serverInfo");
-        assertEquals("serverInfo.name must be server identity", "fess-mcp-server", serverInfo.get("name"));
+        assertEquals("fess-mcp-server", serverInfo.get("name"), "serverInfo.name must be server identity");
     }
 
     // ==================== completion/complete robustness ====================
@@ -1918,7 +1915,7 @@ public class McpApiManagerTest {
         final Map<String, Object> completion = (Map<String, Object>) result.get("completion");
         @SuppressWarnings("unchecked")
         final List<String> values = (List<String>) completion.get("values");
-        assertEquals("Null value should behave like empty prefix and return all 6 sort values", 6, values.size());
+        assertEquals(6, values.size(), "Null value should behave like empty prefix and return all 6 sort values");
     }
 
     @Test
@@ -1935,7 +1932,7 @@ public class McpApiManagerTest {
         final Map<String, Object> completion = (Map<String, Object>) result.get("completion");
         @SuppressWarnings("unchecked")
         final List<String> values = (List<String>) completion.get("values");
-        assertTrue("Empty argument map should yield no completions without touching DI", values.isEmpty());
+        assertTrue(values.isEmpty(), "Empty argument map should yield no completions without touching DI");
         assertEquals(0, ((Number) completion.get("total")).intValue());
         assertEquals(false, completion.get("hasMore"));
     }
@@ -1953,7 +1950,7 @@ public class McpApiManagerTest {
         final Map<String, Object> completion = (Map<String, Object>) result.get("completion");
         @SuppressWarnings("unchecked")
         final List<String> values = (List<String>) completion.get("values");
-        assertTrue("Unknown prefix should produce empty values", values.isEmpty());
+        assertTrue(values.isEmpty(), "Unknown prefix should produce empty values");
         assertEquals(false, completion.get("hasMore"));
     }
 
@@ -1969,9 +1966,9 @@ public class McpApiManagerTest {
         final Map<String, Object> result = (Map<String, Object>) mcpApiManager.buildCompletionResult(over, 150, false).get("completion");
         @SuppressWarnings("unchecked")
         final List<String> values = (List<String>) result.get("values");
-        assertEquals("Values must be capped at 100", 100, values.size());
-        assertEquals("Total should be the original total", 150, ((Number) result.get("total")).intValue());
-        assertEquals("hasMore must be true when total exceeds cap", true, result.get("hasMore"));
+        assertEquals(100, values.size(), "Values must be capped at 100");
+        assertEquals(150, ((Number) result.get("total")).intValue(), "Total should be the original total");
+        assertEquals(true, result.get("hasMore"), "hasMore must be true when total exceeds cap");
     }
 
     @Test
@@ -1984,9 +1981,9 @@ public class McpApiManagerTest {
         final Map<String, Object> result = (Map<String, Object>) mcpApiManager.buildCompletionResult(exact, 100, false).get("completion");
         @SuppressWarnings("unchecked")
         final List<String> values = (List<String>) result.get("values");
-        assertEquals("Exactly 100 values must remain 100", 100, values.size());
+        assertEquals(100, values.size(), "Exactly 100 values must remain 100");
         assertEquals(100, ((Number) result.get("total")).intValue());
-        assertEquals("hasMore must be false when total equals capped size", false, result.get("hasMore"));
+        assertEquals(false, result.get("hasMore"), "hasMore must be false when total equals capped size");
     }
 
     @Test
@@ -1996,59 +1993,59 @@ public class McpApiManagerTest {
         final List<String> three = List.of("a", "b", "c");
         @SuppressWarnings("unchecked")
         final Map<String, Object> result = (Map<String, Object>) mcpApiManager.buildCompletionResult(three, 0, false).get("completion");
-        assertEquals("Total must be at least the number of values", 3, ((Number) result.get("total")).intValue());
+        assertEquals(3, ((Number) result.get("total")).intValue(), "Total must be at least the number of values");
     }
 
     // ==================== invokeSuggest num resolution / cap ====================
 
     @Test
     public void testResolveSuggestSize_NullUsesDefault() {
-        assertEquals("null num should default to 10", 10, mcpApiManager.resolveSuggestSize(null, 100));
+        assertEquals(10, mcpApiManager.resolveSuggestSize(null, 100), "null num should default to 10");
     }
 
     @Test
     public void testResolveSuggestSize_Zero_UsesDefault() {
-        assertEquals("num=0 should fall back to default 10", 10, mcpApiManager.resolveSuggestSize(Integer.valueOf(0), 100));
+        assertEquals(10, mcpApiManager.resolveSuggestSize(Integer.valueOf(0), 100), "num=0 should fall back to default 10");
     }
 
     @Test
     public void testResolveSuggestSize_Negative_UsesDefault() {
-        assertEquals("negative num should fall back to default 10", 10, mcpApiManager.resolveSuggestSize(Integer.valueOf(-5), 100));
+        assertEquals(10, mcpApiManager.resolveSuggestSize(Integer.valueOf(-5), 100), "negative num should fall back to default 10");
     }
 
     @Test
     public void testResolveSuggestSize_OverMax_CappedAtMax() {
-        assertEquals("num exceeding max must be capped", 100, mcpApiManager.resolveSuggestSize(Integer.valueOf(500), 100));
+        assertEquals(100, mcpApiManager.resolveSuggestSize(Integer.valueOf(500), 100), "num exceeding max must be capped");
     }
 
     @Test
     public void testResolveSuggestSize_AtMax_Preserved() {
-        assertEquals("num equal to max must be preserved", 100, mcpApiManager.resolveSuggestSize(Integer.valueOf(100), 100));
+        assertEquals(100, mcpApiManager.resolveSuggestSize(Integer.valueOf(100), 100), "num equal to max must be preserved");
     }
 
     @Test
     public void testResolveSuggestSize_WithinRange_Preserved() {
-        assertEquals("num within range must be preserved", 25, mcpApiManager.resolveSuggestSize(Integer.valueOf(25), 100));
+        assertEquals(25, mcpApiManager.resolveSuggestSize(Integer.valueOf(25), 100), "num within range must be preserved");
     }
 
     @Test
     public void testResolveSuggestSize_StringNumericInput_Parsed() {
-        assertEquals("numeric String must be parsed", 7, mcpApiManager.resolveSuggestSize("7", 100));
+        assertEquals(7, mcpApiManager.resolveSuggestSize("7", 100), "numeric String must be parsed");
     }
 
     @Test
     public void testResolveSuggestSize_StringNonNumericInput_UsesDefault() {
-        assertEquals("non-numeric String must default to 10", 10, mcpApiManager.resolveSuggestSize("abc", 100));
+        assertEquals(10, mcpApiManager.resolveSuggestSize("abc", 100), "non-numeric String must default to 10");
     }
 
     @Test
     public void testResolveSuggestSize_StringOverMax_CappedAtMax() {
-        assertEquals("numeric String exceeding max must be capped", 100, mcpApiManager.resolveSuggestSize("99999", 100));
+        assertEquals(100, mcpApiManager.resolveSuggestSize("99999", 100), "numeric String exceeding max must be capped");
     }
 
     @Test
     public void testResolveSuggestSize_LongNumber_TruncatedToInt() {
-        assertEquals("Long within range must be preserved via intValue", 42, mcpApiManager.resolveSuggestSize(Long.valueOf(42L), 100));
+        assertEquals(42, mcpApiManager.resolveSuggestSize(Long.valueOf(42L), 100), "Long within range must be preserved via intValue");
     }
 
     @Test
