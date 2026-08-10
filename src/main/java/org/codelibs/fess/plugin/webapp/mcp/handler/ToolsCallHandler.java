@@ -25,6 +25,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codelibs.fess.plugin.webapp.exception.McpApiException;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
+import org.codelibs.fess.plugin.webapp.mcp.auth.PermissionGate;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpError;
 import org.codelibs.fess.plugin.webapp.mcp.tool.McpTool;
@@ -83,7 +84,10 @@ public class ToolsCallHandler implements McpMethodHandler {
         final Map<String, Object> arguments = (Map<String, Object>) argumentsObj;
 
         final McpTool tool = findTool(name);
-        if (tool == null) {
+        // A single check, a single throw, and a single message for "no such tool" and "hidden by
+        // the permission gate": an unauthorized caller must not be able to tell get_index_stats
+        // apart from a tool that was never registered at all.
+        if (tool == null || !PermissionGate.isAllowed(tool.getRequiredPermissions(), context.getPrincipal())) {
             throw new McpError(HttpServletResponse.SC_OK, ErrorCode.InvalidParams, "Unknown tool: " + name);
         }
 

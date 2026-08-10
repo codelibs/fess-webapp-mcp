@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
+import org.codelibs.fess.plugin.webapp.mcp.auth.PermissionGate;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
 import org.codelibs.fess.plugin.webapp.mcp.tool.McpTool;
 
@@ -62,7 +63,10 @@ public class ToolsListHandler extends AbstractCacheableHandler {
     @Override
     public Map<String, Object> handle(final McpCallContext context) {
         rejectCursor(context);
-        final List<Map<String, Object>> descriptors = tools.stream().map(this::describeTool).collect(Collectors.toList());
+        final List<Map<String, Object>> descriptors = tools.stream()
+                .filter(tool -> PermissionGate.isAllowed(tool.getRequiredPermissions(), context.getPrincipal()))
+                .map(this::describeTool)
+                .collect(Collectors.toList());
 
         final Map<String, Object> result = new LinkedHashMap<>();
         result.put("tools", descriptors);
@@ -95,10 +99,10 @@ public class ToolsListHandler extends AbstractCacheableHandler {
 
     @Override
     protected String getCacheScope(final McpCallContext context) {
-        // mcp.auth.mode does not exist until Task 13/14; every caller is effectively unauthenticated
-        // ("none") until then, and 6.2's rule is auth.mode == none -> public, so this is
-        // unconditionally public for now. Task 13 makes it auth-mode dependent (private otherwise),
-        // in lockstep with hiding get_index_stats from an unauthorized caller (design doc 9/B4).
-        return "public";
+        // This result now varies by the caller's authorization once get_index_stats is gated: a
+        // public scope could be shared between callers with different permissions even on an
+        // authenticated endpoint (design doc 6.2), so this drops to private whenever
+        // mcp.auth.mode is not the unauthenticated default.
+        return AUTH_MODE_NONE.equals(getAuthMode()) ? "public" : "private";
     }
 }

@@ -27,9 +27,11 @@ import jakarta.servlet.http.HttpServletResponse;
 import org.codelibs.fess.helper.SearchHelper;
 import org.codelibs.fess.mylasta.direction.FessConfig;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
+import org.codelibs.fess.plugin.webapp.mcp.auth.PermissionGate;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpError;
 import org.codelibs.fess.plugin.webapp.mcp.tool.IndexStatsTool;
+import org.codelibs.fess.plugin.webapp.mcp.tool.McpTool;
 import org.codelibs.fess.util.ComponentUtil;
 import org.dbflute.optional.OptionalThing;
 import org.opensearch.common.xcontent.json.JsonXContent;
@@ -60,11 +62,27 @@ public class ResourcesReadHandler extends AbstractCacheableHandler {
     /** The exact shape a {@code fess://document/{doc_id}} URI must match; capture group 1 is {@code doc_id}. */
     private static final Pattern DOCUMENT_URI = Pattern.compile("^fess://document/([A-Za-z0-9_-]{1,256})$");
 
+    /** The tool whose {@link McpTool#getRequiredPermissions()} gates {@value #STATS_URI}. */
+    private final McpTool indexStatsTool;
+
     /**
-     * Creates a {@code resources/read} handler.
+     * Creates a {@code resources/read} handler backed by a fresh {@link IndexStatsTool}.
      */
     public ResourcesReadHandler() {
+        this(new IndexStatsTool());
+    }
+
+    /**
+     * Creates a {@code resources/read} handler.
+     *
+     * @param indexStatsTool the tool whose {@code getRequiredPermissions()} gates
+     *            {@value #STATS_URI}; the same primitive {@code ToolsListHandler} and
+     *            {@code ToolsCallHandler} gate as {@code get_index_stats}, so a read and a list
+     *            agree
+     */
+    public ResourcesReadHandler(final McpTool indexStatsTool) {
         super(TTL_CONFIG_KEY, DEFAULT_TTL_MS);
+        this.indexStatsTool = indexStatsTool;
     }
 
     @Override
@@ -82,20 +100,40 @@ public class ResourcesReadHandler extends AbstractCacheableHandler {
 
         final Map<String, Object> result;
         if (STATS_URI.equals(uri)) {
+            // Same throw site (same message, same ErrorCode, same HTTP status) as the "no URI
+            // matches at all" branch below: a caller who lacks the permission must not be able
+            // to tell this resource apart from one that was never published at all.
+            if (!PermissionGate.isAllowed(indexStatsTool.getRequiredPermissions(), context.getPrincipal())) {
+                throw notFound(uri);
+            }
             result = buildIndexStatsResource();
         } else {
             final Matcher matcher = DOCUMENT_URI.matcher(uri);
             if (matcher.matches()) {
                 result = buildDocumentResource(matcher.group(1));
             } else {
-                // -32602 with HTTP 200: this is an application-level not-found, unlike a
-                // malformed _meta. Never return an empty contents array for a resource that does
-                // not exist.
-                throw new McpError(HttpServletResponse.SC_OK, ErrorCode.InvalidParams, "Resource not found: " + uri);
+                // Never return an empty contents array for a resource that does not exist.
+                throw notFound(uri);
             }
         }
         putCacheHints(result, context);
         return result;
+    }
+
+    /**
+     * Builds the "resource not found" error for a {@code uri} this server does not publish, or
+     * that the caller lacks the permission to read.
+     * <p>
+     * {@code -32602} at HTTP 200: this is an application-level not-found, unlike a malformed
+     * {@code _meta}. Used identically for an unknown URI and for a gated one the caller may not
+     * read, so the two are indistinguishable to the caller.
+     * </p>
+     *
+     * @param uri the requested URI, echoed in the message
+     * @return the error for the caller to throw
+     */
+    protected McpError notFound(final String uri) {
+        return new McpError(HttpServletResponse.SC_OK, ErrorCode.InvalidParams, "Resource not found: " + uri);
     }
 
     @Override

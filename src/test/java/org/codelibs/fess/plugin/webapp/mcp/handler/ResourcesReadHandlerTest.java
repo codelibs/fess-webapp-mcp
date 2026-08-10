@@ -26,6 +26,7 @@ import java.util.Map;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpError;
+import org.codelibs.fess.plugin.webapp.mcp.tool.IndexStatsTool;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -33,7 +34,24 @@ import org.junit.jupiter.api.Test;
  */
 public class ResourcesReadHandlerTest {
 
+    /**
+     * {@code get_index_stats} with the gate disabled, so this file's URI-shape and
+     * DI-requirement tests (which predate and are unrelated to the permission gate -- see
+     * IndexStatsGateTest for that) reach the same code paths they always did instead of being
+     * turned away by the gate before ever getting there.
+     */
+    private static final class UngatedIndexStatsTool extends IndexStatsTool {
+        @Override
+        protected String getIndexStatsPermissions() {
+            return "";
+        }
+    }
+
     private static final class FixedTtlHandler extends ResourcesReadHandler {
+
+        FixedTtlHandler() {
+            super(new UngatedIndexStatsTool());
+        }
 
         @Override
         protected long getTtlMs() {
@@ -135,7 +153,7 @@ public class ResourcesReadHandlerTest {
     public void testTtlIsClampedToZeroWhenNegative() {
         // A not-found path never reaches putCacheHints, so it cannot prove the clamp is applied
         // there; buildIndexStatsResource is stubbed so handle() takes the real success path.
-        final ResourcesReadHandler negative = new ResourcesReadHandler() {
+        final ResourcesReadHandler negative = new ResourcesReadHandler(new UngatedIndexStatsTool()) {
             @Override
             protected long getTtlMs() {
                 return -1L;

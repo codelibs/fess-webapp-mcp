@@ -19,7 +19,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.codelibs.fess.plugin.webapp.mcp.auth.PermissionGate;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
+import org.codelibs.fess.plugin.webapp.mcp.tool.IndexStatsTool;
+import org.codelibs.fess.plugin.webapp.mcp.tool.McpTool;
 
 /**
  * The {@code resources/list} handler.
@@ -32,11 +35,26 @@ public class ResourcesListHandler extends AbstractCacheableHandler {
     /** Default TTL when {@value #TTL_CONFIG_KEY} is unset or unparseable. */
     protected static final long DEFAULT_TTL_MS = 3_600_000L;
 
+    /** The tool whose {@link McpTool#getRequiredPermissions()} gates the {@code fess://index/stats} resource. */
+    private final McpTool indexStatsTool;
+
     /**
-     * Creates a {@code resources/list} handler.
+     * Creates a {@code resources/list} handler backed by a fresh {@link IndexStatsTool}.
      */
     public ResourcesListHandler() {
+        this(new IndexStatsTool());
+    }
+
+    /**
+     * Creates a {@code resources/list} handler.
+     *
+     * @param indexStatsTool the tool whose {@code getRequiredPermissions()} gates
+     *            {@code fess://index/stats}; the same primitive {@code ToolsListHandler} and
+     *            {@code ToolsCallHandler} gate as {@code get_index_stats}, so both lists agree
+     */
+    public ResourcesListHandler(final McpTool indexStatsTool) {
         super(TTL_CONFIG_KEY, DEFAULT_TTL_MS);
+        this.indexStatsTool = indexStatsTool;
     }
 
     @Override
@@ -48,22 +66,35 @@ public class ResourcesListHandler extends AbstractCacheableHandler {
     public Map<String, Object> handle(final McpCallContext context) {
         rejectCursor(context);
 
+        final List<Map<String, Object>> resources =
+                PermissionGate.isAllowed(indexStatsTool.getRequiredPermissions(), context.getPrincipal())
+                        ? List.of(describeIndexStatsResource())
+                        : List.of();
+
+        final Map<String, Object> result = new LinkedHashMap<>();
+        result.put("resources", resources);
+        putCacheHints(result, context);
+        return result;
+    }
+
+    /**
+     * Builds the {@code resources/list} descriptor for the {@code fess://index/stats} resource.
+     *
+     * @return a map with {@code uri}, {@code name}, {@code description}, and {@code mimeType}
+     */
+    protected Map<String, Object> describeIndexStatsResource() {
         final Map<String, Object> indexResource = new LinkedHashMap<>();
         indexResource.put("uri", "fess://index/stats");
         indexResource.put("name", "Index Statistics");
         indexResource.put("description", "Fess index statistics and configuration information");
         indexResource.put("mimeType", "application/json");
-
-        final Map<String, Object> result = new LinkedHashMap<>();
-        result.put("resources", List.of(indexResource));
-        putCacheHints(result, context);
-        return result;
+        return indexResource;
     }
 
     @Override
     protected String getCacheScope(final McpCallContext context) {
-        // See ToolsListHandler#getCacheScope: unconditionally public until Task 13 wires
-        // mcp.auth.mode in, in lockstep with hiding get_index_stats from unauthorized callers.
-        return "public";
+        // This result now varies by the caller's authorization once fess://index/stats is
+        // gated: see ToolsListHandler#getCacheScope for the identical rationale.
+        return AUTH_MODE_NONE.equals(getAuthMode()) ? "public" : "private";
     }
 }

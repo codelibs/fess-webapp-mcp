@@ -25,6 +25,7 @@ import java.util.Map;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpError;
+import org.codelibs.fess.plugin.webapp.mcp.tool.IndexStatsTool;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -32,11 +33,32 @@ import org.junit.jupiter.api.Test;
  */
 public class ResourcesListHandlerTest {
 
+    /**
+     * {@code get_index_stats} with the gate disabled, so this file's tests (which are about the
+     * resource descriptor's shape, not about the permission gate -- see IndexStatsGateTest for
+     * that) never touch the DI container via {@code getRequiredPermissions()}.
+     */
+    private static final class UngatedIndexStatsTool extends IndexStatsTool {
+        @Override
+        protected String getIndexStatsPermissions() {
+            return "";
+        }
+    }
+
     private static final class FixedTtlHandler extends ResourcesListHandler {
+
+        FixedTtlHandler() {
+            super(new UngatedIndexStatsTool());
+        }
 
         @Override
         protected long getTtlMs() {
             return 3600000L;
+        }
+
+        @Override
+        protected String getAuthMode() {
+            return "none";
         }
     }
 
@@ -72,10 +94,15 @@ public class ResourcesListHandlerTest {
 
     @Test
     public void testTtlIsClampedToZero() {
-        final ResourcesListHandler handler = new ResourcesListHandler() {
+        final ResourcesListHandler handler = new ResourcesListHandler(new UngatedIndexStatsTool()) {
             @Override
             protected long getTtlMs() {
                 return -1L;
+            }
+
+            @Override
+            protected String getAuthMode() {
+                return "none";
             }
         };
         assertEquals(0L, handler.handle(contextWithParams(Map.of())).get("ttlMs"));

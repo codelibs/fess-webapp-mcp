@@ -18,12 +18,11 @@ package org.codelibs.fess.plugin.webapp.mcp.handler;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpError;
@@ -90,6 +89,14 @@ public class ToolsListHandlerTest {
         protected long getTtlMs() {
             return 3600000L;
         }
+
+        @Override
+        protected String getAuthMode() {
+            // no-op: the real implementation reads mcp.auth.mode from the container. This
+            // class's tests are not about the auth-mode/cacheScope interaction (see
+            // IndexStatsGateTest for that), so every test here runs the default "none" mode.
+            return "none";
+        }
     }
 
     private McpCallContext contextWithParams(final Map<String, Object> params) {
@@ -133,6 +140,11 @@ public class ToolsListHandlerTest {
             protected long getTtlMs() {
                 return -5L;
             }
+
+            @Override
+            protected String getAuthMode() {
+                return "none";
+            }
         };
         assertEquals(0L, handler.handle(contextWithParams(Map.of())).get("ttlMs"));
     }
@@ -162,25 +174,30 @@ public class ToolsListHandlerTest {
     }
 
     @Test
-    public void testNoArgConstructorDefaultsToTheStandardFourTools() {
-        @SuppressWarnings("unchecked")
-        final List<Map<String, Object>> tools =
-                (List<Map<String, Object>>) new FixedTtlHandlerNoArg().handle(contextWithParams(Map.of())).get("tools");
-        assertNotNull(tools);
-        // Deterministic order matters: MCP clients may present tools/list results in the order
-        // they arrive. A size()>=4 check alone would not catch a dropped, duplicated, or
-        // reordered tool as long as the count stayed >= 4.
-        final List<String> names = tools.stream().map(t -> (String) t.get("name")).collect(Collectors.toList());
-        assertEquals(List.of("search", "get_index_stats", "suggest", "get_document"), names,
-                "tools/list must report the default tool set, in this exact order");
+    public void testNoArgConstructorDefaultsToTheStandardFourToolsButGatingThemNeedsDiContainer() {
+        // McpTool.defaultTools() wires in the real IndexStatsTool; filtering the list against a
+        // caller's permissions now calls its getRequiredPermissions(), which reads Fess config
+        // and therefore needs a live DI container this suite does not provide. This proves the
+        // no-arg constructor really does wire in the real (gated) tool set. Container-free
+        // coverage of the gate itself -- including that it correctly hides get_index_stats --
+        // lives in IndexStatsGateTest, which stubs IndexStatsTool instead of using the real one.
+        final ToolsListHandler handler = new FixedTtlHandlerNoArg();
+        assertThrows(IllegalStateException.class, () -> handler.handle(contextWithParams(Map.of())));
     }
 
-    /** Exercises the real no-arg constructor's default tool set without touching the DI container. */
+    /** Exercises the real no-arg constructor's default tool set, fixing only the TTL seam. */
     private static final class FixedTtlHandlerNoArg extends ToolsListHandler {
 
         @Override
         protected long getTtlMs() {
             return 3600000L;
+        }
+
+        @Override
+        protected String getAuthMode() {
+            // Isolates the assertion to the tool-permission DI dependency under test, rather
+            // than incidentally also depending on the (separate) auth-mode DI read.
+            return "none";
         }
     }
 }

@@ -48,6 +48,23 @@ import org.codelibs.fess.util.ComponentUtil;
  */
 public abstract class AbstractCacheableHandler implements McpMethodHandler {
 
+    /**
+     * The system property key selecting the MCP authentication mode.
+     * <p>
+     * Duplicated from {@code McpApiManager#getAuthMode()}'s literal key rather than shared: that
+     * class (package {@code api.mcp}) already imports this package's handlers to build its
+     * dispatcher, so importing back would create a cycle. {@link ToolsListHandler} and
+     * {@link ResourcesListHandler} are the only two subclasses that consult it -- their result
+     * varies by the caller's authorization once {@code get_index_stats} is gated, so a
+     * {@code public} {@code cacheScope} could otherwise be shared across differently-authorized
+     * callers.
+     * </p>
+     */
+    protected static final String AUTH_MODE_CONFIG_KEY = "mcp.auth.mode";
+
+    /** The value of {@value #AUTH_MODE_CONFIG_KEY} meaning "no authentication": every caller resolves to an anonymous principal. */
+    protected static final String AUTH_MODE_NONE = "none";
+
     /** The hot-reloadable system property key holding this result's TTL. */
     private final String ttlConfigKey;
 
@@ -114,6 +131,19 @@ public abstract class AbstractCacheableHandler implements McpMethodHandler {
      * @return {@code "public"} or {@code "private"}
      */
     protected abstract String getCacheScope(McpCallContext context);
+
+    /**
+     * Returns the configured MCP authentication mode.
+     * <p>
+     * A test double overrides this method directly, exactly like {@link #getTtlMs()}, so no
+     * test needs a live DI container to exercise a subclass's {@code getCacheScope}.
+     * </p>
+     *
+     * @return {@value #AUTH_MODE_CONFIG_KEY}'s value; {@value #AUTH_MODE_NONE} when unset
+     */
+    protected String getAuthMode() {
+        return getFessConfig().getSystemProperty(AUTH_MODE_CONFIG_KEY, AUTH_MODE_NONE);
+    }
 
     /**
      * Rejects an inbound {@code cursor}.
