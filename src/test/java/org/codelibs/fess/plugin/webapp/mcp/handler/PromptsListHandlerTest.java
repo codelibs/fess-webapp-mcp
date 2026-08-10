@@ -59,13 +59,16 @@ public class PromptsListHandlerTest {
 
         final Map<String, Object> basic = prompts.get(0);
         assertEquals("basic_search", basic.get("name"));
+        assertEquals("Perform a basic search with a query string", basic.get("description"));
         final List<Map<String, Object>> basicArgs = (List<Map<String, Object>>) basic.get("arguments");
         assertEquals(1, basicArgs.size());
         assertEquals("query", basicArgs.get(0).get("name"));
+        assertEquals("The search query", basicArgs.get(0).get("description"));
         assertEquals(true, basicArgs.get(0).get("required"));
 
         final Map<String, Object> advanced = prompts.get(1);
         assertEquals("advanced_search", advanced.get("name"));
+        assertEquals("Perform an advanced search with filters and sorting", advanced.get("description"));
         final List<Map<String, Object>> advancedArgs = (List<Map<String, Object>>) advanced.get("arguments");
         assertEquals(3, advancedArgs.size());
         assertEquals("query", advancedArgs.get(0).get("name"));

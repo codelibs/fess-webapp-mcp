@@ -32,10 +32,10 @@ import org.junit.jupiter.api.Test;
  *
  * <p>
  * {@code invokeGetDocument} moved out of {@code McpApiManager} into this class; the missing-doc_id
- * behaviour it must preserve is already covered end-to-end by
- * {@code McpApiManagerTest#testHandleInvoke_GetDocument_MissingDocId}, and is exercised again
- * here directly against the tool. {@code testInputSchemaRequiresDocId} migrated similarly from
- * {@code testHandleListTools_HasGetDocumentTool}.
+ * behaviour it must preserve was formerly covered end-to-end by the retired
+ * {@code McpApiManagerTest#testHandleInvoke_GetDocument_MissingDocId} and is exercised here
+ * directly against the tool instead. {@code testInputSchemaRequiresDocId} migrated similarly from
+ * the retired {@code testHandleListTools_HasGetDocumentTool}.
  * </p>
  */
 public class GetDocumentToolTest {

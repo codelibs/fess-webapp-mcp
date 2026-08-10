@@ -319,6 +319,20 @@ public class SearchToolTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    public void testInputSchemaDeclaresQStartNumSortAndLangProperties() {
+        // Migrated from the retired McpApiManagerTest#testHandleListTools_DetailedSchema, which
+        // asserted this via tools/list; nothing asserted it directly against the tool's own
+        // schema, so start/sort/lang were left uncovered when that test was judged a duplicate.
+        final Map<String, Object> properties = (Map<String, Object>) searchTool.getInputSchema().get("properties");
+        assertTrue(properties.containsKey("q"), "Should have 'q' property");
+        assertTrue(properties.containsKey("start"), "Should have 'start' property");
+        assertTrue(properties.containsKey("num"), "Should have 'num' property");
+        assertTrue(properties.containsKey("sort"), "Should have 'sort' property");
+        assertTrue(properties.containsKey("lang"), "Should have 'lang' property");
+    }
+
+    @Test
     public void testBuildRequestParams_TypeIsJson() {
         // RoleQueryHelper relies on SearchRequestType.JSON to treat this as an API request and
         // apply Fess role filtering to MCP search results. If this ever regressed, results would

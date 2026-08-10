@@ -67,15 +67,28 @@ public class McpApiManager extends BaseApiManager {
     protected static final String SERVER_NAME = "fess-mcp-server";
 
     /**
+     * Also one of the nine handlers in {@link #dispatcher}; held separately because
+     * {@link DiscoverHandler#resolveServerVersion()} is the single seam that resolves this
+     * plugin's version for {@link #responseWriter}, so both need the same instance.
+     */
+    private final DiscoverHandler discoverHandler = new DiscoverHandler();
+
+    /**
      * Routes calls to their per-method handler. The nine handlers are stateless, so one
      * dispatcher instance is safe to share across every request this manager processes.
      */
-    private final McpDispatcher dispatcher = new McpDispatcher(List.of(new DiscoverHandler(), new ToolsListHandler(),
-            new ToolsCallHandler(), new ResourcesListHandler(), new ResourcesReadHandler(), new ResourceTemplatesListHandler(),
-            new PromptsListHandler(), new PromptsGetHandler(), new CompletionHandler()));
+    private final McpDispatcher dispatcher = new McpDispatcher(
+            List.of(discoverHandler, new ToolsListHandler(), new ToolsCallHandler(), new ResourcesListHandler(), new ResourcesReadHandler(),
+                    new ResourceTemplatesListHandler(), new PromptsListHandler(), new PromptsGetHandler(), new CompletionHandler()));
 
-    /** Writes every response and stamps this server's identity onto successful results. */
-    private final McpResponseWriter responseWriter = new McpResponseWriter(SERVER_NAME, resolveServerVersion());
+    /**
+     * Writes every response and stamps this server's identity onto successful results. Built
+     * from a plain field-to-field call on the already-constructed {@link #discoverHandler}, not
+     * from an overridable instance method of {@code this}, so it carries none of the
+     * call-an-overridable-method-from-a-field-initializer hazard a subclass constructor could
+     * otherwise trip over.
+     */
+    private final McpResponseWriter responseWriter = new McpResponseWriter(SERVER_NAME, discoverHandler.resolveServerVersion());
 
     /**
      * Creates a new MCP API manager with the default path prefix "/mcp".
@@ -284,18 +297,6 @@ public class McpApiManager extends BaseApiManager {
      */
     protected McpResponseWriter getResponseWriter() {
         return responseWriter;
-    }
-
-    /**
-     * Resolves this plugin's version for {@code _meta.serverInfo}, mirroring
-     * {@code DiscoverHandler#resolveServerVersion}.
-     *
-     * @return the implementation version, or {@code "unknown"} when it is unavailable (e.g. when
-     *         running from {@code target/test-classes} rather than a packaged jar)
-     */
-    protected String resolveServerVersion() {
-        final String version = getClass().getPackage().getImplementationVersion();
-        return version == null ? "unknown" : version;
     }
 
     @Override

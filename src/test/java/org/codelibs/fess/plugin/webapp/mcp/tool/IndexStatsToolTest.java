@@ -55,6 +55,15 @@ public class IndexStatsToolTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    public void testInputSchemaPropertiesIsEmpty() {
+        final Map<String, Object> schema = indexStatsTool.getInputSchema();
+        assertEquals("object", schema.get("type"), "Stats schema type should be object");
+        final Map<String, Object> properties = (Map<String, Object>) schema.get("properties");
+        assertTrue(properties.isEmpty(), "get_index_stats takes no arguments");
+    }
+
+    @Test
     public void testCollectIndexStats_RequiresDIContainer() {
         // collectIndexStats requires ComponentUtil which needs DI container
         try {

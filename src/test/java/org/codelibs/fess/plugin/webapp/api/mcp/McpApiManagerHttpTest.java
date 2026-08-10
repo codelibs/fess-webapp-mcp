@@ -20,9 +20,14 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import org.codelibs.fess.plugin.webapp.mcp.McpConstants;
+import org.codelibs.fess.plugin.webapp.mcp.handler.McpMethodHandler;
+import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
+import org.codelibs.fess.plugin.webapp.mcp.protocol.McpDispatcher;
 import org.dbflute.utflute.mocklet.MockletHttpServletRequestImpl;
 import org.dbflute.utflute.mocklet.MockletHttpServletResponseImpl;
 import org.junit.jupiter.api.Test;
@@ -201,6 +206,50 @@ public class McpApiManagerHttpTest {
     }
 
     @Test
+    public void testSuccessPathWritesResultWithMatchingIdAndServerInfo() throws Exception {
+        // Walking every other case in this file: 405 and the disabled-endpoint 503 return before
+        // readBoundedRequestBody; the notification path returns before dispatch; every 400/404
+        // case throws before dispatch. That leaves process()'s success branch --
+        // writer.writeResult(response, id, getDispatcher().dispatch(context)), and the
+        // McpCallContext construction just above it -- exercised by zero tests. This is the one
+        // that does. The real handlers need a DI container (AbstractCacheableHandler#getFessConfig),
+        // so getDispatcher() is stubbed with a single fake McpMethodHandler instead.
+        final TestManager manager = new TestManager() {
+            @Override
+            protected McpDispatcher getDispatcher() {
+                return new McpDispatcher(List.of(new McpMethodHandler() {
+                    @Override
+                    public String getMethod() {
+                        return "tools/list";
+                    }
+
+                    @Override
+                    public Map<String, Object> handle(final McpCallContext context) {
+                        return new LinkedHashMap<>(Map.of("tools", List.of()));
+                    }
+                }));
+            }
+        };
+        final String body = post(manager, modernBody("tools/list"), modernHeaders("tools/list"));
+        assertEquals(200, lastResponse.getStatus(), body);
+        assertTrue(body.contains("\"id\":1"), "the response id must echo the request id: " + body);
+        assertTrue(body.contains("\"result\""), body);
+        assertTrue(body.contains("io.modelcontextprotocol/serverInfo"), "writeResult must stamp serverInfo: " + body);
+    }
+
+    @Test
+    public void testHeaderPresenceCheckedBeforeMetaExtraction() throws Exception {
+        // Step 10 (HeaderValidator.requirePresent) must run before step 11
+        // (McpRequestMeta.parse): a body with no _meta and no headers must fail as a missing
+        // header (-32020), not as a missing _meta (-32602). If requirePresent and
+        // McpRequestMeta.parse were swapped, this would be -32602 instead.
+        final String body = post(new TestManager(), "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}", Map.of());
+        assertEquals(400, lastResponse.getStatus());
+        assertTrue(body.contains("-32020"), "a missing header must be reported before a missing _meta: " + body);
+        assertFalse(body.contains("-32602"), body);
+    }
+
+    @Test
     public void testApplicationLevelErrorReturnsHttp200WithJsonRpcError() throws Exception {
         // An application-level failure (unknown tool) must surface as HTTP 200 with a JSON-RPC
         // error body, not as an HTTP error status: only transport-level failures use non-200
@@ -227,8 +276,11 @@ public class McpApiManagerHttpTest {
     public void testDisabledEndpointReturns503NotARedirect() throws Exception {
         final TestManager manager = new TestManager();
         manager.enabled = false;
-        post(manager, modernBody("tools/list"), modernHeaders("tools/list"));
+        final String body = post(manager, modernBody("tools/list"), modernHeaders("tools/list"));
         assertEquals(503, lastResponse.getStatus(), "matches()==false would have produced a 302 + HTML");
+        // The requirement is 503 + a JSON-RPC error body, not just a bare 503 status.
+        assertTrue(body.contains("\"jsonrpc\":\"2.0\""), body);
+        assertTrue(body.contains("\"error\""), body);
     }
 
     @Test

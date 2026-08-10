@@ -91,16 +91,16 @@ public class DiscoverHandler extends AbstractCacheableHandler {
      * <p>
      * Not used by {@link #handle(McpCallContext)} itself -- {@code serverInfo} is
      * {@code McpResponseWriter}'s responsibility, stamped onto every result's {@code _meta}.
-     * This method is the seam the writer's real identity will be resolved through once it is
-     * constructed in production (a later task); it lives here now, ahead of that wiring, so the
-     * resolution logic mandated by the 2026-07-28 migration -- read the manifest, fall back to
-     * {@code "unknown"} -- exists and is tested from the moment {@code initialize}'s hardcoded
-     * {@code "1.0.0"} is retired.
+     * {@code McpApiManager} calls this method directly (via its own {@code DiscoverHandler}
+     * instance) when constructing its {@code McpResponseWriter}, so the resolution logic
+     * mandated by the 2026-07-28 migration -- read the manifest, fall back to {@code "unknown"}
+     * -- lives in exactly one place. Public so that cross-package caller can reach it without
+     * subclassing.
      * </p>
      *
      * @return the implementation version, or {@code "unknown"} when it is unavailable
      */
-    protected String resolveServerVersion() {
+    public String resolveServerVersion() {
         final String version = getClass().getPackage().getImplementationVersion();
         return version == null ? "unknown" : version;
     }

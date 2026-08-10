@@ -182,11 +182,48 @@ public class CompletionHandlerTest {
         // suite does not provide.
         final Map<String, Object> params =
                 Map.of("ref", Map.of("type", "ref/prompt", "name", "basic_search"), "argument", Map.of("name", "query", "value", "test"));
-        try {
-            handler.handle(contextWithParams(params));
-        } catch (final IllegalStateException e) {
-            assertTrue(e.getMessage().contains("container"), "Should fail due to container not initialized");
-        }
+        final IllegalStateException e = assertThrows(IllegalStateException.class, () -> handler.handle(contextWithParams(params)));
+        assertTrue(e.getMessage().contains("container"), "Should fail due to container not initialized");
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    public void testAdvancedSearchSortMissingValueKeyTreatedAsEmptyPrefix() {
+        // argument carries no "value" key at all (not even ""): argValueRaw is null and must be
+        // coalesced to "" before it is read as a prefix. If the coalescing were removed,
+        // SORT_VALUES.stream().filter(v -> v.startsWith(null)) would NPE, unlike
+        // testAdvancedSearchSortEmptyValueReturnsAllSixValues, whose explicit "" never exercises
+        // the null branch of the coalescing at all.
+        final Map<String, Object> params = new HashMap<>();
+        params.put("ref", Map.of("type", "ref/prompt", "name", "advanced_search"));
+        final Map<String, Object> argument = new HashMap<>();
+        argument.put("name", "sort");
+        // intentionally no "value" key
+        params.put("argument", argument);
+
+        final Map<String, Object> result = handler.handle(contextWithParams(params));
+
+        final Map<String, Object> completion = (Map<String, Object>) result.get("completion");
+        assertEquals(6, ((List<String>) completion.get("values")).size(),
+                "a missing value key must behave like an empty prefix and return all 6 sort values");
+    }
+
+    @Test
+    public void testUnrecognisedPromptNameWithQueryArgumentReturnsEmptyWithoutTouchingSuggest() {
+        // ref/prompt with an unrecognised prompt name, but a *known* query argument name and a
+        // *non-empty* value: the prompt-name conjunct in the first branch condition
+        // (("basic_search".equals(promptName) || "advanced_search".equals(promptName)) &&
+        // "query".equals(argName)) must reject this before ever reaching completeViaSuggest. If
+        // that conjunct were dropped, this call would reach ComponentUtil.getSuggestHelper() and
+        // throw IllegalStateException instead of returning empty completions.
+        final Map<String, Object> params = Map.of("ref", Map.of("type", "ref/prompt", "name", "totally_unknown_prompt"), "argument",
+                Map.of("name", "query", "value", "something"));
+
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> completion = (Map<String, Object>) handler.handle(contextWithParams(params)).get("completion");
+        @SuppressWarnings("unchecked")
+        final List<String> values = (List<String>) completion.get("values");
+        assertTrue(values.isEmpty(), "an unrecognised prompt name must yield no completions, not reach Fess suggest");
     }
 
     @Test

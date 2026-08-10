@@ -47,8 +47,8 @@ public class McpCallContext {
      * Creates an empty call context, carrying neither a request nor {@code _meta} nor any
      * params.
      * <p>
-     * Used by {@code McpTool} unit tests, and by {@code McpApiManager}'s pre-2026-07-28 dispatch
-     * path, neither of which has a full {@link McpRequest} to hand over.
+     * Used by {@code McpTool} unit tests, which exercise {@code call} directly and have no
+     * full {@link McpRequest} to hand over.
      * </p>
      */
     public McpCallContext() {

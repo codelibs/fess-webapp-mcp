@@ -105,6 +105,29 @@ public class McpResponseWriterTest {
     }
 
     @Test
+    public void testResultEnvelopeIncludesJsonrpcVersion() {
+        // No test anywhere previously asserted the literal envelope shape; deleting the
+        // "jsonrpc" entry from writeResult's envelope would leave the suite green.
+        final MockletHttpServletResponseImpl response = response();
+        writer.writeResult(response, 1, new LinkedHashMap<>(Map.of("tools", java.util.List.of())));
+        final String body = McpHttpTestSupport.bodyOf(response);
+        assertTrue(body.contains("\"jsonrpc\":\"2.0\""), "every JSON-RPC response must carry the version: " + body);
+    }
+
+    @Test
+    public void testErrorEnvelopeIncludesJsonrpcVersionAndIdWhenKnown() {
+        // testErrorWithoutIdOmitsTheIdKey only pins the negative (hasId == false); this pins the
+        // positive so inverting that hasId check, or dropping "jsonrpc" from the error envelope,
+        // would also be caught.
+        final MockletHttpServletResponseImpl response = response();
+        writer.writeError(response, 3, true, new McpError(400, ErrorCode.ParseError, "malformed JSON"));
+        final String body = McpHttpTestSupport.bodyOf(response);
+
+        assertTrue(body.contains("\"jsonrpc\":\"2.0\""), "every JSON-RPC response must carry the version: " + body);
+        assertTrue(body.contains("\"id\":3"), "a known id must be present, not omitted, when hasId is true: " + body);
+    }
+
+    @Test
     public void testErrorDataIsEmitted() {
         final MockletHttpServletResponseImpl response = response();
         writer.writeError(response, 3, true, new McpError(400, ErrorCode.UnsupportedProtocolVersion, "unsupported",

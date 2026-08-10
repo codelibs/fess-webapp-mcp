@@ -19,11 +19,11 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpError;
@@ -165,7 +165,12 @@ public class ToolsListHandlerTest {
         final List<Map<String, Object>> tools =
                 (List<Map<String, Object>>) new FixedTtlHandlerNoArg().handle(contextWithParams(Map.of())).get("tools");
         assertNotNull(tools);
-        assertTrue(tools.size() >= 4, "the default tool set must include at least the 4 built-in tools");
+        // Deterministic order matters: MCP clients may present tools/list results in the order
+        // they arrive. A size()>=4 check alone would not catch a dropped, duplicated, or
+        // reordered tool as long as the count stayed >= 4.
+        final List<String> names = tools.stream().map(t -> (String) t.get("name")).collect(Collectors.toList());
+        assertEquals(List.of("search", "get_index_stats", "suggest", "get_document"), names,
+                "tools/list must report the default tool set, in this exact order");
     }
 
     /** Exercises the real no-arg constructor's default tool set without touching the DI container. */
