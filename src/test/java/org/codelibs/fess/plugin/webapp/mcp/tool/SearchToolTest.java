@@ -15,10 +15,12 @@
  */
 package org.codelibs.fess.plugin.webapp.mcp.tool;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -27,7 +29,9 @@ import java.util.List;
 import java.util.Map;
 
 import org.codelibs.fess.entity.SearchRequestParams;
+import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
+import org.codelibs.fess.plugin.webapp.mcp.protocol.McpError;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -330,6 +334,104 @@ public class SearchToolTest {
         assertTrue(properties.containsKey("num"), "Should have 'num' property");
         assertTrue(properties.containsKey("sort"), "Should have 'sort' property");
         assertTrue(properties.containsKey("lang"), "Should have 'lang' property");
+    }
+
+    // ------------------------------------------------------------------
+    // Argument validation (getInputSchema() is advertised but was applied nowhere)
+    // ------------------------------------------------------------------
+
+    /**
+     * Asserts that calling {@code search} with these arguments is refused as {@code -32602} at
+     * HTTP 200, and that the message names the offending argument.
+     *
+     * @param arguments the arguments to reject
+     * @param argumentName the argument name the message must mention
+     */
+    private void assertRejectedAsInvalidParams(final Map<String, Object> arguments, final String argumentName) {
+        final McpError error = assertThrows(McpError.class, () -> searchTool.call(arguments, new McpCallContext()),
+                "wrong-typed or missing arguments must be refused before the search runs");
+        assertEquals(ErrorCode.InvalidParams, error.getErrorCode(), "the MCP spec requires -32602 for an invalid argument");
+        assertEquals(200, error.getHttpStatus(), "an application-level failure stays HTTP 200");
+        // "parameter: <name>", not a bare contains(name): "required" contains "q".
+        assertTrue(error.getMessage().contains("parameter: " + argumentName), "the message must name the argument: " + error.getMessage());
+    }
+
+    @Test
+    public void testCall_MissingQuery_IsInvalidParams() {
+        // getInputSchema() marks q required, but getQuery() just returned null and the
+        // unvalidated request reached SearchHelper.
+        assertRejectedAsInvalidParams(Map.of(), "q");
+    }
+
+    @Test
+    public void testCall_NullQuery_IsInvalidParams() {
+        // {"q": null} parses to a present key with a null value, which reaches getQuery() as the
+        // same null an absent q does.
+        final Map<String, Object> arguments = new HashMap<>();
+        arguments.put("q", null);
+        assertRejectedAsInvalidParams(arguments, "q");
+    }
+
+    @Test
+    public void testCall_NonStringQuery_IsInvalidParams() {
+        // Was: "class java.lang.Integer cannot be cast to class java.lang.String ..." echoed back
+        // as an isError:true result.
+        assertRejectedAsInvalidParams(Map.of("q", Integer.valueOf(1)), "q");
+    }
+
+    @Test
+    public void testCall_NonStringSort_IsInvalidParams() {
+        assertRejectedAsInvalidParams(Map.of("q", "test", "sort", Integer.valueOf(1)), "sort");
+    }
+
+    @Test
+    public void testCall_NonStringSdh_IsInvalidParams() {
+        assertRejectedAsInvalidParams(Map.of("q", "test", "sdh", Integer.valueOf(1)), "sdh");
+    }
+
+    @Test
+    public void testCall_NonObjectFields_IsInvalidParams() {
+        // The likeliest client mistake for fields: sending the field name instead of the
+        // {"label": ["label1"]} object the schema declares.
+        assertRejectedAsInvalidParams(Map.of("q", "test", "fields", "label"), "fields");
+    }
+
+    @Test
+    public void testCall_NonObjectAs_IsInvalidParams() {
+        assertRejectedAsInvalidParams(Map.of("q", "test", "as", "sitesearch"), "as");
+    }
+
+    @Test
+    public void testCall_NonArrayExQ_IsInvalidParams() {
+        assertRejectedAsInvalidParams(Map.of("q", "test", "ex_q", "extra"), "ex_q");
+    }
+
+    @Test
+    public void testCall_WellTypedArgumentsPassValidation() {
+        // Positive control for the whole block above: proves validation rejects wrong types
+        // rather than simply rejecting every argument. executeSearch is stubbed out so this
+        // stays container-free; reaching it at all means validation let the call through.
+        final SearchTool tool = new SearchTool() {
+            @Override
+            protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments) {
+                return List.of();
+            }
+        };
+        final Map<String, Object> arguments = new HashMap<>();
+        arguments.put("q", "test");
+        arguments.put("sort", "score.desc");
+        arguments.put("sdh", "hash");
+        arguments.put("fields", Map.of("label", List.of("label1")));
+        arguments.put("as", Map.of("sitesearch", List.of("example.com")));
+        arguments.put("ex_q", List.of("extra"));
+        // start/offset/num/lang are deliberately not type-checked: their accessors accept any
+        // type by design, so a numeric String must keep working.
+        arguments.put("start", "10");
+        arguments.put("num", Integer.valueOf(5));
+        arguments.put("offset", Integer.valueOf(0));
+        arguments.put("lang", "en");
+
+        assertDoesNotThrow(() -> tool.call(arguments, new McpCallContext()), "well-typed arguments must not be rejected");
     }
 
     @Test

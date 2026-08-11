@@ -25,6 +25,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import jakarta.servlet.http.HttpServletResponse;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codelibs.fess.entity.FacetInfo;
@@ -34,7 +36,9 @@ import org.codelibs.fess.entity.SearchRenderData;
 import org.codelibs.fess.entity.SearchRequestParams;
 import org.codelibs.fess.helper.SearchHelper;
 import org.codelibs.fess.mylasta.direction.FessConfig;
+import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
+import org.codelibs.fess.plugin.webapp.mcp.protocol.McpError;
 import org.codelibs.fess.util.ComponentUtil;
 import org.dbflute.optional.OptionalThing;
 
@@ -133,6 +137,8 @@ public class SearchTool implements McpTool {
 
     @Override
     public Map<String, Object> call(final Map<String, Object> arguments, final McpCallContext context) {
+        validateArguments(arguments);
+
         final List<Map<String, Object>> documentItems = executeSearch(arguments);
 
         // Build MCP-compliant response with multiple content entries, plus structuredContent
@@ -149,6 +155,86 @@ public class SearchTool implements McpTool {
         result.put("content", contents);
         result.put("structuredContent", Map.of("hits", hits));
         return result;
+    }
+
+    /**
+     * Rejects arguments that {@link #getInputSchema()} declares but the caller sent with the
+     * wrong JSON type, before any of them reaches an unchecked cast.
+     * <p>
+     * {@code getInputSchema()} is advertised over {@code tools/list} and, until this check
+     * existed, applied nowhere: {@code buildRequestParams} casts {@code q}, {@code sort},
+     * {@code sdh}, {@code fields}, {@code as}, and {@code ex_q} straight out of the argument map,
+     * so {@code {"q": 1}} used to surface as a raw JVM message
+     * ({@code "class java.lang.Integer cannot be cast to class java.lang.String ..."}) rather
+     * than the {@code -32602} the MCP specification requires ("Servers MUST: Validate all tool
+     * inputs"). A missing {@code q} was worse than wrong: {@code getQuery()} simply returned
+     * null and the unvalidated request reached {@code SearchHelper} even though the schema marks
+     * {@code q} required.
+     * </p>
+     * <p>
+     * This is a top-level type check, not a schema validator, and deliberately stops there.
+     * There is no JSON Schema validator on this plugin's classpath, and the build produces a
+     * plain {@code maven-jar-plugin} artifact with no shade or assembly step -- the jar ships
+     * alone into {@code WEB-INF/plugin} and bundles none of its own dependencies, relying on
+     * Fess to supply them at runtime. Introducing a validator is therefore a packaging decision
+     * rather than part of this fix. Specifically not checked:
+     * </p>
+     * <ul>
+     *   <li><b>Element types inside {@code fields}/{@code as}/{@code ex_q}.</b> Those need nested,
+     *       per-entry validation ({@code fields} is an object of arrays of strings), which is
+     *       where a type check turns into a schema engine. A wrong element type still throws
+     *       inside the search and is reported as a redacted {@code isError:true} result.</li>
+     *   <li><b>{@code start}, {@code offset}, {@code num}.</b> Their accessors already accept any
+     *       type deliberately -- {@code Number} directly, anything else via
+     *       {@code Integer.parseInt(toString())} with {@code NumberFormatException} caught and a
+     *       documented fallback -- so no cast can fail and rejecting a numeric string here would
+     *       be a behaviour change, not a fix.</li>
+     *   <li><b>{@code lang}.</b> {@code getLanguages()} already handles {@code String[]},
+     *       {@code String}, and anything else via {@code toString()}. Same reasoning.</li>
+     *   <li><b>An empty {@code q}.</b> The schema requires {@code q} to be present, not to be
+     *       non-empty (no {@code minLength}), so what an empty query means is left to Fess.</li>
+     * </ul>
+     *
+     * @param arguments the raw {@code search} tool arguments
+     * @throws McpError with {@link ErrorCode#InvalidParams} (-32602) at HTTP 200 when a required
+     *         argument is absent or an argument has the wrong JSON type
+     */
+    protected void validateArguments(final Map<String, Object> arguments) {
+        // Absent and explicitly-null are the same thing here: both leave getQuery() returning
+        // null, which is exactly the unvalidated request this check exists to stop.
+        if (arguments.get("q") == null) {
+            throw new McpError(HttpServletResponse.SC_OK, ErrorCode.InvalidParams, "Missing required parameter: q");
+        }
+        requireTypeIfPresent(arguments, "q", String.class, "a string");
+        requireTypeIfPresent(arguments, "sort", String.class, "a string");
+        requireTypeIfPresent(arguments, "sdh", String.class, "a string");
+        requireTypeIfPresent(arguments, "fields", Map.class, "an object");
+        requireTypeIfPresent(arguments, "as", Map.class, "an object");
+        requireTypeIfPresent(arguments, "ex_q", List.class, "an array");
+    }
+
+    /**
+     * Throws {@link McpError} when {@code name} is present with a type other than
+     * {@code expectedType}.
+     * <p>
+     * An absent argument is not this method's business: which arguments are required is decided
+     * by {@link #validateArguments}, and every optional one is allowed to be missing. The message
+     * names the argument and the expected JSON type but never echoes the value back.
+     * </p>
+     *
+     * @param arguments the raw tool arguments
+     * @param name the argument name, as declared in {@link #getInputSchema()}
+     * @param expectedType the Java type the JSON type maps to
+     * @param expectedTypeName the JSON type name to quote in the error message
+     * @throws McpError with {@link ErrorCode#InvalidParams} (-32602) at HTTP 200 on a mismatch
+     */
+    protected static void requireTypeIfPresent(final Map<String, Object> arguments, final String name, final Class<?> expectedType,
+            final String expectedTypeName) {
+        final Object value = arguments.get(name);
+        if (value != null && !expectedType.isInstance(value)) {
+            throw new McpError(HttpServletResponse.SC_OK, ErrorCode.InvalidParams,
+                    "Invalid type for parameter: " + name + " (expected " + expectedTypeName + ")");
+        }
     }
 
     /**

@@ -16,6 +16,7 @@
 package org.codelibs.fess.plugin.webapp.mcp.tool;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -25,6 +26,7 @@ import java.util.Map;
 import org.codelibs.fess.plugin.webapp.exception.McpApiException;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
+import org.codelibs.fess.plugin.webapp.mcp.protocol.McpError;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -68,6 +70,19 @@ public class GetDocumentToolTest {
         } catch (final McpApiException e) {
             assertEquals(ErrorCode.InvalidParams, e.getCode(), "Should be InvalidParams");
         }
+    }
+
+    @Test
+    public void testCall_NonStringDocId_IsInvalidParams() {
+        // getInputSchema() declares doc_id as a string and was applied nowhere, so this used to
+        // reach the unchecked cast and surface as "class java.lang.Integer cannot be cast to
+        // class java.lang.String ..." in an isError:true result, instead of -32602.
+        final McpError error =
+                assertThrows(McpError.class, () -> getDocumentTool.call(Map.of("doc_id", Integer.valueOf(1)), new McpCallContext()),
+                        "a wrong-typed doc_id must be refused before the cast");
+        assertEquals(ErrorCode.InvalidParams, error.getErrorCode(), "the MCP spec requires -32602 for an invalid argument");
+        assertEquals(200, error.getHttpStatus(), "an application-level failure stays HTTP 200");
+        assertTrue(error.getMessage().contains("parameter: doc_id"), "the message must name the argument: " + error.getMessage());
     }
 
     @Test

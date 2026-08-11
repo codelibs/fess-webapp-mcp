@@ -22,6 +22,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import jakarta.servlet.http.HttpServletResponse;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codelibs.fess.helper.SearchHelper;
@@ -29,6 +31,7 @@ import org.codelibs.fess.mylasta.direction.FessConfig;
 import org.codelibs.fess.plugin.webapp.exception.McpApiException;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
+import org.codelibs.fess.plugin.webapp.mcp.protocol.McpError;
 import org.codelibs.fess.util.ComponentUtil;
 import org.dbflute.optional.OptionalThing;
 
@@ -95,7 +98,23 @@ public class GetDocumentTool implements McpTool {
 
     @Override
     public Map<String, Object> call(final Map<String, Object> arguments, final McpCallContext context) {
-        final String docId = (String) arguments.get("doc_id");
+        // getInputSchema() declares doc_id as a string and is applied nowhere, so this cast used
+        // to fail with a raw JVM message ("class java.lang.Integer cannot be cast to class
+        // java.lang.String ...") reported as an isError:true result, instead of the -32602 the
+        // MCP specification requires ("Servers MUST: Validate all tool inputs"). The type is
+        // checked before the cast; whether the (correctly-typed) value is usable stays below.
+        //
+        // The two exception types here are both HTTP 200 / -32602 on the wire: ToolsCallHandler
+        // propagates McpError unchanged and bridges McpApiException into exactly that same
+        // McpError. McpError is the go-forward contract, so new checks use it; the existing
+        // McpApiException below is left alone because migrating it is the separate, deliberately
+        // deferred piece of work its "pre-2026-07-28 exception type" comment describes.
+        final Object docIdArg = arguments.get("doc_id");
+        if (docIdArg != null && !(docIdArg instanceof String)) {
+            throw new McpError(HttpServletResponse.SC_OK, ErrorCode.InvalidParams,
+                    "Invalid type for parameter: doc_id (expected a string)");
+        }
+        final String docId = (String) docIdArg;
         if (docId == null || docId.isEmpty()) {
             throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: doc_id");
         }

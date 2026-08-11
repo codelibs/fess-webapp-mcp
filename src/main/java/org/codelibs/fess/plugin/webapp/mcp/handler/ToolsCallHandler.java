@@ -18,6 +18,7 @@ package org.codelibs.fess.plugin.webapp.mcp.handler;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import jakarta.servlet.http.HttpServletResponse;
 
@@ -36,6 +37,45 @@ import org.codelibs.fess.plugin.webapp.mcp.tool.McpTool;
  * <p>
  * Not a {@code CacheableResult}: {@code CallToolResult} is explicitly excluded from the schema's
  * cacheable-result union, so this result never carries {@code ttlMs} or {@code cacheScope}.
+ * </p>
+ *
+ * <h2>What a failing tool is allowed to tell the caller</h2>
+ * <p>
+ * A tool failure reaches the caller through one of two shapes, and neither may echo an
+ * exception message this plugin did not author:
+ * </p>
+ * <ul>
+ *   <li><b>Deliberate, caller-directed failures are passed through verbatim.</b> An
+ *       {@link McpApiException} carrying a request-side JSON-RPC code (-32700/-32600/-32601/
+ *       -32602) is a tool telling the caller what is wrong with the caller's own request --
+ *       {@code "Missing required parameter: doc_id"}, {@code "Missing required parameter: q"}.
+ *       Those strings are written here, contain nothing but the argument name, and are the
+ *       whole point of the error, so they are bridged to {@link McpError} unchanged.</li>
+ *   <li><b>Everything else is replaced with a correlation id.</b> An {@code InternalError}
+ *       (-32603) or an exception that escaped a tool entirely is describing a *server-side*
+ *       failure, and its message routinely embeds text this plugin never wrote. Two verified
+ *       examples: {@code IndexStatsTool} builds its message as
+ *       {@code "Failed to serialize index stats: " + e.getMessage()}, and Fess's
+ *       {@code SearchEngineClient} throws {@code InvalidQueryException("Invalid query: " +
+ *       searchRequestBuilder)}, whose {@code toString()} is the fully serialized OpenSearch
+ *       DSL -- including the role/permission filter terms that were already merged into it at
+ *       throw time. A caller can trigger that one with nothing but a {@code start} between
+ *       {@code index.max_result_window} and {@code query.max.search.result.offset}. The caller
+ *       gets a fixed message plus {@code error_code:<uuid>}; the real message and stack trace
+ *       go to the WARN log under the same id.</li>
+ * </ul>
+ * <p>
+ * The redaction is unconditional -- it deliberately does not consult Fess's
+ * {@code api.json.response.exception.included} flag. That flag is read through
+ * {@code ComponentUtil}, which this container-free handler otherwise never touches, and it is
+ * not an established contract for this shape of leak anyway: Fess's own v2 {@code SearchHandler}
+ * leaks the same {@code InvalidQueryException} text without consulting it. Redacting always is
+ * both cheaper and safer than making disclosure a configuration mistake away.
+ * </p>
+ * <p>
+ * This leak is pre-existing rather than introduced here: the same {@code "Error: " +
+ * e.getMessage()} lived in {@code McpApiManager} before this handler was extracted, and was
+ * relocated unchanged. It is fixed here because this is where that code now lives.
  * </p>
  */
 public class ToolsCallHandler implements McpMethodHandler {
@@ -103,20 +143,86 @@ public class ToolsCallHandler implements McpMethodHandler {
             // McpTool#call still throws the pre-2026-07-28 exception type (Task 7 scope). Bridge
             // it into the handler-level McpError contract -- same ErrorCode, HTTP 200 because
             // this is an application-level failure -- without changing the tool itself.
-            throw new McpError(HttpServletResponse.SC_OK, e.getCode(), e.getMessage());
+            if (isCallerDirected(e.getCode())) {
+                throw new McpError(HttpServletResponse.SC_OK, e.getCode(), e.getMessage());
+            }
+            // A server-side failure the tool chose to report itself. Its message is not
+            // guaranteed to be self-authored (IndexStatsTool concatenates a Jackson message into
+            // it), so it is redacted exactly like the catch-all below.
+            final String errorId = newErrorId();
+            logger.warn("[MCP] Tool '{}' reported an internal failure (error_code:{}): {}", name, errorId, e.getMessage(), e);
+            throw new McpError(HttpServletResponse.SC_OK, e.getCode(), failureText(errorId));
         } catch (final McpError e) {
-            // No McpTool throws this today, but McpError is the go-forward contract; letting it
-            // fall into the catch-all below would silently convert a deliberate protocol error
-            // into an isError:true CallToolResult. Propagate it unchanged instead.
+            // McpError is the go-forward contract and the tools' argument validation already
+            // throws it (SearchTool/GetDocumentTool/SuggestTool reject a wrong-typed argument
+            // this way). Letting it fall into the catch-all below would silently convert a
+            // deliberate protocol error into an isError:true CallToolResult. Propagate it
+            // unchanged instead.
+            //
+            // Not redacted: an McpError is only ever constructed by this plugin's own code, with
+            // a message this plugin wrote, so it is caller-directed by construction -- unlike
+            // the arbitrary backend exceptions the catch-all below has to assume the worst about.
             throw e;
         } catch (final Exception e) {
-            logger.warn("[MCP] Tool '{}' execution failed: {}", name, e.getMessage(), e);
-            final String message = e.getMessage() != null ? e.getMessage() : "Unknown error";
+            // Unexpected: whatever this is, its message was written by code outside this plugin
+            // and may embed backend internals (an OpenSearch DSL with role filters, a JVM cast
+            // message naming loaded classes, a file path). The caller gets the correlation id
+            // only; the operator gets the real message and stack trace at WARN under that id.
+            final String errorId = newErrorId();
+            logger.warn("[MCP] Tool '{}' execution failed (error_code:{}): {}", name, errorId, e.getMessage(), e);
             final Map<String, Object> result = new LinkedHashMap<>();
-            result.put("content", List.of(Map.of("type", "text", "text", "Error: " + message)));
+            result.put("content", List.of(Map.of("type", "text", "text", "Error: " + failureText(errorId))));
             result.put("isError", true);
             return result;
         }
+    }
+
+    /**
+     * Tells whether a JSON-RPC code means "the caller's request was wrong" rather than "this
+     * server failed".
+     * <p>
+     * Only the request-side codes qualify: a tool raising one of them is describing the caller's
+     * own arguments, so its message is safe to return verbatim. Everything else -- including
+     * {@code InternalError}, the MCP-specific transport codes, and a null code -- is treated as
+     * a server-side failure whose message must be redacted. Deliberately fail-closed: a code
+     * added to {@link ErrorCode} later is redacted until someone decides otherwise.
+     * </p>
+     *
+     * @param code the JSON-RPC code the tool raised, may be null
+     * @return true when the accompanying message may be returned to the caller unchanged
+     */
+    protected static boolean isCallerDirected(final ErrorCode code) {
+        if (code == null) {
+            return false;
+        }
+        return switch (code) {
+        case ParseError, InvalidRequest, MethodNotFound, InvalidParams -> true;
+        default -> false;
+        };
+    }
+
+    /**
+     * Returns a fresh correlation id for one failure.
+     * <p>
+     * Mirrors Fess's own {@code FessApiFailureHook}, which emits {@code error_code:<uuid>} to the
+     * client and logs the real cause under the same id. A new id per failure is what makes a
+     * report ("I got error_code:X") pinpoint one log line.
+     * </p>
+     *
+     * @return a random correlation id
+     */
+    protected static String newErrorId() {
+        return UUID.randomUUID().toString();
+    }
+
+    /**
+     * Builds the caller-visible replacement for a redacted failure message.
+     *
+     * @param errorId the correlation id, as returned by {@link #newErrorId()}
+     * @return a fixed message carrying nothing but the correlation id
+     */
+    protected static String failureText(final String errorId) {
+        return "Tool execution failed (error_code:" + errorId + ")";
     }
 
     /**

@@ -24,6 +24,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import jakarta.servlet.http.HttpServletResponse;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codelibs.fess.helper.SuggestHelper;
@@ -31,6 +33,7 @@ import org.codelibs.fess.mylasta.direction.FessConfig;
 import org.codelibs.fess.plugin.webapp.exception.McpApiException;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
+import org.codelibs.fess.plugin.webapp.mcp.protocol.McpError;
 import org.codelibs.fess.suggest.entity.SuggestItem;
 import org.codelibs.fess.suggest.request.suggest.SuggestRequestBuilder;
 import org.codelibs.fess.suggest.request.suggest.SuggestResponse;
@@ -101,7 +104,26 @@ public class SuggestTool implements McpTool {
 
     @Override
     public Map<String, Object> call(final Map<String, Object> arguments, final McpCallContext context) {
-        final String query = (String) arguments.get("q");
+        // getInputSchema() declares q as a string and is applied nowhere, so this cast used to
+        // fail with a raw JVM message ("class java.lang.Integer cannot be cast to class
+        // java.lang.String ...") reported as an isError:true result, instead of the -32602 the
+        // MCP specification requires ("Servers MUST: Validate all tool inputs"). The type is
+        // checked before the cast; whether the (correctly-typed) value is usable stays below.
+        //
+        // The two exception types here are both HTTP 200 / -32602 on the wire: ToolsCallHandler
+        // propagates McpError unchanged and bridges McpApiException into exactly that same
+        // McpError. McpError is the go-forward contract, so new checks use it; the existing
+        // McpApiException below is left alone because migrating it is the separate, deliberately
+        // deferred piece of work its "pre-2026-07-28 exception type" comment describes.
+        //
+        // num is deliberately not type-checked: resolveSuggestSize accepts any type by design
+        // (Number directly, anything else via Integer.parseInt(toString()) with the
+        // NumberFormatException caught and a documented fallback to 10), so no cast can fail.
+        final Object queryArg = arguments.get("q");
+        if (queryArg != null && !(queryArg instanceof String)) {
+            throw new McpError(HttpServletResponse.SC_OK, ErrorCode.InvalidParams, "Invalid type for parameter: q (expected a string)");
+        }
+        final String query = (String) queryArg;
         if (query == null || query.isEmpty()) {
             throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: q");
         }
