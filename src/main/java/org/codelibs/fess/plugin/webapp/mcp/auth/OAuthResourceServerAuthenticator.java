@@ -24,6 +24,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 import org.apache.logging.log4j.LogManager;
@@ -35,9 +36,11 @@ import org.codelibs.fess.util.ComponentUtil;
 
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JOSEException;
+import com.nimbusds.jose.JOSEObjectType;
 import com.nimbusds.jose.jwk.source.JWKSource;
 import com.nimbusds.jose.jwk.source.JWKSourceBuilder;
 import com.nimbusds.jose.proc.BadJOSEException;
+import com.nimbusds.jose.proc.DefaultJOSEObjectTypeVerifier;
 import com.nimbusds.jose.proc.JWSVerificationKeySelector;
 import com.nimbusds.jose.proc.SecurityContext;
 import com.nimbusds.jwt.JWTClaimNames;
@@ -98,8 +101,21 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
     /** The default JWKS cache lifetime, in seconds, when {@code mcp.oauth.jwks.cache.seconds} is unset. */
     private static final int DEFAULT_JWKS_CACHE_SECONDS = 300;
 
+    /**
+     * The smallest JWKS cache lifetime, in seconds, {@link #newProcessor(String)} can actually
+     * build a source for; a smaller configured value is clamped up to this by
+     * {@link #getJwksCacheSeconds()}. See that method's Javadoc for why this exact number.
+     */
+    private static final int MIN_JWKS_CACHE_SECONDS = 60;
+
     /** The JWKS cache refresh timeout passed to {@link JWKSourceBuilder#cache(long, long)}, in milliseconds. */
     private static final long JWKS_CACHE_REFRESH_TIMEOUT_MILLIS = 30_000L;
+
+    /** The RFC 9068 &#xa7;4 media type for a JWT access token, as a {@code typ} header value. */
+    private static final JOSEObjectType ACCESS_TOKEN_JWT_TYPE = new JOSEObjectType("at+jwt");
+
+    /** RFC 9068 &#xa7;4's equally-mandated long form of {@link #ACCESS_TOKEN_JWT_TYPE}. */
+    private static final JOSEObjectType ACCESS_TOKEN_JWT_TYPE_LONG_FORM = new JOSEObjectType("application/at+jwt");
 
     /**
      * The lazily-built, cached JWT processor. Built at most once per instance, on the first
@@ -109,6 +125,13 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
      * I/O, or {@code ComponentUtil}.
      */
     private volatile ConfigurableJWTProcessor<SecurityContext> cachedProcessor;
+
+    /**
+     * Guards {@link #getJwksCacheSeconds()}'s clamp WARN so it is emitted at most once per
+     * instance. The clamp itself is unconditional; only the log line is rate-limited, so an
+     * operator sees the misconfiguration without it repeating for the life of the process.
+     */
+    private final AtomicBoolean jwksCacheFloorWarned = new AtomicBoolean();
 
     /**
      * Creates an {@code oauth}-mode authenticator. Stateless at construction time: every
@@ -126,11 +149,15 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
      * <p>
      * RFC 9728 requires a protected-resource metadata document's {@code authorization_servers}
      * to be non-empty; serving one with none would be worse than not enabling authorization at
-     * all. Separately, {@link CanonicalResourceUri#metadataUrl} only implements the well-known
-     * path insertion for a resource path of exactly {@code /mcp}: an audience configured with a
-     * different path (e.g. {@code https://host/api/mcp}) would make every challenge advertise a
-     * {@code resource_metadata} URL {@code McpMetadataApiManager}'s exact-match {@code matches()}
-     * does not serve.
+     * all. Separately, {@link CanonicalResourceUri#metadataUrl} builds the well-known URL by
+     * replacing a trailing {@code /mcp} with the fixed well-known suffix, so the audience must
+     * <em>end in</em> the {@code /mcp} path segment for the advertised {@code resource_metadata}
+     * URL to be one {@code McpMetadataApiManager} actually serves. Leading path segments are fine
+     * and expected -- {@code https://host/api/mcp} is the correct audience for a Fess deployed
+     * under the context path {@code /api} -- because the well-known URL is built under that same
+     * prefix and {@code matches()} compares {@code getServletPath()}, which excludes the context
+     * path. Only a value ending somewhere other than {@code /mcp} (e.g. {@code
+     * https://host/api/mcp2}) is rejected. See {@link CanonicalResourceUri#isCompatibleAudience}.
      * </p>
      * <p>
      * <b>{@code mcp.oauth.audience} is required, not merely validated when present (C1).</b>
@@ -477,6 +504,13 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
      * of this method's configuration, which meant this method itself -- the one that ships --
      * was never executed by anything.
      * </p>
+     * <p>
+     * The cache lifetime comes from {@link #getJwksCacheSeconds()}, which clamps a too-small
+     * configured value rather than letting {@link JWKSourceBuilder} reject it: nimbus enforces a
+     * lower bound on the TTL relative to the refresh-ahead window and the refresh timeout passed
+     * here, and violating it throws an unchecked exception this class would otherwise report to
+     * the caller as an invalid token. See {@link #getJwksCacheSeconds()}.
+     * </p>
      *
      * @param jwksUri the JWKS endpoint
      * @return a configured processor, per {@link #newProcessor(JWKSource)}
@@ -497,17 +531,46 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
      * and attaches {@link #newClaimsVerifier()}. Deliberately independent of how {@code source}
      * was obtained -- {@link #newProcessor(String)} builds a network-backed one via
      * {@link JWKSourceBuilder}, a test builds an in-process {@code ImmutableJWKSet} -- so this
-     * method itself, the one place the key selector, the RS256 restriction, and the claims
-     * verifier are actually wired together, is exercised identically by both.
+     * method itself, the one place the key selector, the RS256 restriction, the {@code typ}
+     * verifier, and the claims verifier are actually wired together, is exercised identically by
+     * both.
+     * </p>
+     *
+     * <p>
+     * <b>The {@code typ} header (RFC 9068 &#xa7;4).</b> Nimbus's default when nothing is set is
+     * {@code DefaultJOSEObjectTypeVerifier.JWT}, which permits only {@code typ: JWT} or an absent
+     * {@code typ} -- so a JWT access token carrying the very {@code typ} RFC 9068 &#xa7;4 says a
+     * resource server "MUST verify" ({@code at+jwt}, or its long form {@code application/at+jwt})
+     * would be rejected outright, with a 401 blaming the caller's token. This method therefore
+     * installs a verifier allowing {@code at+jwt}, {@code application/at+jwt}, {@code JWT}, and
+     * (the {@code null} entry) an absent {@code typ}.
+     * </p>
+     * <p>
+     * <b>This widening does not weaken anything.</b> The obvious worry is ID-token confusion, but
+     * an OIDC ID Token carries {@code typ: JWT} or no {@code typ} at all -- both of which the
+     * previous default <em>already</em> accepted -- so that exposure is unchanged by adding two
+     * further values no ID Token uses. What actually keeps an ID Token out is
+     * {@link #requireIssuer} plus {@link #requireAudience}: an ID Token's {@code aud} is the
+     * client's {@code client_id}, never this server's canonical resource URI, so it fails RFC 8707
+     * audience binding regardless of its {@code typ}. Going the other way and accepting
+     * <em>only</em> {@code at+jwt} is not viable in practice: Entra ID, Auth0, Okta, and a
+     * default-configured Keycloak all mint access tokens with {@code typ: JWT}, so a strict
+     * verifier would reject the majority of real deployments' tokens. Types outside this set --
+     * e.g. {@code ID_TOKEN} or {@code secevent+jwt} -- remain rejected. Matching is
+     * case-insensitive ({@link com.nimbusds.jose.JOSEObjectType#equals} compares ignoring case).
      * </p>
      *
      * @param source the JWK source to verify signatures against
-     * @return a configured processor: RS256-only signature verification against {@code source},
-     *         and a claims verifier that requires (and, if present, time-checks) {@code exp}
+     * @return a configured processor: RS256-only signature verification against {@code source}, an
+     *         RFC 9068-compatible {@code typ} verifier, and a claims verifier that requires (and,
+     *         if present, time-checks) {@code exp}
      */
     protected ConfigurableJWTProcessor<SecurityContext> newProcessor(final JWKSource<SecurityContext> source) {
         final ConfigurableJWTProcessor<SecurityContext> processor = new DefaultJWTProcessor<>();
         processor.setJWSKeySelector(new JWSVerificationKeySelector<>(JWSAlgorithm.RS256, source));
+        // The trailing null is what keeps an absent typ acceptable; see this method's Javadoc.
+        processor.setJWSTypeVerifier(
+                new DefaultJOSEObjectTypeVerifier<>(JOSEObjectType.JWT, ACCESS_TOKEN_JWT_TYPE, ACCESS_TOKEN_JWT_TYPE_LONG_FORM, null));
         processor.setJWTClaimsSetVerifier(newClaimsVerifier());
         return processor;
     }
@@ -573,12 +636,61 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
     }
 
     /**
-     * Returns the configured JWKS cache lifetime.
+     * Returns the JWKS cache lifetime to use, clamped up to {@value #MIN_JWKS_CACHE_SECONDS}
+     * seconds when {@code mcp.oauth.jwks.cache.seconds} is configured below that floor.
+     * <p>
+     * <b>Why {@value #MIN_JWKS_CACHE_SECONDS} specifically.</b> {@link #newProcessor(String)}
+     * builds the source with {@code .cache(ttl, }{@value #JWKS_CACHE_REFRESH_TIMEOUT_MILLIS}{@code
+     * ).refreshAheadCache(true)}. Two of nimbus's own invariants then bound the TTL from below:
+     * </p>
+     * <ul>
+     * <li>{@code RefreshAheadCachingJWKSetSource} rejects a TTL smaller than the sum of its
+     * refresh-ahead window ({@code JWKSourceBuilder.DEFAULT_REFRESH_AHEAD_TIME}, 30s) and the
+     * cache refresh timeout (30s here) -- i.e. a TTL below 60s throws
+     * {@link IllegalArgumentException}; and</li>
+     * <li>{@code JWKSourceBuilder#build()} rejects a TTL that is not <em>strictly</em> greater
+     * than the rate limiter's minimum request interval ({@code
+     * JWKSourceBuilder.DEFAULT_RATE_LIMIT_MIN_INTERVAL}, 30s) -- i.e. a TTL of 30s or less throws
+     * {@link IllegalStateException}.</li>
+     * </ul>
+     * <p>
+     * Both are unchecked and both escape {@link #getProcessor()} (which catches only
+     * {@link MalformedURLException}) into {@link #authenticate}'s broad {@code RuntimeException}
+     * clause, where they are laundered into an ordinary 401 {@code invalid_token} -- on
+     * <em>every</em> request, forever, because {@link #cachedProcessor} is only assigned after a
+     * successful build, so each request retries the same failing build. Nothing about the caller's
+     * token is wrong, and the real cause reaches the log only at DEBUG (see {@link #invalidToken}).
+     * Clamping turns that permanently-broken deployment into a working one with a slightly longer
+     * key-cache lifetime than the operator asked for.
+     * </p>
+     * <p>
+     * <b>Deliberately not an {@link #isUsable()} check.</b> {@code isUsable()} returning
+     * {@code false} makes {@code McpApiManager#getAuthenticator} fall back to
+     * {@link NoneAuthenticator} -- anonymous access. Treating a too-small cache lifetime as
+     * "unusable" would convert a fail-closed misconfiguration into an authentication bypass, which
+     * is strictly worse than the 401 it would replace. A bad TTL must never disable
+     * authentication, so this method clamps and continues instead.
+     * </p>
      *
-     * @return {@code mcp.oauth.jwks.cache.seconds}'s value; {@value #DEFAULT_JWKS_CACHE_SECONDS} when unset
+     * @return the effective JWKS cache lifetime in seconds: {@code mcp.oauth.jwks.cache.seconds}'s
+     *         value when it is at least {@value #MIN_JWKS_CACHE_SECONDS},
+     *         {@value #MIN_JWKS_CACHE_SECONDS} when it is smaller, and
+     *         {@value #DEFAULT_JWKS_CACHE_SECONDS} when the property is unset
      */
     protected int getJwksCacheSeconds() {
-        return getSystemPropertyAsInt("mcp.oauth.jwks.cache.seconds", DEFAULT_JWKS_CACHE_SECONDS);
+        final int configured = getSystemPropertyAsInt("mcp.oauth.jwks.cache.seconds", DEFAULT_JWKS_CACHE_SECONDS);
+        if (configured >= MIN_JWKS_CACHE_SECONDS) {
+            return configured;
+        }
+        if (logger.isWarnEnabled() && jwksCacheFloorWarned.compareAndSet(false, true)) {
+            logger.warn(
+                    "[MCP] mcp.oauth.jwks.cache.seconds={} is below the minimum supported value - using {} instead. "
+                            + "The JWKS cache lifetime must leave room for both the 30s refresh-ahead window and the 30s cache "
+                            + "refresh timeout, and must be strictly longer than the 30s rate-limiter interval; a smaller value "
+                            + "makes the JWKS source fail to build and every token-bearing request return a misleading 401.",
+                    configured, MIN_JWKS_CACHE_SECONDS);
+        }
+        return MIN_JWKS_CACHE_SECONDS;
     }
 
     /**

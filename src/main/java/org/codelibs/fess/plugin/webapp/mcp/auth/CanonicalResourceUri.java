@@ -92,7 +92,10 @@ public final class CanonicalResourceUri {
     /** The literal MCP endpoint path. Never derived from a request. */
     static final String MCP_PATH = "/mcp";
 
-    /** The RFC 9728 well-known path suffix, for a resource whose path is {@link #MCP_PATH}. */
+    /**
+     * The well-known metadata path {@link #metadataUrl} substitutes for a resource identifier's
+     * trailing {@link #MCP_PATH}, keeping anything that precedes it.
+     */
     private static final String WELL_KNOWN_SUFFIX = "/.well-known/oauth-protected-resource/mcp";
 
     /** The {@code https} default port. */
@@ -144,13 +147,40 @@ public final class CanonicalResourceUri {
     }
 
     /**
-     * Builds the RFC 9728 well-known metadata URL for {@code canonicalUri}.
+     * Builds the well-known protected-resource metadata URL for {@code canonicalUri}, by
+     * replacing its trailing {@link #MCP_PATH} with {@link #WELL_KNOWN_SUFFIX} and keeping
+     * everything before it.
      * <p>
-     * RFC 9728 &#xa7;3.1 constructs the metadata URL by inserting {@code
-     * /.well-known/oauth-protected-resource} between the resource identifier's host and its
-     * path. Since this server's resource path is always the literal {@link #MCP_PATH}, that
-     * insertion collapses to stripping a trailing {@code /mcp} (when present) and appending the
-     * fixed suffix.
+     * For a root-context deployment ({@code https://host/mcp}) this produces {@code
+     * https://host/.well-known/oauth-protected-resource/mcp}, which is exactly the URL RFC 9728
+     * &#xa7;3.1 prescribes. For a deployment under a non-root context path -- Fess's {@code
+     * FESS_CONTEXT_PATH} / {@code -Dfess.context.path}, or a reverse proxy mounting Fess at a
+     * subpath -- the resource identifier is {@code https://host/api/mcp}, and this method keeps
+     * the {@code /api} prefix: {@code https://host/api/.well-known/oauth-protected-resource/mcp}.
+     * </p>
+     * <p>
+     * <b>That is a deliberate, and largely forced, deviation from RFC 9728 &#xa7;3.1.</b> The
+     * &#xa7;3.1 construction inserts the well-known path between the <em>host</em> and the
+     * resource's path, which for the example above would be {@code
+     * https://host/.well-known/oauth-protected-resource/api/mcp} -- host-rooted, and therefore
+     * outside the servlet context Fess is mounted in. Nothing in this plugin, or in Fess, can
+     * serve a URL above its own context path, so advertising the &#xa7;3.1 form under a subpath
+     * deployment would advertise a URL that is guaranteed to 404. The prefix-preserving form
+     * <em>is</em> served: {@code McpMetadataApiManager#matches} compares
+     * {@code request.getServletPath()}, which excludes the context path, so {@code
+     * https://host/api/.well-known/oauth-protected-resource/mcp} arrives there as the literal
+     * {@code /.well-known/oauth-protected-resource/mcp} it matches on. The two forms coincide
+     * whenever the context path is the root, so this deviation is visible only to subpath
+     * deployments.
+     * </p>
+     * <p>
+     * <b>Interop caveat.</b> A client that follows the {@code resource_metadata} URL this server
+     * advertises in its {@code WWW-Authenticate} challenge (and in the {@code resource} field's
+     * own document) -- the discovery flow RFC 9728 and the MCP Authorization specification both
+     * direct clients to use -- always reaches the right document. A client that instead
+     * <em>constructs</em> the &#xa7;3.1 URL itself from the resource identifier will get a 404
+     * under a non-root context path. That trade is accepted knowingly: the alternative is a URL
+     * that 404s for every client rather than only for clients that ignore the advertised one.
      * </p>
      *
      * @param canonicalUri the canonical resource URI, as returned by {@link #resolve}
@@ -164,24 +194,44 @@ public final class CanonicalResourceUri {
 
     /**
      * Returns whether a configured {@code mcp.oauth.audience} value is compatible with the one
-     * {@code resource_metadata} shape this server actually serves.
+     * {@code resource_metadata} shape this server actually serves: it must <em>end in</em> the
+     * literal {@link #MCP_PATH} segment.
      * <p>
-     * {@link #metadataUrl} only implements RFC 9728 &#xa7;3.1's well-known-path insertion for a
-     * resource path of exactly {@code /mcp} -- the one shape {@code McpMetadataApiManager}
-     * matches, since widening its exact-match {@code matches()} to an unbounded set of paths
-     * would conflict with the very guarantee that method exists to give (registration order
-     * across plugins is not deterministic, so a broad match risks shadowing something else). A
-     * configured audience whose path is not {@code /mcp} -- e.g. {@code
-     * https://host/api/mcp} -- would make {@link #metadataUrl} produce a URL nothing serves, so
-     * a caller must refuse to treat that configuration as usable rather than silently pointing
-     * every challenge at a 404.
+     * <b>Ending in {@code /mcp} is the whole requirement -- leading path segments are supported
+     * and expected.</b> {@link #metadataUrl} replaces only the trailing {@code /mcp}, preserving
+     * whatever precedes it, and {@code McpMetadataApiManager#matches} compares
+     * {@code request.getServletPath()}, which excludes the context path. So {@code
+     * https://host/api/mcp} -- the correct RFC 8707 resource identifier for a Fess deployed under
+     * the context path {@code /api} ({@code FESS_CONTEXT_PATH} / {@code -Dfess.context.path}), or
+     * behind a reverse proxy mounting it at a subpath -- yields {@code
+     * https://host/api/.well-known/oauth-protected-resource/mcp}, which that manager <em>does</em>
+     * serve. Such a value is compatible, and this method must keep accepting it.
+     * </p>
+     * <p>
+     * <b>Do not tighten this to an exact-path match.</b> It has been reported twice as a bug that
+     * this accepts {@code https://host/api/mcp}; it is not one, in either direction. Rejecting it
+     * would make every context-path deployment's {@code oauth} configuration "unusable", and the
+     * consequence of "unusable" here is not a loud failure but
+     * {@code McpApiManager#getAuthenticator} falling back to {@code NoneAuthenticator} -- i.e.
+     * silently serving {@code /mcp} anonymously to a deployment that had configured OAuth
+     * correctly. Turning a correct configuration into an authentication bypass is far worse than
+     * the 404-on-a-mistyped-audience this check exists to prevent. README's {@code
+     * mcp.oauth.audience} entries and {@code McpApiManager}'s startup ERROR string both state the
+     * same "must end in {@code /mcp}" contract; all four must be changed together or not at all.
+     * </p>
+     * <p>
+     * What is actually excluded is a value ending anywhere <em>else</em> -- {@code
+     * https://host/api/mcp2}, {@code https://host}, {@code urn:fess-resource} -- for which
+     * {@link #metadataUrl} produces a URL nothing serves, so a caller must refuse to treat that
+     * configuration as usable rather than silently pointing every challenge at a 404.
      * </p>
      *
      * @param audience the raw {@code mcp.oauth.audience} configuration value; blank is always
      *            compatible, since the derived (non-configured) case in {@link #resolve} always
      *            ends in {@code /mcp} by construction
      * @return {@code true} when {@code audience} is blank or, once normalised, ends with the
-     *         literal {@code /mcp} path segment
+     *         literal {@code /mcp} path segment -- with or without further path segments before
+     *         it
      */
     public static boolean isCompatibleAudience(final String audience) {
         return StringUtil.isBlank(audience) || normalize(audience).endsWith(MCP_PATH);

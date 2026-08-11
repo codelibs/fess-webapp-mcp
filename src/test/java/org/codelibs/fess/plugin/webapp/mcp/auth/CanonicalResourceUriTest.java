@@ -176,6 +176,23 @@ public class CanonicalResourceUriTest {
     }
 
     @Test
+    public void testMetadataUrlKeepsAContextPathPrefix() {
+        // A Fess deployed under a non-root context path (FESS_CONTEXT_PATH / -Dfess.context.path),
+        // or behind a proxy mounting it at a subpath, legitimately identifies as
+        // https://host/api/mcp -- so the well-known URL must be built under that same /api prefix.
+        //
+        // This is a DELIBERATE deviation from RFC 9728 §3.1, which would host-root the well-known
+        // path as https://fess.example.com/.well-known/oauth-protected-resource/api/mcp. That URL
+        // lies above the servlet context and Fess cannot serve it at all under a context path,
+        // whereas the prefix-preserving form below IS served: McpMetadataApiManager#matches()
+        // compares getServletPath(), which excludes the context path, so this URL arrives there as
+        // the literal /.well-known/oauth-protected-resource/mcp it matches on. The two forms
+        // coincide at the root context, so the deviation is visible only to subpath deployments.
+        assertEquals("https://fess.example.com/api/.well-known/oauth-protected-resource/mcp",
+                CanonicalResourceUri.metadataUrl("https://fess.example.com/api/mcp"));
+    }
+
+    @Test
     public void testMetadataUrlOnAnUncompatibleAudienceIsNotAContractThisTestPinsAsCorrect() {
         // metadataUrl() itself is a pure string transform with no validation of its own -- for an
         // audience whose path is not /mcp, it produces a URL nothing serves (a real bug the
@@ -203,7 +220,24 @@ public class CanonicalResourceUriTest {
     @Test
     public void testCompatibleAudienceAcceptsAnMcpSuffixedValue() {
         assertTrue(CanonicalResourceUri.isCompatibleAudience("https://fess.example.com/mcp"));
-        assertTrue(CanonicalResourceUri.isCompatibleAudience("https://fess.example.com/api/mcp"));
+        // DO NOT "fix" this to assertFalse. It has now been reported twice as a bug that an
+        // audience with a leading path segment is accepted; it is correct, and tightening it would
+        // be a security regression, not a hardening:
+        //
+        //   * /api/mcp is the CORRECT RFC 8707 resource identifier for a Fess running under the
+        //     context path /api (FESS_CONTEXT_PATH / -Dfess.context.path), and metadataUrl() maps
+        //     it to a URL McpMetadataApiManager really does serve -- see
+        //     testMetadataUrlKeepsAContextPathPrefix above, which pins exactly that.
+        //   * "Unusable" is not a loud failure here. isCompatibleAudience feeds
+        //     isUsableConfiguration, which feeds OAuthResourceServerAuthenticator#isUsable(),
+        //     which on false makes McpApiManager#getAuthenticator fall back to NoneAuthenticator
+        //     -- i.e. /mcp silently served ANONYMOUSLY to a deployment that had configured OAuth
+        //     correctly.
+        //
+        // The contract is "must end in /mcp", stated identically in README's mcp.oauth.audience
+        // entries and in McpApiManager's startup ERROR string.
+        assertTrue(CanonicalResourceUri.isCompatibleAudience("https://fess.example.com/api/mcp"),
+                "a context-path deployment's audience must stay usable -- refusing it falls back to anonymous access");
     }
 
     @Test
@@ -214,9 +248,11 @@ public class CanonicalResourceUriTest {
 
     @Test
     public void testCompatibleAudienceRejectsANonMcpPath() {
-        // The exact bug the reviewer found: an audience whose path is not /mcp would make every
-        // challenge advertise a resource_metadata URL McpMetadataApiManager#matches() never
-        // serves (it is an exact match on two fixed literal paths).
+        // The complement of the test above: what is excluded is an audience ending in something
+        // OTHER than the /mcp segment. metadataUrl() would then leave the path untouched and just
+        // append the well-known suffix, producing a URL McpMetadataApiManager#matches() never
+        // serves (it is an exact match, on the servlet path, against two fixed literals) -- so
+        // every challenge would advertise a guaranteed 404.
         assertFalse(CanonicalResourceUri.isCompatibleAudience("https://fess.example.com/api/mcp2"));
         assertFalse(CanonicalResourceUri.isCompatibleAudience("https://fess.example.com"));
         assertFalse(CanonicalResourceUri.isCompatibleAudience("urn:fess-resource"));

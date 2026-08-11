@@ -17,6 +17,7 @@ package org.codelibs.fess.plugin.webapp.mcp.auth;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -34,6 +35,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import com.nimbusds.jose.JOSEException;
+import com.nimbusds.jose.JOSEObjectType;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.crypto.RSASSASigner;
@@ -145,7 +147,28 @@ public class OAuthAuthenticatorTest {
     }
 
     private static String sign(final JWTClaimsSet.Builder claims, final RSAKey key, final JWSAlgorithm algorithm) throws JOSEException {
-        final SignedJWT jwt = new SignedJWT(new JWSHeader.Builder(algorithm).keyID(key.getKeyID()).build(), claims.build());
+        return sign(claims, key, algorithm, null);
+    }
+
+    /**
+     * Signs with RS256 and an explicit JOSE {@code typ} header. The {@code typ}-less overloads
+     * above deliberately emit no {@code typ} at all, which is why every pre-existing test in this
+     * file exercised only nimbus's "absent {@code typ}" path and none of them could have noticed
+     * that an RFC 9068 {@code at+jwt} access token was being rejected.
+     *
+     * @param claims the claims to sign
+     * @param key the RSA key to sign with
+     * @param type the {@code typ} header value; {@code null} omits the header entirely
+     * @return the serialised JWT
+     * @throws JOSEException if signing fails
+     */
+    private static String sign(final JWTClaimsSet.Builder claims, final RSAKey key, final JOSEObjectType type) throws JOSEException {
+        return sign(claims, key, JWSAlgorithm.RS256, type);
+    }
+
+    private static String sign(final JWTClaimsSet.Builder claims, final RSAKey key, final JWSAlgorithm algorithm, final JOSEObjectType type)
+            throws JOSEException {
+        final SignedJWT jwt = new SignedJWT(new JWSHeader.Builder(algorithm).keyID(key.getKeyID()).type(type).build(), claims.build());
         jwt.sign(new RSASSASigner(key));
         return jwt.serialize();
     }
@@ -162,6 +185,35 @@ public class OAuthAuthenticatorTest {
         final MockletHttpServletRequestImpl request = request();
         request.addHeader("Authorization", "Bearer " + token);
         return request;
+    }
+
+    /**
+     * Authenticates {@code token} against a default (no required scopes) oauth configuration.
+     *
+     * @param token the serialised JWT to present as a bearer credential
+     * @return the resolved principal
+     */
+    private static McpPrincipal authenticate(final String token) {
+        final TestAuthenticator auth = newAuthenticator("");
+        final MockletHttpServletRequestImpl request = bearerRequest(token);
+        return auth.authenticate(request, McpHttpTestSupport.newResponse(request));
+    }
+
+    /**
+     * Asserts that {@code token} is refused with a 401, against the same default configuration
+     * {@link #authenticate} accepts a good token under -- so the only thing that can differ
+     * between the two is the token itself.
+     *
+     * @param token the serialised JWT to present as a bearer credential
+     * @param message the assertion message explaining why this token must be refused
+     */
+    private static void assertRejectedWith401(final String token, final String message) {
+        final TestAuthenticator auth = newAuthenticator("");
+        final MockletHttpServletRequestImpl request = bearerRequest(token);
+        final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
+
+        final McpError error = assertThrows(McpError.class, () -> auth.authenticate(request, response), message);
+        assertEquals(401, error.getHttpStatus(), message);
     }
 
     // ------------------------------------------------------------------
@@ -259,8 +311,11 @@ public class OAuthAuthenticatorTest {
 
     @Test
     public void testOauthModeWithAnAudienceNotEndingInMcpFallsBackToNone() {
-        // The other half of the audience check: a configured mcp.oauth.audience whose path is not
-        // /mcp would make every challenge advertise a resource_metadata URL nothing serves.
+        // The other half of the audience check: a configured mcp.oauth.audience that does not END
+        // IN /mcp would make every challenge advertise a resource_metadata URL nothing serves.
+        // Note the value below is /api/mcp2, not /api/mcp -- a leading path segment is perfectly
+        // valid (it is what a context-path deployment uses); only the final segment matters. See
+        // CanonicalResourceUriTest#testCompatibleAudienceAcceptsAnMcpSuffixedValue.
         final TestAuthenticator auth = usableConfig();
         auth.properties.put("mcp.oauth.audience", "https://fess.example.com/api/mcp2");
         assertFalse(auth.isUsable());
@@ -379,6 +434,68 @@ public class OAuthAuthenticatorTest {
                 "a Host-header-spoofed audience must never be accepted, even though the token's iss/sig/exp are all "
                         + "genuinely valid for that spoofed resource");
         assertEquals(401, error.getHttpStatus());
+    }
+
+    // ------------------------------------------------------------------
+    // RFC 9068 §4 "typ": at+jwt / application/at+jwt must be accepted, and the two values that
+    // were already accepted before the typ verifier was installed must stay accepted.
+    // ------------------------------------------------------------------
+
+    @Test
+    public void testRfc9068AccessTokenTypIsAccepted() throws Exception {
+        // RFC 9068 §4: "The resource server MUST verify that the "typ" header value is "at+jwt"
+        // or "application/at+jwt" and reject tokens carrying any other value." Nimbus's default
+        // when no JWS type verifier is set is DefaultJOSEObjectTypeVerifier.JWT, which allows
+        // ONLY "JWT" or an absent typ -- i.e. it rejects precisely the value the RFC mandates for
+        // a JWT access token. Every other token test in this file signs without a typ header, so
+        // nothing here covered this until now.
+        final String token = sign(validClaims(), signingKey, new JOSEObjectType("at+jwt"));
+        assertEquals("user-123", authenticate(token).getSubject(), "RFC 9068 §4 mandates at+jwt on a JWT access token");
+    }
+
+    @Test
+    public void testRfc9068LongFormAccessTokenTypIsAccepted() throws Exception {
+        // The other spelling RFC 9068 §4 mandates, in its media-type long form.
+        final String token = sign(validClaims(), signingKey, new JOSEObjectType("application/at+jwt"));
+        assertEquals("user-123", authenticate(token).getSubject(), "RFC 9068 §4 mandates application/at+jwt equally");
+    }
+
+    @Test
+    public void testTypIsMatchedCaseInsensitively() throws Exception {
+        // JOSEObjectType#equals compares ignoring case, so an authorization server that emits
+        // "AT+JWT" is accepted too. Pinned because the allowed set is written in lower case and a
+        // future switch to a case-SENSITIVE membership test would silently start 401ing such an AS.
+        final String token = sign(validClaims(), signingKey, new JOSEObjectType("AT+JWT"));
+        assertEquals("user-123", authenticate(token).getSubject());
+    }
+
+    @Test
+    public void testAbsentTypIsStillAccepted() throws Exception {
+        // The compatibility half of the fix, and the reason going fully strict (at+jwt only) is
+        // not viable: this is what the pre-fix default already accepted, and what a large share of
+        // real access tokens carry.
+        final String token = sign(validClaims(), signingKey, (JOSEObjectType) null);
+        assertEquals("user-123", authenticate(token).getSubject(), "a token with no typ header at all must stay acceptable");
+    }
+
+    @Test
+    public void testPlainJwtTypIsStillAccepted() throws Exception {
+        // Entra ID, Auth0, Okta and a default-configured Keycloak all mint ACCESS tokens with
+        // typ: JWT, so narrowing the allowed set to at+jwt alone would 401 most real deployments.
+        final String token = sign(validClaims(), signingKey, JOSEObjectType.JWT);
+        assertEquals("user-123", authenticate(token).getSubject(), "typ: JWT is what most real authorization servers emit");
+    }
+
+    @Test
+    public void testTypOutsideTheAllowedSetIsStillRejected() throws Exception {
+        // The allowed set is widened, not opened: a JWT whose typ declares it to be something
+        // other than an access token must not be usable as one. All three below are signed by the
+        // right key with a valid iss/aud/exp, so typ is the only thing that can reject them.
+        assertRejectedWith401(sign(validClaims(), signingKey, new JOSEObjectType("secevent+jwt")),
+                "an RFC 8417 security event token is not an access token");
+        assertRejectedWith401(sign(validClaims(), signingKey, new JOSEObjectType("dpop+jwt")),
+                "an RFC 9449 DPoP proof is not an access token");
+        assertRejectedWith401(sign(validClaims(), signingKey, new JOSEObjectType("ID_TOKEN")), "an arbitrary typ is not an access token");
     }
 
     // ------------------------------------------------------------------
@@ -598,9 +715,69 @@ public class OAuthAuthenticatorTest {
     public void testDefaultJwksCacheSecondsLiteral() {
         // Real body of getJwksCacheSeconds(), exercised container-free the same way
         // McpApiManager's own getAuthMode() default is: via the getSystemProperty seam, not by
-        // overriding getJwksCacheSeconds() itself.
+        // overriding getJwksCacheSeconds() itself. 300 is comfortably above the 60s floor below,
+        // so the shipped default is never clamped.
         final TestAuthenticator auth = new TestAuthenticator();
         assertEquals(300, auth.getJwksCacheSeconds());
+    }
+
+    // ------------------------------------------------------------------
+    // mcp.oauth.jwks.cache.seconds: clamped to nimbus's own lower bound.
+    // ------------------------------------------------------------------
+
+    @Test
+    public void testSubFloorJwksCacheSecondsIsClampedToSixty() {
+        // 60 is not a taste judgement, it is the smallest value JWKSourceBuilder can actually
+        // build the source newProcessor(String) asks for: RefreshAheadCachingJWKSetSource rejects
+        // a TTL below refreshAheadTime (30s) + cacheRefreshTimeout (30s), and JWKSourceBuilder
+        // #build() separately rejects a TTL <= the rate limiter's 30s minimum interval. The three
+        // values below straddle both of those bounds (<=30, 31..59, and just under 60).
+        final TestAuthenticator auth = new TestAuthenticator();
+        auth.properties.put("mcp.oauth.jwks.cache.seconds", "5");
+        assertEquals(60, auth.getJwksCacheSeconds(), "a TTL under the rate limiter's 30s interval must be clamped, not passed through");
+        auth.properties.put("mcp.oauth.jwks.cache.seconds", "45");
+        assertEquals(60, auth.getJwksCacheSeconds(), "a TTL that clears the rate limiter but not refresh-ahead + timeout must clamp too");
+        auth.properties.put("mcp.oauth.jwks.cache.seconds", "59");
+        assertEquals(60, auth.getJwksCacheSeconds(), "59 is one second short of buildable");
+    }
+
+    @Test
+    public void testJwksCacheSecondsAtOrAboveTheFloorIsUsedAsConfigured() {
+        // Positive control: the clamp is a floor, not a fixed value -- an operator who asks for a
+        // longer cache lifetime still gets exactly what they asked for.
+        final TestAuthenticator auth = new TestAuthenticator();
+        auth.properties.put("mcp.oauth.jwks.cache.seconds", "60");
+        assertEquals(60, auth.getJwksCacheSeconds(), "exactly the floor is buildable and must pass through unchanged");
+        auth.properties.put("mcp.oauth.jwks.cache.seconds", "3600");
+        assertEquals(3600, auth.getJwksCacheSeconds());
+    }
+
+    @Test
+    public void testSubFloorJwksCacheSecondsStillProducesAWorkingProcessor() throws Exception {
+        // The reason the clamp exists, exercised through the REAL newProcessor(String) -- the one
+        // production path that consumes getJwksCacheSeconds(). Without the clamp this call throws
+        // an unchecked IllegalStateException ("rate limiting min time interval must be less than
+        // the cache time-to-live") out of JWKSourceBuilder#build(); getProcessor() catches only
+        // MalformedURLException, so it would escape into authenticate()'s broad RuntimeException
+        // clause and be laundered into a 401 invalid_token on EVERY request, permanently --
+        // cachedProcessor is assigned only after a successful build, so each request retries and
+        // fails identically. No network happens here: JWKSourceBuilder resolves the URL lazily,
+        // on the first key lookup, which this test never performs.
+        final TestAuthenticator auth = new TestAuthenticator();
+        auth.properties.put("mcp.oauth.jwks.cache.seconds", "5");
+        assertNotNull(auth.newProcessor("https://idp.example.com/jwks"),
+                "a too-small cache lifetime must degrade to the floor, never to a broken processor");
+    }
+
+    @Test
+    public void testSubFloorJwksCacheSecondsDoesNotDisableAuthentication() {
+        // Deliberately NOT enforced through isUsable(): a false there makes
+        // McpApiManager#getAuthenticator fall back to NoneAuthenticator, i.e. anonymous access to
+        // /mcp. Turning a bad cache TTL into an authentication BYPASS would be far worse than the
+        // 401 it replaces, so the clamp must leave usability untouched.
+        final TestAuthenticator auth = usableConfig();
+        auth.properties.put("mcp.oauth.jwks.cache.seconds", "1");
+        assertTrue(auth.isUsable(), "a sub-floor jwks cache lifetime must never make oauth mode fall back to anonymous access");
     }
 
     @Test
