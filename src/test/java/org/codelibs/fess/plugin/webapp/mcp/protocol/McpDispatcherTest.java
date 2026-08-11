@@ -16,6 +16,8 @@
 package org.codelibs.fess.plugin.webapp.mcp.protocol;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -113,12 +115,62 @@ public class McpDispatcherTest {
 
     @Test
     public void testPingIsMethodNotFoundNotSpecialCased() {
-        // ping was removed outright in 2026-07-28 (not even special-cased like initialize).
+        // ping was removed outright in 2026-07-28 (not even special-cased like initialize):
+        // README documents it as gone with no replacement, so there is no version to fall
+        // forward to and nothing a supportedVersions payload could usefully tell that caller.
         final McpDispatcher dispatcher = new McpDispatcher(List.of());
 
         final McpError error = assertThrows(McpError.class, () -> dispatcher.dispatch(contextFor("ping")));
 
         assertEquals(ErrorCode.MethodNotFound, error.getErrorCode());
         assertEquals(404, error.getHttpStatus());
+        assertNull(error.getData(), "the supportedVersions payload is initialize's alone");
+    }
+
+    // ------------------------------------------------------------------
+    // Retired-method recognition. McpApiManager#process consults this to answer initialize/ping
+    // BEFORE HeaderValidator.requirePresent -- a client old enough to still send them sends
+    // neither MCP-Protocol-Version nor Mcp-Method, so without that short-circuit the diagnostic
+    // above is unreachable by exactly the clients it was written for.
+    // ------------------------------------------------------------------
+
+    @Test
+    public void testRetiredMethodsAreRecognised() {
+        final McpDispatcher dispatcher = new McpDispatcher(List.of(new FixedHandler("tools/list", Map.of())));
+
+        assertTrue(dispatcher.isRetired("initialize"), "initialize must be answerable before header validation");
+        assertTrue(dispatcher.isRetired("ping"), "ping must be answerable before header validation");
+        assertFalse(dispatcher.isRetired("tools/list"), "a live method must go through the full pipeline");
+        assertFalse(dispatcher.isRetired("no/such/method"),
+                "a merely unknown method must NOT skip header validation: its caller is a modern client that got the "
+                        + "method name wrong, and -32020 for a missing header is the correct answer for one");
+    }
+
+    @Test
+    public void testARegisteredHandlerBeatsTheRetiredList() {
+        // Fail-safe for the short-circuit: if a future revision brings one of these back as a
+        // real method, wiring the handler in must be the only change needed. A registration-blind
+        // membership test would keep answering 404 and silently shadow the new handler.
+        final McpDispatcher dispatcher = new McpDispatcher(List.of(new FixedHandler("ping", Map.of("pong", Boolean.TRUE))));
+
+        assertFalse(dispatcher.isRetired("ping"));
+        assertEquals(Boolean.TRUE, dispatcher.dispatch(contextFor("ping")).get("pong"));
+    }
+
+    @Test
+    public void testMethodNotFoundIsTheSharedDefinitionOfTheDiagnostic() {
+        // McpApiManager throws this static directly for a retired method rather than duplicating
+        // the message and payload at its own call site, so the two paths cannot answer the same
+        // method differently. Pinning it here is what makes that sharing meaningful.
+        final McpError initialize = McpDispatcher.methodNotFound(McpDispatcher.METHOD_INITIALIZE);
+        assertEquals(404, initialize.getHttpStatus());
+        assertEquals(ErrorCode.MethodNotFound, initialize.getErrorCode());
+        assertTrue(initialize.getMessage().contains(McpConstants.PROTOCOL_VERSION), initialize.getMessage());
+        assertEquals(List.copyOf(McpConstants.SUPPORTED_PROTOCOL_VERSIONS), initialize.getData().get("supportedVersions"));
+
+        final McpError ping = McpDispatcher.methodNotFound(McpDispatcher.METHOD_PING);
+        assertEquals(404, ping.getHttpStatus());
+        assertEquals(ErrorCode.MethodNotFound, ping.getErrorCode());
+        assertNull(ping.getData());
     }
 }

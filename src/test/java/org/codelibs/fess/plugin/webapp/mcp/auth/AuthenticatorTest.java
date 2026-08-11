@@ -102,6 +102,15 @@ public class AuthenticatorTest {
         }
 
         @Override
+        protected String resolveClientIp(final HttpServletRequest request) {
+            // The real implementation delegates to Fess's RateLimitHelper via ComponentUtil, so
+            // it needs a live DI container; this suite is container-free. Returning getRemoteAddr()
+            // reproduces exactly what RateLimitHelper does for a request that did not arrive
+            // through a configured trusted proxy, which is the case these tests describe.
+            return request.getRemoteAddr();
+        }
+
+        @Override
         protected boolean isEnabled() {
             // no-op: the real implementation reads mcp.enabled from the container. Without this
             // override, process() would throw resolving ComponentUtil before authenticate() ever

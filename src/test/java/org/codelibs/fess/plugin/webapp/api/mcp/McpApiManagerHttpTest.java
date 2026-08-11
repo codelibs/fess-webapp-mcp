@@ -21,6 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -28,6 +30,7 @@ import java.util.Set;
 
 import org.codelibs.fess.plugin.webapp.mcp.McpConstants;
 import org.codelibs.fess.plugin.webapp.mcp.RateLimiter;
+import org.codelibs.fess.plugin.webapp.mcp.auth.OAuthResourceServerAuthenticator;
 import org.codelibs.fess.plugin.webapp.mcp.handler.McpMethodHandler;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpDispatcher;
@@ -35,7 +38,10 @@ import org.dbflute.utflute.mocklet.MockletHttpServletRequestImpl;
 import org.dbflute.utflute.mocklet.MockletHttpServletResponseImpl;
 import org.junit.jupiter.api.Test;
 
+import jakarta.servlet.ReadListener;
+import jakarta.servlet.ServletInputStream;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletRequestWrapper;
 import jakarta.servlet.http.HttpServletResponse;
 
 /**
@@ -46,6 +52,11 @@ public class McpApiManagerHttpTest {
 
     /** Test double: supplies a canned body and never touches ComponentUtil. */
     static class TestManager extends McpApiManager {
+        /**
+         * The canned body, or {@code null} to let {@code McpApiManager#readRequestBody}'s real
+         * (bounded) body run against the request's own input stream -- see
+         * {@link McpApiManagerHttpTest#postStream}.
+         */
         String body = "";
         boolean enabled = true;
         int maxBytes = 1_048_576;
@@ -53,12 +64,26 @@ public class McpApiManagerHttpTest {
 
         @Override
         protected String readRequestBody(final HttpServletRequest request) throws IOException {
-            return body;
+            // A canned body skips the real read entirely, which is what every test in this file
+            // that is not about the read itself wants (the mocklet request has no usable input
+            // stream). A null body opts back in to the production read, so the bounded-read
+            // tests exercise it for real rather than asserting against this stub.
+            return body != null ? body : super.readRequestBody(request);
         }
 
         @Override
         protected void writeHeaders(final HttpServletResponse response) {
             // no-op: the real implementation reads api.json.response.headers from the container
+        }
+
+        @Override
+        protected String resolveClientIp(final HttpServletRequest request) {
+            // The real implementation delegates to Fess's RateLimitHelper via ComponentUtil,
+            // which needs a live DI container; this suite is container-free by design. Falling
+            // back to getRemoteAddr() keeps the key-resolution behaviour these tests actually
+            // exercise (subject-when-authenticated, IP otherwise) while skipping the container.
+            // The trusted-proxy logic itself is Fess's, and is covered by Fess's own tests.
+            return request.getRemoteAddr();
         }
 
         @Override
@@ -116,6 +141,113 @@ public class McpApiManagerHttpTest {
         return McpHttpTestSupport.bodyOf(response);
     }
 
+    /**
+     * Posts a request whose body arrives through a real {@link ServletInputStream}, so
+     * {@code McpApiManager#readRequestBody}'s production body -- the bounded read -- actually
+     * runs.
+     * <p>
+     * {@code MockletHttpServletRequestImpl#getInputStream()} throws
+     * {@code UnsupportedOperationException}, which is why every other test in this file supplies
+     * a canned body through the seam instead; wrapping it is the only way to hand the production
+     * read something to read. The response is still built from the underlying mocklet request,
+     * since that is what {@code MockletHttpServletResponseImpl} expects.
+     * </p>
+     *
+     * @param manager the manager under test; its canned body is cleared so the real read runs
+     * @param in the body stream
+     * @param headers the request headers
+     * @return the response body
+     * @throws Exception if process() throws
+     */
+    private String postStream(final TestManager manager, final ServletInputStream in, final Map<String, String> headers) throws Exception {
+        manager.body = null;
+        final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("POST", "/mcp");
+        headers.forEach(request::addHeader);
+        final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
+        manager.process(new HttpServletRequestWrapper(request) {
+            @Override
+            public ServletInputStream getInputStream() {
+                return in;
+            }
+        }, response, null);
+        lastResponse = response;
+        return McpHttpTestSupport.bodyOf(response);
+    }
+
+    /**
+     * An endless request body: every read hands back another {@code 'x'}, and the stream fails
+     * the test outright once more than {@code failAfter} bytes have been handed out.
+     * <p>
+     * This is what makes "the limit is enforced without buffering the whole body" falsifiable. A
+     * regression to {@code readAllBytes()} against this stream cannot quietly succeed: it either
+     * trips the guard here or never terminates, and either way the 413 assertion fails. A finite
+     * fixture could not distinguish the two implementations at all -- both would end up with the
+     * same bytes and the same status.
+     * </p>
+     */
+    private static final class EndlessBody extends ServletInputStream {
+        private final long failAfter;
+        long delivered;
+
+        EndlessBody(final long failAfter) {
+            this.failAfter = failAfter;
+        }
+
+        @Override
+        public int read() {
+            if (++delivered > failAfter) {
+                throw new AssertionError("the body read must stop after " + failAfter + " bytes, but it asked for byte " + delivered
+                        + " -- the limit is being applied after buffering the whole body, not while reading it");
+            }
+            return 'x';
+        }
+
+        @Override
+        public boolean isFinished() {
+            return false;
+        }
+
+        @Override
+        public boolean isReady() {
+            return true;
+        }
+
+        @Override
+        public void setReadListener(final ReadListener readListener) {
+            throw new UnsupportedOperationException();
+        }
+    }
+
+    /** A finite request body of exactly the given bytes. */
+    private static final class FixedBody extends ServletInputStream {
+        private final byte[] data;
+        private int position;
+
+        FixedBody(final byte[] data) {
+            this.data = data;
+        }
+
+        @Override
+        public int read() {
+            return position < data.length ? data[position++] & 0xff : -1;
+        }
+
+        @Override
+        public boolean isFinished() {
+            return position >= data.length;
+        }
+
+        @Override
+        public boolean isReady() {
+            return true;
+        }
+
+        @Override
+        public void setReadListener(final ReadListener readListener) {
+            throw new UnsupportedOperationException();
+        }
+    }
+
     private Map<String, String> modernHeaders(final String method) {
         return Map.of(McpConstants.HEADER_PROTOCOL_VERSION, "2026-07-28", McpConstants.HEADER_METHOD, method);
     }
@@ -123,6 +255,20 @@ public class McpApiManagerHttpTest {
     private String modernBody(final String method) {
         return "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"" + method + "\",\"params\":{\"_meta\":{"
                 + "\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\"," + "\"io.modelcontextprotocol/clientCapabilities\":{}}}}";
+    }
+
+    /**
+     * A {@link #modernBody} carrying an extra {@code params.pad} string, placed at the very end
+     * of the JSON so that any truncation of the read bytes shows up as a parse failure.
+     *
+     * @param method the JSON-RPC method name
+     * @param pad the padding text
+     * @return the request body
+     */
+    private String paddedBody(final String method, final String pad) {
+        return "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"" + method + "\",\"params\":{\"_meta\":{"
+                + "\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\","
+                + "\"io.modelcontextprotocol/clientCapabilities\":{}},\"pad\":\"" + pad + "\"}}";
     }
 
     @Test
@@ -217,11 +363,70 @@ public class McpApiManagerHttpTest {
         assertTrue(body.contains("-32601"), body);
     }
 
+    // ------------------------------------------------------------------
+    // Retired methods (initialize, ping). The diagnostic McpDispatcher raises for these exists
+    // for pre-2026-07-28 clients, so it has to be reachable BY one -- which means before
+    // HeaderValidator.requirePresent, since a client old enough to call initialize sends none of
+    // the request-metadata headers. Asserting it with modernHeaders() only proves the case that
+    // never needed proving.
+    // ------------------------------------------------------------------
+
+    /** A genuine legacy {@code initialize} call: the pre-2026-07-28 envelope, and no MCP headers at all. */
+    private static final String LEGACY_INITIALIZE_BODY =
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\","
+                    + "\"capabilities\":{},\"clientInfo\":{\"name\":\"legacy-client\",\"version\":\"1.0.0\"}}}";
+
     @Test
-    public void testInitializeNamesTheSupportedVersion() throws Exception {
+    public void testLegacyInitializeWithNoMcpHeadersGetsTheDiagnosticNotAHeaderError() throws Exception {
+        final String body = post(new TestManager(), LEGACY_INITIALIZE_BODY, Map.of());
+
+        assertEquals(404, lastResponse.getStatus(), body);
+        assertTrue(body.contains("-32601"), body);
+        assertFalse(body.contains("-32020"),
+                "a legacy client sends neither MCP-Protocol-Version nor Mcp-Method, so answering it with a header error "
+                        + "sends its operator off adding headers instead of telling them initialize is gone: " + body);
+        assertTrue(body.contains("supportedVersions"), "the diagnostic's whole point is naming what this server does speak: " + body);
+        assertTrue(body.contains("2026-07-28"), body);
+    }
+
+    @Test
+    public void testModernClientCallingInitializeGetsTheSameDiagnostic() throws Exception {
+        // The other side of the same coin: short-circuiting the retired methods early must not
+        // change what a conformant client sees. McpDispatcherTest covers the dispatcher's own
+        // branch directly; this covers the pipeline answering with the identical payload.
         final String body = post(new TestManager(), modernBody("initialize"), modernHeaders("initialize"));
-        assertEquals(404, lastResponse.getStatus());
-        assertTrue(body.contains("2026-07-28"), "legacy clients need this diagnostic: " + body);
+
+        assertEquals(404, lastResponse.getStatus(), body);
+        assertTrue(body.contains("-32601"), body);
+        assertTrue(body.contains("supportedVersions"), body);
+        assertTrue(body.contains("2026-07-28"), body);
+    }
+
+    @Test
+    public void testLegacyPingWithNoMcpHeadersIsMethodNotFoundNotAHeaderError() throws Exception {
+        // ping was retired too, and a client still calling it is just as header-less. README
+        // documents it as a plain -32601 with no replacement, so -- unlike initialize -- it
+        // deliberately carries no supportedVersions payload: there is no version to fall
+        // forward to that would bring ping back.
+        final String body = post(new TestManager(), "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}", Map.of());
+
+        assertEquals(404, lastResponse.getStatus(), body);
+        assertTrue(body.contains("-32601"), body);
+        assertFalse(body.contains("-32020"), body);
+        assertFalse(body.contains("supportedVersions"), "README documents supportedVersions for initialize only: " + body);
+    }
+
+    @Test
+    public void testRetiredMethodSentAsANotificationIsStillAccepted() throws Exception {
+        // Ordering guard for the short-circuit above: the notification check MUST stay ahead of
+        // it. A notification carries no id, no _meta and no headers, and the transport leaves
+        // header requirements for notification POSTs undefined -- answering one with a 404
+        // instead of the 202 would be a protocol regression, and putting the retired-method
+        // check first is exactly how that would happen.
+        final String body = post(new TestManager(), "{\"jsonrpc\":\"2.0\",\"method\":\"ping\"}", Map.of());
+
+        assertEquals(202, lastResponse.getStatus(), body);
+        assertEquals("", body, "202 must have no body");
     }
 
     @Test
@@ -305,12 +510,59 @@ public class McpApiManagerHttpTest {
         assertTrue(responseBody.contains("-32602"), responseBody);
     }
 
+    // ------------------------------------------------------------------
+    // The bounded body read. These drive McpApiManager#readRequestBody's REAL body against a
+    // real ServletInputStream: the seam-based double every other test in this file uses would
+    // make them vacuous, since it returns a String that was never read from anything.
+    // ------------------------------------------------------------------
+
     @Test
-    public void testOversizedBodyIs413() throws Exception {
+    public void testOversizedBodyIs413WithoutBufferingTheWholeBody() throws Exception {
+        // The point of the limit is that an attacker-chosen body size must not decide the
+        // allocation -- this endpoint is reachable unauthenticated in the default
+        // mcp.auth.mode=none, and this read happens before the rate limiter. Asserting the 413
+        // alone would not prove that: reading everything and then measuring it also produces a
+        // 413. EndlessBody is what closes the gap -- it fails the moment the read goes past
+        // max + 1 bytes -- and the delivered-byte assertion pins the exact bound.
         final TestManager manager = new TestManager();
-        manager.maxBytes = 10;
-        final String body = post(manager, modernBody("tools/list"), modernHeaders("tools/list"));
+        manager.maxBytes = 64;
+        final EndlessBody in = new EndlessBody(65);
+
+        final String body = postStream(manager, in, modernHeaders("tools/list"));
+
         assertEquals(413, lastResponse.getStatus(), body);
+        assertTrue(body.contains("-32600"), body);
+        assertTrue(body.contains("mcp.request.max.bytes"), "the message must name the property an operator has to raise: " + body);
+        assertEquals(65L, in.delivered,
+                "the read must stop exactly one byte past the limit: fewer and a body of exactly max bytes could not be "
+                        + "told apart from an oversized one, more and the limit is not bounding the allocation");
+    }
+
+    @Test
+    public void testBodyOfExactlyTheLimitIsAcceptedAndTheLimitCountsBytesNotCharacters() throws Exception {
+        // Two off-by-one hazards in one fixture. The body carries a multi-byte UTF-8 run, so its
+        // byte length and its String length differ: an implementation that measured the decoded
+        // String would let through up to three times the configured bytes.
+        final String json = paddedBody("no/such/method", "日本語");
+        final byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
+        assertEquals(json.length() + 6, bytes.length, "the fixture must actually be multi-byte, or the rest of this test proves nothing");
+
+        // Exactly the limit is within it, and the body reaches the dispatcher decoded intact --
+        // a read that stopped short, or that decoded a max+1 probe buffer, would have truncated
+        // the JSON and surfaced as a -32700 parse error instead of a -32601 method-not-found.
+        final TestManager atLimit = new TestManager();
+        atLimit.maxBytes = bytes.length;
+        final String accepted = postStream(atLimit, new FixedBody(bytes), modernHeaders("no/such/method"));
+        assertEquals(404, lastResponse.getStatus(), accepted);
+        assertTrue(accepted.contains("-32601"), "a body of exactly max bytes must be read, decoded and dispatched: " + accepted);
+
+        // One byte over the limit is over it. This is also the byte-vs-character guard: the
+        // limit here is still six bytes ABOVE the body's String length, so an implementation
+        // counting characters would wrongly accept it.
+        final TestManager overLimit = new TestManager();
+        overLimit.maxBytes = bytes.length - 1;
+        final String rejected = postStream(overLimit, new FixedBody(bytes), modernHeaders("no/such/method"));
+        assertEquals(413, lastResponse.getStatus(), rejected);
     }
 
     @Test
@@ -378,6 +630,26 @@ public class McpApiManagerHttpTest {
         final TestManager manager = new TestManager();
         post(manager, modernBody("completion/complete"), modernHeaders("completion/complete"));
         assertTrue(manager.rateLimiterCalled, "completion/complete must consult the rate limiter");
+    }
+
+    @Test
+    public void testResourcesReadConsultsRateLimiter() throws Exception {
+        // resources/read is not one of the two methods the spec names, but it is the same
+        // backend work under a different name: fess://document/<id> makes the identical
+        // SearchHelper#getDocumentByDocId call the rate-limited get_document tool makes, and
+        // fess://index/stats runs a live cluster/JVM stats collection. Leaving it unlimited made
+        // Mcp-Method: resources/read an unmetered, unauthenticated document-fetch channel that
+        // simply routed around the tools/call limit.
+        final TestManager manager = new TestManager();
+        final String body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/read\",\"params\":{\"_meta\":{"
+                + "\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\","
+                + "\"io.modelcontextprotocol/clientCapabilities\":{}},\"uri\":\"fess://document/abc123\"}}";
+        final Map<String, String> headers = Map.of(McpConstants.HEADER_PROTOCOL_VERSION, "2026-07-28", McpConstants.HEADER_METHOD,
+                "resources/read", McpConstants.HEADER_NAME, "fess://document/abc123");
+
+        post(manager, body, headers);
+
+        assertTrue(manager.rateLimiterCalled, "resources/read must consult the rate limiter");
     }
 
     @Test
@@ -517,9 +789,119 @@ public class McpApiManagerHttpTest {
                         + "silently disable rate limiting, since every caller would always see an empty, unshared counter");
     }
 
+    // ------------------------------------------------------------------
+    // I8: the effective authenticator is re-resolved on EVERY request (getAuthenticator() reads
+    // mcp.auth.mode and the mcp.oauth.* keys each time), and Fess's DynamicProperties re-reads
+    // its backing file within seconds of an mtime change -- so a config edit can flip /mcp from
+    // "401 for everyone" to "200 for anyone" with no restart. warnIfAuthenticationIsDisabled()
+    // is only wired to @PostConstruct, so before this it happened in total silence.
+    // ------------------------------------------------------------------
+
+    /** Test double: records each reported authentication-posture change instead of logging it. */
+    static class AuthStateRecordingManager extends TestManager {
+        final List<String> reported = new ArrayList<>();
+
+        @Override
+        protected void logAuthState(final AuthState state, final String authMode, final AuthState previous) {
+            reported.add(previous + "->" + state);
+        }
+    }
+
+    @Test
+    public void testRuntimeAuthModeChangeIsReportedOnceAndNotPerRequest() throws Exception {
+        final AuthStateRecordingManager manager = new AuthStateRecordingManager();
+        manager.authMode = McpApiManager.AUTH_MODE_NONE;
+
+        post(manager, modernBody("tools/list"), modernHeaders("tools/list"));
+        assertEquals(List.of("null->NONE"), manager.reported, "the first resolution must be reported");
+
+        post(manager, modernBody("tools/list"), modernHeaders("tools/list"));
+        post(manager, modernBody("tools/list"), modernHeaders("tools/list"));
+        assertEquals(List.of("null->NONE"), manager.reported,
+                "an unchanged posture must never be re-reported: this endpoint is unauthenticated in exactly the mode "
+                        + "being warned about, so a per-request WARN of several hundred bytes is a log-flood amplifier");
+
+        // The hazard itself: mcp.auth.mode edited on a running server.
+        manager.authMode = McpApiManager.AUTH_MODE_FESS_TOKEN;
+        post(manager, modernBody("tools/list"), modernHeaders("tools/list"));
+        assertEquals(List.of("null->NONE", "NONE->FESS_TOKEN"), manager.reported, "a runtime change of posture must be reported");
+
+        post(manager, modernBody("tools/list"), modernHeaders("tools/list"));
+        assertEquals(List.of("null->NONE", "NONE->FESS_TOKEN"), manager.reported, "and then go quiet again in the new steady state");
+
+        // The direction that actually matters: authentication silently switching itself off.
+        manager.authMode = McpApiManager.AUTH_MODE_NONE;
+        post(manager, modernBody("tools/list"), modernHeaders("tools/list"));
+        assertEquals(List.of("null->NONE", "NONE->FESS_TOKEN", "FESS_TOKEN->NONE"), manager.reported,
+                "/mcp dropping from 401-for-everyone to 200-for-anyone must not happen silently");
+    }
+
+    @Test
+    public void testOauthFallingBackToNoneIsADistinctStateFromNone() throws Exception {
+        // mcp.auth.mode=oauth with an incomplete configuration behaves exactly like none, so
+        // collapsing it onto NONE would look like "no change" and report nothing -- yet it is
+        // the single most important case to report, because the operator believes they turned
+        // authentication ON. A separate state is what keeps that transition visible.
+        final AuthStateRecordingManager manager = new AuthStateRecordingManager() {
+            @Override
+            protected OAuthResourceServerAuthenticator getOAuthAuthenticator() {
+                // no-op: the real isUsable() reads mcp.oauth.issuer via ComponentUtil
+                return new OAuthResourceServerAuthenticator() {
+                    @Override
+                    public boolean isUsable() {
+                        return false;
+                    }
+                };
+            }
+        };
+        manager.authMode = McpApiManager.AUTH_MODE_NONE;
+        post(manager, modernBody("tools/list"), modernHeaders("tools/list"));
+
+        manager.authMode = McpApiManager.AUTH_MODE_OAUTH;
+        post(manager, modernBody("tools/list"), modernHeaders("tools/list"));
+
+        assertEquals(List.of("null->NONE", "NONE->OAUTH_UNUSABLE"), manager.reported,
+                "an unusable oauth configuration must be reported even though it behaves identically to none");
+    }
+
     // NOTE: do NOT assert assertNull(response.getHeader("Location")) as a sendError guard.
     // MockletHttpServletResponseImpl.sendRedirect() is a no-op and sendError(int) delegates
     // straight to setStatus(int), so that assertion can never fail regardless of what
     // production does. The real guard is the source-scanning test added in Task 2
     // (SendErrorProhibitedTest); do not re-introduce a runtime Location assertion anywhere.
+    @Test
+    public void testRateLimitKeyComesFromTheClientIpSeamNotRemoteAddr() {
+        // Behind nginx or Apache, getRemoteAddr() is the proxy's address for every caller, so
+        // keying on it directly collapses all anonymous callers -- and mcp.auth.mode=none, the
+        // default, makes every caller anonymous -- into a single bucket. One caller spending the
+        // per-minute budget then 429s every other client of the same Fess instance. Fess ships no
+        // RemoteIpValve, so that is the default deployment, not an edge case.
+        //
+        // The production seam delegates to Fess's RateLimitHelper, which honours X-Forwarded-For
+        // and X-Real-IP only when the peer is listed in rate.limit.trusted.proxies. This pins that
+        // resolveRateLimitKey really goes through that seam: reverting it to request.getRemoteAddr()
+        // reintroduces the shared bucket, and nothing else in the suite would notice.
+        final TestManager manager = new TestManager() {
+            @Override
+            protected String resolveClientIp(final HttpServletRequest request) {
+                return "203.0.113.9";
+            }
+        };
+        assertEquals("203.0.113.9", manager.resolveRateLimitKey(McpHttpTestSupport.newRequest("POST", "/mcp"), new McpCallContext()),
+                "the rate-limit key must come from resolveClientIp, not getRemoteAddr");
+    }
+
+    @Test
+    public void testRateLimitKeyFallsBackToUnknownWhenTheClientIpIsNull() {
+        // RateLimiter is built on ConcurrentHashMap, which rejects null keys outright, so an
+        // unresolvable IP must become a literal rather than propagate as null.
+        final TestManager manager = new TestManager() {
+            @Override
+            protected String resolveClientIp(final HttpServletRequest request) {
+                return null;
+            }
+        };
+        assertEquals("unknown", manager.resolveRateLimitKey(McpHttpTestSupport.newRequest("POST", "/mcp"), new McpCallContext()),
+                "a null client IP must not reach ConcurrentHashMap");
+    }
 }

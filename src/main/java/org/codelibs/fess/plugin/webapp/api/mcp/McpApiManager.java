@@ -23,6 +23,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import org.apache.logging.log4j.LogManager;
@@ -85,6 +86,13 @@ public class McpApiManager extends BaseApiManager {
      * instead of spelled out as a bare literal at the throw site.
      */
     private static final int HTTP_TOO_MANY_REQUESTS = 429;
+
+    /**
+     * The JSON-RPC methods {@link #enforceRateLimit} charges a token for: every method that
+     * reaches a Fess backend. See that method's Javadoc for why {@code resources/read} belongs
+     * here alongside the two the spec names, and why the list methods do not.
+     */
+    private static final Set<String> RATE_LIMITED_METHODS = Set.of("tools/call", "completion/complete", "resources/read");
 
     /**
      * {@code mcp.auth.mode}'s default value: authenticate nobody, reject nobody. Named (not a
@@ -164,6 +172,75 @@ public class McpApiManager extends BaseApiManager {
     private final OAuthResourceServerAuthenticator oauthAuthenticator = new OAuthResourceServerAuthenticator();
 
     /**
+     * The last {@link AuthState} {@link #getAuthenticator()} resolved, so a change can be told
+     * apart from a repeat.
+     * <p>
+     * {@code null} until either {@link #register()} seeds it at startup or the first request
+     * resolves one. An {@link AtomicReference} rather than a plain {@code volatile} field
+     * because two concurrent requests must not both report the same transition: whichever one
+     * wins {@link AtomicReference#getAndSet} owns the log line. The steady-state cost is a
+     * single volatile read (see {@link #noteAuthState}) -- no write, no allocation, no lock --
+     * which matters because this is consulted on every single request.
+     * </p>
+     */
+    private final AtomicReference<AuthState> lastAuthState = new AtomicReference<>();
+
+    /**
+     * The effective authentication posture {@code mcp.auth.mode} resolves to, as opposed to the
+     * raw configured string.
+     * <p>
+     * Exists because "is this endpoint authenticated?" is not a property of the mode string
+     * alone: {@code oauth} means two entirely different things depending on whether
+     * {@link OAuthResourceServerAuthenticator#isUsable()} agrees, and one of them is
+     * indistinguishable in behaviour from {@code none}. Collapsing the raw string onto these
+     * four states is what lets {@link #noteAuthState} report a genuine change in posture and
+     * stay silent on a cosmetic one -- a typo'd mode string and the literal {@code none} are the
+     * same state, so flipping between them is correctly not worth a log line, while
+     * {@code oauth} becoming unusable is.
+     * </p>
+     */
+    protected enum AuthState {
+
+        /** {@link NoneAuthenticator}: the default, and every unrecognised mode string. */
+        NONE(false),
+
+        /** {@link FessTokenAuthenticator}: a Fess access token is required. */
+        FESS_TOKEN(true),
+
+        /** {@link OAuthResourceServerAuthenticator}, with a configuration it accepts. */
+        OAUTH(true),
+
+        /**
+         * {@code mcp.auth.mode=oauth} with a configuration {@link
+         * OAuthResourceServerAuthenticator#isUsable()} rejects: behaves exactly like
+         * {@link #NONE}, but is a distinct state so that falling into it is reported rather
+         * than mistaken for an operator deliberately choosing {@code none}.
+         */
+        OAUTH_UNUSABLE(false);
+
+        /** Whether this state requires a credential of the caller. */
+        private final boolean authenticated;
+
+        /**
+         * Creates a state.
+         *
+         * @param authenticated whether this state requires a credential
+         */
+        AuthState(final boolean authenticated) {
+            this.authenticated = authenticated;
+        }
+
+        /**
+         * Returns whether this state requires a credential of the caller.
+         *
+         * @return true when callers must authenticate; false when every caller is anonymous
+         */
+        public boolean isAuthenticated() {
+            return authenticated;
+        }
+    }
+
+    /**
      * Creates a new MCP API manager with the default path prefix "/mcp".
      */
     public McpApiManager() {
@@ -192,9 +269,9 @@ public class McpApiManager extends BaseApiManager {
     }
 
     /**
-     * Emits a one-time startup WARN when {@code mcp.auth.mode} resolves to the default,
-     * unauthenticated {@code none} mode -- and, when {@code mcp.auth.mode=oauth} but
-     * {@link OAuthResourceServerAuthenticator#isUsable()} is {@code false}, a one-time startup
+     * Reports the startup authentication posture: a WARN when {@code mcp.auth.mode} resolves to
+     * the default, unauthenticated {@code none} behaviour -- and, when {@code mcp.auth.mode=oauth}
+     * but {@link OAuthResourceServerAuthenticator#isUsable()} is {@code false}, a more severe
      * ERROR explaining why.
      * <p>
      * The MCP Streamable HTTP transport's Security Considerations say a server SHOULD
@@ -209,23 +286,119 @@ public class McpApiManager extends BaseApiManager {
      * {@code authorization_servers} to be non-empty), so an operator who intended to turn OAuth
      * on needs to know their configuration was rejected, not just that authentication is off.
      * </p>
+     * <p>
+     * This also <em>seeds</em> {@link #lastAuthState}, which is the reason it shares
+     * {@link #logAuthState} with the per-request path rather than logging inline: without the
+     * seed, the first request after startup would resolve the same state from a {@code null}
+     * baseline and report it a second time.
+     * </p>
      */
     protected void warnIfAuthenticationIsDisabled() {
         final String authMode = getAuthMode();
-        final boolean oauthRequestedButUnusable = AUTH_MODE_OAUTH.equals(authMode) && !getOAuthAuthenticator().isUsable();
-        if (oauthRequestedButUnusable && logger.isErrorEnabled()) {
+        final AuthState state = resolveAuthState(authMode);
+        logAuthState(state, authMode, lastAuthState.getAndSet(state));
+    }
+
+    /**
+     * Collapses {@code authMode} (plus, for {@code oauth}, the authenticator's own verdict on
+     * its configuration) onto the effective posture it selects.
+     * <p>
+     * The single resolution both {@link #getAuthenticator()} and
+     * {@link #warnIfAuthenticationIsDisabled()} go through. They used to derive it separately --
+     * one picking an authenticator, the other re-deriving "is this authenticated?" from the mode
+     * string and a second {@code isUsable()} call -- which is exactly the shape that lets a
+     * future mode be wired into one and forgotten in the other, so that the endpoint silently
+     * stops warning about (or starts wrongly warning about) a posture it actually has.
+     * </p>
+     *
+     * @param authMode the raw {@code mcp.auth.mode} value
+     * @return the effective posture; never null
+     */
+    protected AuthState resolveAuthState(final String authMode) {
+        if (AUTH_MODE_FESS_TOKEN.equals(authMode)) {
+            return AuthState.FESS_TOKEN;
+        }
+        if (AUTH_MODE_OAUTH.equals(authMode)) {
+            return getOAuthAuthenticator().isUsable() ? AuthState.OAUTH : AuthState.OAUTH_UNUSABLE;
+        }
+        return AuthState.NONE;
+    }
+
+    /**
+     * Records the posture this request resolved, and reports it when -- and only when -- it
+     * differs from the last one.
+     * <p>
+     * {@link #getAuthenticator()} re-reads {@code mcp.auth.mode} and the {@code mcp.oauth.*}
+     * keys on every request, and Fess's {@code DynamicProperties} re-reads its backing file
+     * within seconds of an mtime change. A config edit can therefore flip {@code /mcp} from
+     * "401 for everyone" to "200 for anyone" with no restart -- which, before this method
+     * existed, produced no log line at all, because the only caller of
+     * {@link #warnIfAuthenticationIsDisabled()} is the {@code @PostConstruct} that ran hours
+     * earlier. That is precisely the change an operator most needs to see in the log.
+     * </p>
+     * <p>
+     * Reporting it on every request instead would be worse than silence: the WARN is several
+     * hundred bytes and this is an unauthenticated endpoint in the very mode being warned about,
+     * so a caller could turn it into a disk-filling amplifier. Hence the transition check, and
+     * hence its shape -- one volatile read on the steady-state path, with the
+     * {@link AtomicReference#getAndSet} write reached only when the state has actually changed.
+     * Two requests racing through the same transition are resolved by that {@code getAndSet}:
+     * the loser observes the state already recorded and stays quiet.
+     * </p>
+     *
+     * @param state the posture this request resolved
+     * @param authMode the raw {@code mcp.auth.mode} value behind it, for the message
+     */
+    protected void noteAuthState(final AuthState state, final String authMode) {
+        if (lastAuthState.get() == state) {
+            return;
+        }
+        final AuthState previous = lastAuthState.getAndSet(state);
+        if (previous == state) {
+            return;
+        }
+        logAuthState(state, authMode, previous);
+    }
+
+    /**
+     * Emits the log line(s) for an authentication posture, shared by the startup path
+     * ({@link #warnIfAuthenticationIsDisabled()}) and the runtime-transition path
+     * ({@link #noteAuthState}).
+     * <p>
+     * Isolated behind this seam for the same container-free-testing reason as
+     * {@link #getOAuthAuthenticator()}: a test can override it to observe <em>that</em> a
+     * transition was reported, and how many times, which is the property
+     * {@link #noteAuthState}'s guard exists to provide and which no assertion against a live
+     * log appender could establish without wiring one up.
+     * </p>
+     *
+     * @param state the posture now in effect
+     * @param authMode the raw {@code mcp.auth.mode} value behind it
+     * @param previous the posture previously in effect, or {@code null} when this is the first
+     *            resolution (startup, or a first request on a manager whose {@code @PostConstruct}
+     *            never ran)
+     */
+    protected void logAuthState(final AuthState state, final String authMode, final AuthState previous) {
+        if (state == AuthState.OAUTH_UNUSABLE && logger.isErrorEnabled()) {
             logger.error("[MCP] mcp.auth.mode=oauth but the configuration is not usable - falling back to none. "
                     + "mcp.oauth.issuer must be set to the authorization server's issuer URL; mcp.oauth.audience must be "
                     + "set (it is REQUIRED for oauth mode -- it is never derived from the request's Host header) and must "
                     + "end in /mcp (the only resource path this server's metadata endpoint serves); and mcp.oauth.jwks.uri "
                     + "must be set to the authorization server's JWKS endpoint.");
         }
-        final boolean authenticated =
-                AUTH_MODE_FESS_TOKEN.equals(authMode) || (AUTH_MODE_OAUTH.equals(authMode) && !oauthRequestedButUnusable);
-        if (!authenticated && logger.isWarnEnabled()) {
-            logger.warn("[MCP] mcp.auth.mode={} - every /mcp caller is treated as anonymous. "
-                    + "Set mcp.auth.mode=fess_token, or mcp.auth.mode=oauth with mcp.oauth.issuer, "
-                    + "mcp.oauth.audience, and mcp.oauth.jwks.uri all set, to require a credential.", authMode);
+        if (!state.isAuthenticated()) {
+            if (logger.isWarnEnabled()) {
+                logger.warn(
+                        "[MCP] mcp.auth.mode={} - every /mcp caller is treated as anonymous{}. "
+                                + "Set mcp.auth.mode=fess_token, or mcp.auth.mode=oauth with mcp.oauth.issuer, "
+                                + "mcp.oauth.audience, and mcp.oauth.jwks.uri all set, to require a credential.",
+                        authMode, previous == null ? StringUtil.EMPTY : " as of now (it was " + previous + " until this request)");
+            }
+        } else if (previous != null && logger.isInfoEnabled()) {
+            logger.info(
+                    "[MCP] mcp.auth.mode={} - /mcp now requires a credential (it was {} until this request). "
+                            + "Fess re-reads its properties without a restart, so this took effect on a live endpoint.",
+                    authMode, previous);
         }
     }
 
@@ -260,7 +433,7 @@ public class McpApiManager extends BaseApiManager {
             validateOrigin(request); // Task 10
             final McpPrincipal principal = authenticate(request, response); // Task 13-14
 
-            final String body = readBoundedRequestBody(request);
+            final String body = readRequestBody(request);
             final McpRequest mcpRequest = McpRequest.parse(Json.parseObject(body));
             hasId = mcpRequest.hasId();
             id = mcpRequest.getId();
@@ -270,6 +443,20 @@ public class McpApiManager extends BaseApiManager {
             if (mcpRequest.isNotification()) {
                 writer.writeAccepted(response);
                 return;
+            }
+
+            // A method MCP 2026-07-28 retired must be answered here, BEFORE header validation:
+            // a client old enough to still call initialize or ping sends neither
+            // MCP-Protocol-Version nor Mcp-Method (Mcp-Method did not exist before this
+            // revision), so leaving it to McpDispatcher would answer every such caller with
+            // -32020 "MCP-Protocol-Version is required" and make the retired-method diagnostic
+            // -- which exists for exactly those clients -- unreachable by them. Deliberately
+            // after the notification check above: that ordering is spec-relevant (a conformant
+            // notification carries no _meta and no headers) and must not regress. The dispatcher
+            // keeps the same branch for a modern client that calls a retired method with valid
+            // headers, and owns the error's definition so the two sites cannot drift.
+            if (getDispatcher().isRetired(mcpRequest.getMethod())) {
+                throw McpDispatcher.methodNotFound(mcpRequest.getMethod());
             }
 
             HeaderValidator.requirePresent(request, mcpRequest);
@@ -291,32 +478,68 @@ public class McpApiManager extends BaseApiManager {
     }
 
     /**
-     * Reads the raw request body from the HTTP request.
+     * Reads the request body, refusing anything over {@link #getRequestMaxBytes()} -- without
+     * ever buffering more than that.
+     * <p>
+     * The read and the limit are deliberately the same operation. Reading the body in full and
+     * <em>then</em> comparing its size against the limit is not a limit at all: it lets an
+     * attacker-chosen body size decide the allocation, and on this endpoint that is reachable
+     * unauthenticated in the default {@code mcp.auth.mode=none}, ahead of
+     * {@link #enforceRateLimit}. Splitting the check back out into a separate "bounded" wrapper
+     * around an unbounded read would silently reintroduce that; if this method ever needs to
+     * grow a seam, the bound must move with the read, not stay behind.
+     * </p>
+     * <p>
+     * {@code readNBytes(max + 1)} is the whole mechanism: one byte past the limit is enough to
+     * prove a body is over it, and is therefore the largest allocation an oversized body can
+     * provoke. {@code request.getContentLength()} is deliberately <em>not</em> consulted as a
+     * shortcut -- it is a caller-supplied header, absent entirely for a chunked body, so
+     * trusting it would either reject honest chunked callers or be trivially understated by a
+     * dishonest one. The stream itself is the only trustworthy source of the real size.
+     * </p>
+     * <p>
+     * The comparison is on bytes, not characters: a multi-byte UTF-8 body has more bytes than
+     * {@code String.length()} would report, so decoding first and measuring the {@code String}
+     * would let a body of up to three times the limit through. Nothing is decoded until the
+     * byte count is known to be within the limit, so the {@code String} is always built from a
+     * complete body and can never be a mid-character truncation.
+     * </p>
      *
      * @param request the HTTP servlet request
      * @return the request body as a string
      * @throws IOException if an I/O error occurs while reading the request
+     * @throws McpError with HTTP 413 when the body exceeds {@code mcp.request.max.bytes}
      */
     protected String readRequestBody(final HttpServletRequest request) throws IOException {
-        return new String(request.getInputStream().readAllBytes(), Constants.UTF_8);
-    }
-
-    /**
-     * Reads the request body, refusing anything over the configured limit.
-     *
-     * @param request the servlet request
-     * @return the body text
-     * @throws IOException if reading fails
-     * @throws McpError with HTTP 413 when the body is too large
-     */
-    protected String readBoundedRequestBody(final HttpServletRequest request) throws IOException {
-        final String body = readRequestBody(request);
         final int max = getRequestMaxBytes();
-        if (body.getBytes(Constants.UTF_8).length > max) {
+        final byte[] bytes = request.getInputStream().readNBytes(probeSize(max));
+        if (bytes.length > max) {
             throw new McpError(HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE, ErrorCode.InvalidRequest,
                     "request body exceeds mcp.request.max.bytes (" + max + ")");
         }
-        return body;
+        return new String(bytes, Constants.UTF_8);
+    }
+
+    /**
+     * Returns how many bytes {@link #readRequestBody} may read to decide whether {@code max} has
+     * been exceeded: one more than the limit, clamped at both ends.
+     * <p>
+     * Exists only to keep {@code max + 1} from being wrong for the two misconfigured extremes,
+     * both of which {@code readNBytes} would answer with an {@code IllegalArgumentException} or
+     * an overflowed negative count rather than an HTTP 413. A negative {@code max} probes one
+     * byte (any body at all then exceeds it, which is what the old read-everything-first code
+     * did too); {@code Integer.MAX_VALUE} probes {@code Integer.MAX_VALUE}, since no
+     * {@code byte[]} can exceed that and the limit is therefore unreachable either way.
+     * </p>
+     *
+     * @param max the configured limit in bytes
+     * @return the number of bytes to read, always at least 1 and never negative
+     */
+    private static int probeSize(final int max) {
+        if (max >= Integer.MAX_VALUE) {
+            return Integer.MAX_VALUE;
+        }
+        return Math.max(max, 0) + 1;
     }
 
     /**
@@ -359,7 +582,9 @@ public class McpApiManager extends BaseApiManager {
     /**
      * Returns the configured additional allowed origins.
      *
-     * @return the allowed origins; empty means same-origin only
+     * @return the allowed origins; empty means no browser origin is allowed at all -- including
+     *         the server's own, since {@link OriginValidator} deliberately has no self-origin
+     *         branch (it could only be derived from the caller-controlled {@code Host} header)
      */
     protected Set<String> getAllowedOrigins() {
         final String value = ComponentUtil.getFessConfig().getSystemProperty("mcp.allowed.origins", StringUtil.EMPTY);
@@ -376,9 +601,25 @@ public class McpApiManager extends BaseApiManager {
      * {@link #validateOrigin}): the JSON-RPC method name -- which methods this limit applies to
      * and which it does not -- is only known once the body has been parsed and dispatched to,
      * so token consumption has to happen here, immediately before
-     * {@link McpDispatcher#dispatch}, not earlier in {@link #process}. Only {@code tools/call}
-     * and {@code completion/complete} are limited, per the spec's server MUST; {@code
-     * server/discover} and the list methods are metadata reads and are deliberately excluded.
+     * {@link McpDispatcher#dispatch}, not earlier in {@link #process}.
+     * </p>
+     * <p>
+     * {@link #RATE_LIMITED_METHODS} is the exact set. {@code tools/call} and
+     * {@code completion/complete} are there per the spec's server MUST. {@code resources/read}
+     * is there because it is the same backend work under a different method name, not because
+     * the spec names it: reading {@code fess://document/<id>} makes the identical
+     * {@code SearchHelper#getDocumentByDocId} call the rate-limited {@code get_document} tool
+     * makes, and reading {@code fess://index/stats} runs a live cluster/JVM stats collection.
+     * Leaving it out made {@code Mcp-Method: resources/read} an unlimited, unauthenticated
+     * document-fetch channel that simply bypassed the limit on {@code tools/call} -- so any
+     * future method that reaches a backend belongs in that set too, whether or not the spec
+     * mentions it.
+     * </p>
+     * <p>
+     * {@code server/discover} and the {@code *&#47;list} methods stay excluded: those really are
+     * metadata reads, answered from this plugin's own static descriptions and (for the list
+     * methods) cached. {@code resources/read} was never in that category and was only ever
+     * grouped with them by proximity of name.
      * </p>
      * <p>
      * {@link #getRateLimiter()} -- and therefore {@link #getRateLimitPerMinute()}'s
@@ -395,7 +636,7 @@ public class McpApiManager extends BaseApiManager {
      */
     protected void enforceRateLimit(final HttpServletRequest request, final McpCallContext context) {
         final String method = context.getRequest().getMethod();
-        if (!"tools/call".equals(method) && !"completion/complete".equals(method)) {
+        if (!RATE_LIMITED_METHODS.contains(method)) {
             return;
         }
         final RateLimiter limiter = getRateLimiter();
@@ -410,12 +651,20 @@ public class McpApiManager extends BaseApiManager {
     /**
      * Resolves the identity {@link #enforceRateLimit} counts calls against.
      * <p>
-     * Keys on the authenticated subject when {@link #resolvePrincipalSubject} resolves one,
-     * the caller's IP address otherwise. {@code request.getRemoteAddr()} returning {@code null}
-     * -- not expected from a real container, but possible from a test double -- falls back to
-     * the literal {@code "unknown"} rather than a {@code null} key, since {@code
-     * ConcurrentHashMap} (which {@link RateLimiter} is built on) rejects {@code null} keys
-     * outright.
+     * Keys on the authenticated subject when {@link #resolvePrincipalSubject} resolves one, the
+     * caller's IP otherwise. A {@code null} IP -- not expected from a real container, but
+     * possible from a test double -- falls back to the literal {@code "unknown"} rather than a
+     * {@code null} key, since {@code ConcurrentHashMap} (which {@link RateLimiter} is built on)
+     * rejects {@code null} keys outright.
+     * </p>
+     * <p>
+     * The IP comes from {@link #resolveClientIp}, not from {@code request.getRemoteAddr()}
+     * directly. In the default {@code mcp.auth.mode=none} every caller is anonymous, so the
+     * subject is always {@code null} and the IP is the <em>only</em> thing separating callers --
+     * and behind nginx or Apache {@code getRemoteAddr()} is the proxy's address for every one of
+     * them. Fess ships no {@code RemoteIpValve}, so that collapse is the default deployment,
+     * not an edge case: one caller spending the per-minute budget would 429 every other client
+     * of the same Fess instance.
      * </p>
      *
      * @param request the servlet request
@@ -427,8 +676,41 @@ public class McpApiManager extends BaseApiManager {
         if (subject != null) {
             return subject;
         }
-        final String remoteAddr = request.getRemoteAddr();
-        return remoteAddr != null ? remoteAddr : "unknown";
+        final String clientIp = resolveClientIp(request);
+        return clientIp != null ? clientIp : "unknown";
+    }
+
+    /**
+     * Resolves the caller's IP, honouring proxy headers only from a trusted proxy.
+     * <p>
+     * Delegates to Fess's own {@code RateLimitHelper#getClientIp}, which consults
+     * {@code X-Forwarded-For} / {@code X-Real-IP} <em>only</em> when {@code getRemoteAddr()} is
+     * listed in {@code rate.limit.trusted.proxies} (default {@code 127.0.0.1,::1}), and returns
+     * {@code getRemoteAddr()} otherwise. Reusing it rather than reading the headers here is the
+     * whole point: a plugin that trusted {@code X-Forwarded-For} unconditionally would let any
+     * caller mint an unlimited number of rate-limit keys just by varying a header, which is
+     * strictly worse than the shared-bucket problem being fixed.
+     * </p>
+     * <p>
+     * The residual trade-off is deliberate and worth stating. Where a trusted proxy <em>is</em>
+     * configured, this takes the first {@code X-Forwarded-For} element, which a client can forge
+     * if that proxy appends to the header instead of replacing it -- turning one shared bucket
+     * into unlimited per-key buckets for a determined attacker. Fess's own {@code rate.limit.*}
+     * filter accepts the same trade-off, and it is the better default: without it, the limiter
+     * is not merely bypassable by an attacker but actively harmful to innocent clients, who all
+     * share a single bucket they cannot influence.
+     * </p>
+     * <p>
+     * Isolated behind this seam because it reads {@code ComponentUtil}, and the HTTP-boundary
+     * test suite is container-free -- the same discipline {@link #getAuthMode()} and
+     * {@link #getRateLimitPerMinute()} use.
+     * </p>
+     *
+     * @param request the servlet request
+     * @return the caller's IP, or {@code null} when it cannot be determined
+     */
+    protected String resolveClientIp(final HttpServletRequest request) {
+        return ComponentUtil.getRateLimitHelper().getClientIp(request);
     }
 
     /**
@@ -527,21 +809,27 @@ public class McpApiManager extends BaseApiManager {
      * an error keeps this call site stable as future modes are added: adding one means adding a
      * branch here, not reshaping {@link #authenticate}.
      * </p>
+     * <p>
+     * Every one of those reads happens per request, not once at startup, so the answer can and
+     * does change while the server is running. {@link #noteAuthState} is what makes such a
+     * change visible; see its Javadoc for why it belongs on this hot path and why it does not
+     * simply log every time.
+     * </p>
      *
      * @return the authenticator to use for this request
      */
     protected McpAuthenticator getAuthenticator() {
         final String authMode = getAuthMode();
-        if (AUTH_MODE_FESS_TOKEN.equals(authMode)) {
+        final AuthState state = resolveAuthState(authMode);
+        noteAuthState(state, authMode);
+        switch (state) {
+        case FESS_TOKEN:
             return fessTokenAuthenticator;
+        case OAUTH:
+            return getOAuthAuthenticator();
+        default:
+            return noneAuthenticator;
         }
-        if (AUTH_MODE_OAUTH.equals(authMode)) {
-            final OAuthResourceServerAuthenticator oauth = getOAuthAuthenticator();
-            if (oauth.isUsable()) {
-                return oauth;
-            }
-        }
-        return noneAuthenticator;
     }
 
     /**
