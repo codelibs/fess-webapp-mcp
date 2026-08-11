@@ -43,6 +43,7 @@ import com.nimbusds.jose.proc.BadJOSEException;
 import com.nimbusds.jose.proc.DefaultJOSEObjectTypeVerifier;
 import com.nimbusds.jose.proc.JWSVerificationKeySelector;
 import com.nimbusds.jose.proc.SecurityContext;
+import com.nimbusds.jose.util.DefaultResourceRetriever;
 import com.nimbusds.jwt.JWTClaimNames;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.proc.ConfigurableJWTProcessor;
@@ -111,6 +112,24 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
     /** The JWKS cache refresh timeout passed to {@link JWKSourceBuilder#cache(long, long)}, in milliseconds. */
     private static final long JWKS_CACHE_REFRESH_TIMEOUT_MILLIS = 30_000L;
 
+    /**
+     * The connect timeout, in milliseconds, for fetching the JWKS document. See
+     * {@link #newJwksRetriever()} for why {@link JWKSourceBuilder}'s own default is not used.
+     */
+    private static final int JWKS_CONNECT_TIMEOUT_MILLIS = 3_000;
+
+    /**
+     * The read timeout, in milliseconds, for fetching the JWKS document. See
+     * {@link #newJwksRetriever()} for why {@link JWKSourceBuilder}'s own default is not used.
+     */
+    private static final int JWKS_READ_TIMEOUT_MILLIS = 3_000;
+
+    /**
+     * The maximum accepted JWKS document size, in bytes (256 KiB). See {@link #newJwksRetriever()}
+     * for why {@link JWKSourceBuilder}'s own default is not used.
+     */
+    private static final int JWKS_SIZE_LIMIT_BYTES = 262_144;
+
     /** The RFC 9068 &#xa7;4 media type for a JWT access token, as a {@code typ} header value. */
     private static final JOSEObjectType ACCESS_TOKEN_JWT_TYPE = new JOSEObjectType("at+jwt");
 
@@ -118,13 +137,42 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
     private static final JOSEObjectType ACCESS_TOKEN_JWT_TYPE_LONG_FORM = new JOSEObjectType("application/at+jwt");
 
     /**
-     * The lazily-built, cached JWT processor. Built at most once per instance, on the first
-     * request that actually presents a bearer token -- never at construction, so a
-     * container-free test that never calls {@link #authenticate} (or that overrides
-     * {@link #getProcessor()} directly) never touches {@link #newProcessor(String)}, network
-     * I/O, or {@code ComponentUtil}.
+     * The lazily-built, cached JWT processor together with the JWKS-source configuration it was
+     * built from. Built on the first request that actually presents a bearer token -- never at
+     * construction, so a container-free test that never calls {@link #authenticate} (or that
+     * overrides {@link #getProcessor()} directly) never touches {@link #newProcessor(String)},
+     * network I/O, or {@code ComponentUtil} -- and rebuilt whenever that configuration changes.
+     * <p>
+     * A <em>single</em> field holding both halves, rather than one field per half, so
+     * {@link #getProcessor()}'s unsynchronised fast path reads a processor and the configuration it
+     * belongs to in one atomic volatile read. With two separate volatile fields, a concurrent
+     * rebuild could be observed half-applied -- an old processor paired with the new
+     * configuration's key -- and the stale processor would then be accepted as current.
+     * </p>
      */
-    private volatile ConfigurableJWTProcessor<SecurityContext> cachedProcessor;
+    private volatile CachedProcessor cachedProcessor;
+
+    /**
+     * A built JWT processor bound to the {@code (jwksUri, cacheSeconds)} pair it was built from.
+     *
+     * @param jwksUri the {@code mcp.oauth.jwks.uri} value {@link #processor} fetches keys from
+     * @param cacheSeconds the <em>effective</em> (already clamped by {@link #getJwksCacheSeconds()})
+     *            key-cache lifetime {@link #processor} was built with
+     * @param processor the processor itself
+     */
+    private record CachedProcessor(String jwksUri, int cacheSeconds, ConfigurableJWTProcessor<SecurityContext> processor) {
+
+        /**
+         * Returns whether this cache entry was built from exactly the given configuration.
+         *
+         * @param currentJwksUri the currently configured {@code mcp.oauth.jwks.uri}
+         * @param currentCacheSeconds the currently effective key-cache lifetime
+         * @return {@code true} when this entry is still current and may be reused
+         */
+        boolean matches(final String currentJwksUri, final int currentCacheSeconds) {
+            return cacheSeconds == currentCacheSeconds && jwksUri.equals(currentJwksUri);
+        }
+    }
 
     /**
      * Guards {@link #getJwksCacheSeconds()}'s clamp WARN so it is emitted at most once per
@@ -512,16 +560,67 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
      * the caller as an invalid token. See {@link #getJwksCacheSeconds()}.
      * </p>
      *
+     * <p>
+     * The retrieval limits come from {@link #newJwksRetriever()} rather than from
+     * {@link JWKSourceBuilder}'s own defaults, and {@code retrying(true)} makes a single transient
+     * fetch failure survivable. See {@link #newJwksRetriever()} for why both matter.
+     * </p>
+     *
      * @param jwksUri the JWKS endpoint
      * @return a configured processor, per {@link #newProcessor(JWKSource)}
      * @throws MalformedURLException if {@code jwksUri} is not a valid URL
      */
     protected ConfigurableJWTProcessor<SecurityContext> newProcessor(final String jwksUri) throws MalformedURLException {
-        final JWKSource<SecurityContext> source = JWKSourceBuilder.<SecurityContext> create(new URL(jwksUri))
+        final JWKSource<SecurityContext> source = JWKSourceBuilder.<SecurityContext> create(new URL(jwksUri), newJwksRetriever())
                 .cache(getJwksCacheSeconds() * 1000L, JWKS_CACHE_REFRESH_TIMEOUT_MILLIS)
                 .refreshAheadCache(true)
+                .retrying(true)
                 .build();
         return newProcessor(source);
+    }
+
+    /**
+     * Builds the HTTP retriever {@link #newProcessor(String)} fetches the JWKS document with.
+     * <p>
+     * <b>Passing one explicitly is the point.</b> {@link JWKSourceBuilder#create(URL)} -- the
+     * single-argument overload -- supplies a retriever built from {@code JWKSourceBuilder}'s
+     * <em>own</em> constants: a 500 ms connect timeout, a 500 ms read timeout, and a 50 KB size
+     * limit. Those are not {@link DefaultResourceRetriever}'s defaults (its no-argument
+     * constructor means unlimited, {@code 0/0/0}); they are deliberately tight values chosen for a
+     * library that cannot know its caller's network, and 500 ms is comfortably inside the time a
+     * cold TLS handshake to a real authorization server can take.
+     * </p>
+     * <p>
+     * <b>Why a single slow fetch is not a single slow request.</b> The chain
+     * {@link #newProcessor(String)} builds puts a rate limiter in front of the JWKS endpoint
+     * ({@code RateLimitedJWKSetSource}, 30 s minimum interval). A fetch that times out consumes
+     * that window, so the next 30 seconds of token-bearing requests fail immediately -- reported,
+     * as always, as a 401 {@code invalid_token} that blames the caller's perfectly good token,
+     * with the real cause reaching the log only at DEBUG (see {@link #invalidToken}). Against an
+     * endpoint chronically slower than 500 ms this never recovers at all. Raising the timeouts to
+     * {@value #JWKS_CONNECT_TIMEOUT_MILLIS} ms and adding {@code retrying(true)} keeps a slow or
+     * momentarily-flaky authorization server from becoming an outage for every MCP client.
+     * </p>
+     * <p>
+     * <b>{@code outageTolerant(...)} was considered and deliberately not used.</b> It would serve
+     * keys from a stale cache for a configured window after the JWKS endpoint goes away, which
+     * extends the lifetime of a revoked or rotated signing key beyond what the operator's
+     * {@code mcp.oauth.jwks.cache.seconds} says. That is a change in security posture, not a
+     * robustness tweak, so it is left to a future change that asks for it explicitly.
+     * </p>
+     * <p>
+     * The limits are fixed constants rather than {@code mcp.oauth.*} properties on purpose: they
+     * are bounds on this server's own HTTP client, not a description of the authorization server,
+     * and no deployment has been observed to need different ones. The size limit is raised anyway
+     * ({@value #JWKS_SIZE_LIMIT_BYTES} bytes) because it costs nothing: a typical JWKS is 2-8 KB,
+     * so 50 KB is rarely the binding constraint, but an authorization server publishing a large
+     * set of rotated keys should not silently become unverifiable.
+     * </p>
+     *
+     * @return a retriever with this class's own connect timeout, read timeout, and size limit
+     */
+    protected DefaultResourceRetriever newJwksRetriever() {
+        return new DefaultResourceRetriever(JWKS_CONNECT_TIMEOUT_MILLIS, JWKS_READ_TIMEOUT_MILLIS, JWKS_SIZE_LIMIT_BYTES);
     }
 
     /**
@@ -605,25 +704,54 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
      * origin differs between a test and production; the assembly a test exercises is the same
      * method production runs.
      * </p>
+     * <p>
+     * <b>The cache is keyed on the configuration, not merely on "has it been built yet".</b>
+     * {@code mcp.oauth.jwks.uri} and {@code mcp.oauth.jwks.cache.seconds} are Fess system
+     * properties an operator edits at runtime, exactly like {@code mcp.oauth.issuer},
+     * {@code mcp.oauth.audience}, {@code mcp.oauth.required.scopes},
+     * {@code mcp.oauth.permission.claim} and {@code mcp.oauth.scope.permission.map}, all of which
+     * this class already re-reads on every request. These two are the only ones consumed solely at
+     * <em>build</em> time, inside {@link #newProcessor(String)}, so a build-once cache silently
+     * froze them: after an edit, the processor stayed bound to the previous JWKS endpoint and TTL
+     * for the life of the JVM. The failure mode is deceptively quiet -- every token-bearing request
+     * fails against the old key set and is reported as an ordinary 401 {@code invalid_token} (see
+     * {@link #invalidToken}, which logs the real cause at DEBUG only), while {@link #isUsable()}
+     * keeps reporting the configuration as fine because it only tests non-blankness, so not even an
+     * authentication-mode change is logged. Restarting Fess was the only cure. <b>Do not simplify
+     * this back to a null check.</b>
+     * </p>
+     * <p>
+     * Equally deliberately, it is not rebuilt unconditionally either: this runs on the per-request
+     * hot path, and a rebuild discards the entire cached JWK set, so an unkeyed rebuild would turn
+     * every request into a fresh JWKS fetch. The key uses the <em>clamped</em>
+     * {@link #getJwksCacheSeconds()} value, not the raw property, so two differing sub-floor
+     * settings that produce the same effective lifetime do not count as a change. A failed build is
+     * never cached: {@link #cachedProcessor} is assigned only after {@link #newProcessor(String)}
+     * returns, so correcting a malformed {@code mcp.oauth.jwks.uri} recovers on the very next
+     * request.
+     * </p>
      *
-     * @return the JWT processor, shared across every request this instance authenticates
+     * @return the JWT processor for the current JWKS configuration, shared across every request
+     *         this instance authenticates until that configuration changes
      */
     protected ConfigurableJWTProcessor<SecurityContext> getProcessor() {
-        ConfigurableJWTProcessor<SecurityContext> processor = cachedProcessor;
-        if (processor == null) {
+        final String jwksUri = getJwksUri();
+        final int cacheSeconds = getJwksCacheSeconds();
+        CachedProcessor cached = cachedProcessor;
+        if (cached == null || !cached.matches(jwksUri, cacheSeconds)) {
             synchronized (this) {
-                processor = cachedProcessor;
-                if (processor == null) {
+                cached = cachedProcessor;
+                if (cached == null || !cached.matches(jwksUri, cacheSeconds)) {
                     try {
-                        processor = newProcessor(getJwksUri());
+                        cached = new CachedProcessor(jwksUri, cacheSeconds, newProcessor(jwksUri));
                     } catch (final MalformedURLException e) {
-                        throw new IllegalStateException("mcp.oauth.jwks.uri is not a valid URL: " + getJwksUri(), e);
+                        throw new IllegalStateException("mcp.oauth.jwks.uri is not a valid URL: " + jwksUri, e);
                     }
-                    cachedProcessor = processor;
+                    cachedProcessor = cached;
                 }
             }
         }
-        return processor;
+        return cached.processor();
     }
 
     /**

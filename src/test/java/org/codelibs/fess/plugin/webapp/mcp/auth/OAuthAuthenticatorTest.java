@@ -18,9 +18,12 @@ package org.codelibs.fess.plugin.webapp.mcp.auth;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
@@ -41,9 +44,18 @@ import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.crypto.RSASSASigner;
 import com.nimbusds.jose.jwk.RSAKey;
 import com.nimbusds.jose.jwk.gen.RSAKeyGenerator;
+import com.nimbusds.jose.jwk.source.CachingJWKSetSource;
 import com.nimbusds.jose.jwk.source.ImmutableJWKSet;
+import com.nimbusds.jose.jwk.source.JWKSetBasedJWKSource;
+import com.nimbusds.jose.jwk.source.JWKSetSource;
+import com.nimbusds.jose.jwk.source.JWKSetSourceWrapper;
 import com.nimbusds.jose.jwk.source.JWKSource;
+import com.nimbusds.jose.jwk.source.JWKSourceBuilder;
+import com.nimbusds.jose.jwk.source.RetryingJWKSetSource;
+import com.nimbusds.jose.jwk.source.URLBasedJWKSetSource;
+import com.nimbusds.jose.proc.JWSVerificationKeySelector;
 import com.nimbusds.jose.proc.SecurityContext;
+import com.nimbusds.jose.util.DefaultResourceRetriever;
 import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
 import com.nimbusds.jwt.proc.ConfigurableJWTProcessor;
@@ -83,17 +95,22 @@ public class OAuthAuthenticatorTest {
      * the higher-level parsing methods built on them, so the real production parsing logic
      * (comma-split required scopes, the scope-permission-map grammar, ...) is actually exercised
      * -- the same lesson this plugin's {@code McpApiManager} test suite already applies to
-     * {@code getAuthMode()}. {@link #getProcessor()} is the one deliberate exception: it is the
-     * seam that would otherwise reach a real JWKS URL over HTTP. Even there, it delegates to the
-     * real {@link OAuthResourceServerAuthenticator#newProcessor(JWKSource)} with an in-memory
-     * key source, rather than re-implementing that assembly here -- a hand-maintained duplicate
-     * would verify only itself, never the production wiring (key selector, RS256 restriction,
-     * claims verifier) that actually ships.
+     * {@code getAuthMode()}.
+     * <p>
+     * This class deliberately overrides <em>nothing else</em>, so
+     * {@link OAuthResourceServerAuthenticator#getProcessor()} -- including its config-keyed
+     * caching -- and {@link OAuthResourceServerAuthenticator#newProcessor(String)} both run
+     * exactly as they ship. That is what the JWKS-source tests at the bottom of this file need,
+     * and it is why the in-memory key source lives in {@link TestAuthenticator} below rather
+     * than here: a double that replaces {@code getProcessor()} can never observe what
+     * {@code getProcessor()} actually does. No network happens from here either --
+     * {@link JWKSourceBuilder} resolves the URL lazily, on the first key lookup, which none of
+     * those tests performs.
+     * </p>
      */
-    static class TestAuthenticator extends OAuthResourceServerAuthenticator {
+    static class ConfigOnlyAuthenticator extends OAuthResourceServerAuthenticator {
         final Map<String, String> properties = new HashMap<>();
         Set<String> trustedProxies = Set.of();
-        RSAKey verificationKey = signingKey;
 
         @Override
         protected String getSystemProperty(final String key, final String defaultValue) {
@@ -110,6 +127,19 @@ public class OAuthAuthenticatorTest {
         protected Set<String> getTrustedProxies() {
             return trustedProxies;
         }
+    }
+
+    /**
+     * {@link ConfigOnlyAuthenticator} plus the one deliberate extra seam every token-verifying
+     * test needs: {@link #getProcessor()}, which would otherwise reach a real JWKS URL over HTTP.
+     * Even there, it delegates to the real
+     * {@link OAuthResourceServerAuthenticator#newProcessor(JWKSource)} with an in-memory key
+     * source, rather than re-implementing that assembly here -- a hand-maintained duplicate would
+     * verify only itself, never the production wiring (key selector, RS256 restriction, claims
+     * verifier) that actually ships.
+     */
+    static class TestAuthenticator extends ConfigOnlyAuthenticator {
+        RSAKey verificationKey = signingKey;
 
         @Override
         protected ConfigurableJWTProcessor<SecurityContext> getProcessor() {
@@ -786,5 +816,189 @@ public class OAuthAuthenticatorTest {
         assertEquals("", auth.getIssuer());
         assertEquals("", auth.getJwksUri());
         assertFalse(auth.isUsable());
+    }
+
+    // ------------------------------------------------------------------
+    // The JWKS source behind getProcessor(): inspected through nimbus's OWN public accessors.
+    //
+    // Every helper below walks the JWKSetSource decorator chain JWKSourceBuilder assembled, using
+    // only public API (getJWSKeySelector / getJWKSource / getJWKSetSource / getSource /
+    // getJWKSetURL / getResourceRetriever / getTimeToLive) -- deliberately no reflection over
+    // private fields, so a nimbus upgrade that reshapes the chain makes these tests fail loudly at
+    // compile time or on the orElseThrow below, rather than silently stop checking anything.
+    // ------------------------------------------------------------------
+
+    /**
+     * Walks the {@link JWKSetSource} decorator chain behind {@code processor}, outermost wrapper
+     * first, ending at whichever source is not itself a wrapper (in production, the
+     * {@link URLBasedJWKSetSource} that owns the JWKS URL and the resource retriever).
+     *
+     * @param processor a processor built by {@link OAuthResourceServerAuthenticator#newProcessor(String)}
+     * @return the chain, never empty
+     */
+    @SuppressWarnings("unchecked")
+    private static List<JWKSetSource<SecurityContext>> jwksSourceChain(final ConfigurableJWTProcessor<SecurityContext> processor) {
+        final JWSVerificationKeySelector<SecurityContext> selector =
+                (JWSVerificationKeySelector<SecurityContext>) processor.getJWSKeySelector();
+        final JWKSetBasedJWKSource<SecurityContext> jwkSource = (JWKSetBasedJWKSource<SecurityContext>) selector.getJWKSource();
+        final List<JWKSetSource<SecurityContext>> chain = new ArrayList<>();
+        JWKSetSource<SecurityContext> node = jwkSource.getJWKSetSource();
+        while (node instanceof JWKSetSourceWrapper && !(node instanceof URLBasedJWKSetSource)) {
+            chain.add(node);
+            node = ((JWKSetSourceWrapper<SecurityContext>) node).getSource();
+        }
+        chain.add(node);
+        return chain;
+    }
+
+    /**
+     * Finds the single source of {@code type} in {@code processor}'s chain.
+     *
+     * @param <T> the source type sought
+     * @param processor the processor to inspect
+     * @param type the source type sought
+     * @return the matching source
+     * @throws AssertionError if the chain contains no such source
+     */
+    private static <T> T jwksSourceOfType(final ConfigurableJWTProcessor<SecurityContext> processor, final Class<T> type) {
+        return jwksSourceChain(processor).stream()
+                .filter(type::isInstance)
+                .map(type::cast)
+                .findFirst()
+                .orElseThrow(() -> new AssertionError(type.getSimpleName() + " is not in the JWKS source chain: "
+                        + jwksSourceChain(processor).stream().map(s -> s.getClass().getSimpleName()).toList()));
+    }
+
+    /**
+     * Returns the JWKS endpoint {@code processor} will actually fetch keys from.
+     *
+     * @param processor the processor to inspect
+     * @return the bound JWKS URL, as a string
+     */
+    private static String boundJwksUrl(final ConfigurableJWTProcessor<SecurityContext> processor) {
+        return jwksSourceOfType(processor, URLBasedJWKSetSource.class).getJWKSetURL().toString();
+    }
+
+    /**
+     * Returns the key-cache lifetime, in milliseconds, {@code processor} was built with.
+     *
+     * @param processor the processor to inspect
+     * @return the cache time-to-live in milliseconds
+     */
+    private static long boundCacheTtlMillis(final ConfigurableJWTProcessor<SecurityContext> processor) {
+        return jwksSourceOfType(processor, CachingJWKSetSource.class).getTimeToLive();
+    }
+
+    /** A jwks.uri-configured double whose real {@code getProcessor()} runs; no network is performed. */
+    private static ConfigOnlyAuthenticator jwksConfig(final String jwksUri) {
+        final ConfigOnlyAuthenticator auth = new ConfigOnlyAuthenticator();
+        auth.properties.put("mcp.oauth.jwks.uri", jwksUri);
+        return auth;
+    }
+
+    @Test
+    public void testEditingJwksUriAtRuntimeRebindsTheProcessorToTheNewUri() {
+        // mcp.oauth.jwks.uri is a Fess SYSTEM property: an operator edits it in the admin UI and
+        // expects it to take effect, exactly as mcp.oauth.issuer / audience / required.scopes /
+        // permission.claim / scope.permission.map all already do (each is re-read per request).
+        // Before the config-keyed cache, cachedProcessor was built once and never invalidated, so
+        // the processor stayed bound to the OLD URL for the life of the JVM -- every token then
+        // 401s as "invalid_token" (nothing about the caller's token is wrong), the real cause
+        // reaches the log only at DEBUG, and isUsable() still reports OAUTH because it only tests
+        // non-blankness, so not even a state-change log fires. A Fess restart was the only cure.
+        final ConfigOnlyAuthenticator auth = jwksConfig("https://old.example.com/jwks");
+        final ConfigurableJWTProcessor<SecurityContext> first = auth.getProcessor();
+        assertEquals("https://old.example.com/jwks", boundJwksUrl(first), "positive control: the first build honours the config");
+
+        auth.properties.put("mcp.oauth.jwks.uri", "https://new.example.com/jwks");
+        final ConfigurableJWTProcessor<SecurityContext> second = auth.getProcessor();
+
+        assertEquals("https://new.example.com/jwks", boundJwksUrl(second),
+                "editing mcp.oauth.jwks.uri must rebind the processor; a stale binding 401s every token until Fess restarts");
+        assertNotSame(first, second, "a changed JWKS source cannot be served by the processor built for the previous one");
+    }
+
+    @Test
+    public void testEditingJwksCacheSecondsAtRuntimeRebuildsTheProcessor() {
+        // The second half of the same defect, and the easier one to miss: the TTL is read ONLY
+        // inside newProcessor(String), so caching the processor froze mcp.oauth.jwks.cache.seconds
+        // just as thoroughly as it froze the URI. Both values below clear the 60s floor
+        // getJwksCacheSeconds() clamps to, so this test cannot pass by accident through clamping.
+        final ConfigOnlyAuthenticator auth = jwksConfig("https://idp.example.com/jwks");
+        auth.properties.put("mcp.oauth.jwks.cache.seconds", "600");
+        final ConfigurableJWTProcessor<SecurityContext> first = auth.getProcessor();
+        assertEquals(600_000L, boundCacheTtlMillis(first), "positive control: the first build honours the configured TTL");
+
+        auth.properties.put("mcp.oauth.jwks.cache.seconds", "900");
+        final ConfigurableJWTProcessor<SecurityContext> second = auth.getProcessor();
+
+        assertEquals(900_000L, boundCacheTtlMillis(second), "editing mcp.oauth.jwks.cache.seconds must take effect without a restart");
+        assertNotSame(first, second);
+    }
+
+    @Test
+    public void testUnchangedJwksConfigurationReusesTheCachedProcessor() {
+        // The other side of the invalidation fix, and the reason it is keyed on the config rather
+        // than simply rebuilt every time: getProcessor() is on the per-request hot path, and
+        // rebuilding the source would throw away the whole JWKS key cache -- turning every single
+        // request into a fresh network fetch of the key set. The clamped value is what the key
+        // compares, so the two sub-floor TTLs below (which getJwksCacheSeconds() folds to the same
+        // 60) must NOT count as a change either.
+        final ConfigOnlyAuthenticator auth = jwksConfig("https://idp.example.com/jwks");
+        final ConfigurableJWTProcessor<SecurityContext> first = auth.getProcessor();
+        assertSame(first, auth.getProcessor(), "an unchanged configuration must not rebuild the JWKS source on every request");
+
+        auth.properties.put("mcp.oauth.jwks.cache.seconds", "5");
+        final ConfigurableJWTProcessor<SecurityContext> clamped = auth.getProcessor();
+        auth.properties.put("mcp.oauth.jwks.cache.seconds", "45");
+        assertSame(clamped, auth.getProcessor(), "two sub-floor TTLs that clamp to the same effective value are not a config change");
+    }
+
+    @Test
+    public void testMalformedJwksUriIsNotCachedSoFixingItRecoversWithoutARestart() {
+        // A failed build must leave the cache empty: cachedProcessor is assigned only after
+        // newProcessor(String) returns, so the IllegalStateException below cannot be memoised into
+        // a permanently-broken instance. Pinned because the config-keyed cache is the natural place
+        // to accidentally start caching failures too (e.g. by recording the key before building).
+        final ConfigOnlyAuthenticator auth = jwksConfig("not a valid url");
+        assertThrows(IllegalStateException.class, auth::getProcessor, "a malformed mcp.oauth.jwks.uri must be reported, not swallowed");
+        assertThrows(IllegalStateException.class, auth::getProcessor, "and it must keep being reported, i.e. no negative caching");
+
+        auth.properties.put("mcp.oauth.jwks.uri", "https://idp.example.com/jwks");
+        assertEquals("https://idp.example.com/jwks", boundJwksUrl(auth.getProcessor()),
+                "correcting the URI must recover on the very next request, with no restart");
+    }
+
+    // ------------------------------------------------------------------
+    // JWKS retrieval limits: JWKSourceBuilder's own create(URL) defaults are far too tight.
+    // ------------------------------------------------------------------
+
+    @Test
+    public void testJwksRetrieverOverridesJwkSourceBuilderOwnTightTimeouts() {
+        // JWKSourceBuilder.create(URL) supplies its OWN DefaultResourceRetriever, built from
+        // JWKSourceBuilder's constants -- 500ms connect, 500ms read, 50KB -- NOT from
+        // DefaultResourceRetriever's own no-arg defaults, which are 0/0/0 (unlimited). A 500ms read
+        // timeout is easily exceeded by a cold TLS handshake to a real authorization server, and
+        // the consequence is not one slow request: the failed fetch trips
+        // RateLimitedJWKSetSource's 30s minimum interval, so every token-bearing request 401s as
+        // "invalid_token" for the next 30 seconds (permanently, if the endpoint is chronically
+        // slower than 500ms) even after the endpoint recovers.
+        final ConfigurableJWTProcessor<SecurityContext> processor = jwksConfig("https://idp.example.com/jwks").getProcessor();
+        final DefaultResourceRetriever retriever =
+                (DefaultResourceRetriever) jwksSourceOfType(processor, URLBasedJWKSetSource.class).getResourceRetriever();
+
+        assertEquals(3_000, retriever.getConnectTimeout(), "500ms is not enough to open a TLS connection to a real AS");
+        assertEquals(3_000, retriever.getReadTimeout(), "the 500ms read timeout is the realistic trigger; 30s of 401s follow it");
+        assertEquals(262_144, retriever.getSizeLimit(), "a typical JWKS is 2-8KB, but 50KB leaves no room for a large key rotation set");
+    }
+
+    @Test
+    public void testJwksRetrievalIsRetried() {
+        // .retrying(true) inserts a RetryingJWKSetSource, which reattempts a failed fetch once
+        // before the failure propagates. Without it a single transient blip is enough to trip the
+        // 30s rate-limiter window described above.
+        final ConfigurableJWTProcessor<SecurityContext> processor = jwksConfig("https://idp.example.com/jwks").getProcessor();
+        assertNotNull(jwksSourceOfType(processor, RetryingJWKSetSource.class),
+                "a transient JWKS fetch failure must be retried rather than immediately costing 30s of 401s");
     }
 }
