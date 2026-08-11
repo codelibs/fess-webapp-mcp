@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -159,6 +160,19 @@ public class ToolsListHandlerTest {
 
         assertEquals(200, error.getHttpStatus());
         assertEquals(org.codelibs.fess.plugin.webapp.mcp.ErrorCode.InvalidParams, error.getErrorCode());
+    }
+
+    @Test
+    public void testExplicitNullCursorIsAccepted() {
+        // tools/list is the first call a client makes after server/discover, so rejecting the
+        // "cursor": null every default-configured Jackson / System.Text.Json / omitempty-less Go
+        // serializer emits for an unset optional field would leave such a client dead on arrival.
+        // Collections.singletonMap, not Map.of, because Map.of throws NPE on a null value.
+        final ToolsListHandler handler = new FixedTtlHandler(List.of(new StubTool("search")));
+
+        final Map<String, Object> result = handler.handle(contextWithParams(Collections.singletonMap("cursor", null)));
+
+        assertEquals(1, ((List<?>) result.get("tools")).size(), "a null cursor is absent, so the single page must still be returned");
     }
 
     @Test

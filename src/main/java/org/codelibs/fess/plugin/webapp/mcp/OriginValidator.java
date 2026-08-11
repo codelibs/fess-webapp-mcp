@@ -30,11 +30,38 @@ import jakarta.servlet.http.HttpServletResponse;
  *
  * <p>
  * The MCP Streamable HTTP transport makes Origin validation a server MUST: a request whose
- * {@code Origin} header is present but does not match the server's own origin or a configured
- * allowed origin is rejected with HTTP 403. A request that carries no {@code Origin} header at
- * all is <em>not</em> treated as invalid -- the spec only mandates rejection for a
- * <em>present</em> disallowed value, and non-browser clients (CLI bridges, stdio proxies, curl)
- * never send the header, so requiring it would break every legitimate non-browser MCP client.
+ * {@code Origin} header is present but is not a configured allowed origin is rejected with HTTP
+ * 403. A request that carries no {@code Origin} header at all is <em>not</em> treated as invalid
+ * -- the spec only mandates rejection for a <em>present</em> disallowed value, and non-browser
+ * clients (CLI bridges, stdio proxies, curl) never send the header, so requiring it would break
+ * every legitimate non-browser MCP client.
+ * </p>
+ *
+ * <p>
+ * <b>The allowlist is the whole decision. There is deliberately no "self origin" branch, and one
+ * must not be added back.</b> An earlier revision also accepted an {@code Origin} that equalled
+ * the request's own origin, built from {@link HttpServletRequest#getScheme()},
+ * {@link HttpServletRequest#getServerName()} and {@link HttpServletRequest#getServerPort()}. That
+ * is unsound, because per the Servlet specification {@code getServerName()}/{@code getServerPort()}
+ * report the {@code Host} header -- caller-controlled on any direct request. Comparing a
+ * caller-supplied {@code Origin} against a caller-supplied {@code Host} is a tautology an attacker
+ * satisfies by sending both: a page on {@code http://evil.example:8080} that rebinds
+ * {@code evil.example} to the Fess host reaches this server with
+ * {@code Host: evil.example:8080} and {@code Origin: http://evil.example:8080}, the two agree, and
+ * the request is allowed -- which is precisely the DNS-rebinding attack Origin validation exists
+ * to stop. {@code CanonicalResourceUri} reaches the same conclusion about the same two methods for
+ * the OAuth audience decision; this class now matches it. A "trusted" self origin cannot be
+ * reconstructed from the request at all -- {@code X-Forwarded-*} and {@code Forwarded} are equally
+ * caller-controlled unless a trusted proxy is known to strip them -- so the only sound source is
+ * configuration, which is what {@code mcp.allowed.origins} is.
+ * </p>
+ *
+ * <p>
+ * <b>Consequence, by design:</b> with an empty allowlist, a request carrying <em>any</em>
+ * {@code Origin} is rejected. That is the intended posture: the header is sent by browsers, and a
+ * browser-based MCP client must be named explicitly in {@code mcp.allowed.origins} -- including
+ * when it is served from the Fess host itself, which is no longer implied. Everything that does
+ * not send an {@code Origin} (the CLI-bridge and stdio-proxy majority) is unaffected.
  * </p>
  *
  * <p>
@@ -45,25 +72,14 @@ import jakarta.servlet.http.HttpServletResponse;
  * </p>
  *
  * <p>
- * <b>Normalisation:</b> both the request's own ("self") origin and every candidate origin
- * (the incoming {@code Origin} header value and each configured allowed origin) are reduced to
- * {@code scheme://host[:port]} with the scheme and host lowercased and the port omitted when it
- * is the scheme's default (80 for {@code http}, 443 for {@code https}) -- browsers omit the
- * default port when sending {@code Origin}, so a bare comparison would otherwise reject a
- * legitimate same-origin request on the default port. Comparison after normalisation is an
- * exact string match: no wildcard and no suffix matching are performed, and no case-folding is
- * applied beyond the scheme/host lowercasing normalisation defines.
- * </p>
- *
- * <p>
- * <b>Reverse proxies:</b> the self origin is derived only from {@link HttpServletRequest#getScheme()},
- * {@link HttpServletRequest#getServerName()}, and {@link HttpServletRequest#getServerPort()}.
- * This class deliberately does not inspect {@code X-Forwarded-*} or {@code Forwarded} headers --
- * behind a reverse proxy that terminates TLS or rewrites the host/port, those methods reflect
- * what the proxy sends upstream, not the client-facing URL, so a same-origin request arriving
- * through such a proxy may need an explicit entry in the allowed-origins configuration.
- * Forwarded-header-aware canonical-URI derivation is centralised elsewhere (the OAuth
- * resource-metadata work) rather than duplicated here.
+ * <b>Normalisation:</b> every candidate origin (the incoming {@code Origin} header value and each
+ * configured allowed origin) is reduced to {@code scheme://host[:port]} with the scheme and host
+ * lowercased and the port omitted when it is the scheme's default (80 for {@code http}, 443 for
+ * {@code https}) -- browsers omit the default port when sending {@code Origin}, so a bare
+ * comparison would otherwise reject a legitimately allowlisted origin written as
+ * {@code https://client.example.com:443}. Comparison after normalisation is an exact string
+ * match: no wildcard and no suffix matching are performed, and no case-folding is applied beyond
+ * the scheme/host lowercasing normalisation defines.
  * </p>
  */
 public final class OriginValidator {
@@ -73,26 +89,29 @@ public final class OriginValidator {
     }
 
     /**
-     * Rejects {@code request} when its {@code Origin} header is present and matches neither the
-     * request's own origin nor any entry of {@code allowedOrigins}.
+     * Rejects {@code request} when its {@code Origin} header is present and matches no entry of
+     * {@code allowedOrigins}.
      * <p>
-     * Only the scheme, host, and port of {@code Origin} are compared -- a path or query string,
-     * if one is present, is silently ignored, so {@code https://fess.example.com/anything}
-     * matches exactly as {@code https://fess.example.com} would. A conformant browser never
-     * sends a path or query on {@code Origin}; this is a byproduct of normalising through
-     * {@link java.net.URI} and is called out here so it isn't mistaken for a bypass. A value
-     * that fails to parse as a {@code scheme://host} origin at all -- including the literal
-     * string {@code "null"} some browsers send for opaque origins, an empty string, or a
-     * scheme with no authority -- is treated as present-and-invalid, not absent, so it is
-     * rejected the same as a foreign origin rather than silently allowed.
+     * Nothing about the request itself can make an {@code Origin} acceptable -- in particular not
+     * its {@code Host}, which the caller chooses; see this class's Javadoc for why the former
+     * self-origin comparison was removed and must not come back. Only the scheme, host, and port
+     * of {@code Origin} are compared -- a path or query string, if one is present, is silently
+     * ignored, so {@code https://client.example.com/anything} matches exactly as
+     * {@code https://client.example.com} would. A conformant browser never sends a path or query
+     * on {@code Origin}; this is a byproduct of normalising through {@link java.net.URI} and is
+     * called out here so it isn't mistaken for a bypass. A value that fails to parse as a
+     * {@code scheme://host} origin at all -- including the literal string {@code "null"} some
+     * browsers send for opaque origins, an empty string, or a scheme with no authority -- is
+     * treated as present-and-invalid, not absent, so it is rejected the same as a foreign origin
+     * rather than silently allowed.
      * </p>
      *
      * @param request the servlet request carrying the candidate {@code Origin} header
-     * @param allowedOrigins additional origins to accept beyond the request's own; each entry
-     *            is normalised the same way as the {@code Origin} header before comparison, so
-     *            scheme/host case and a default port are not significant
+     * @param allowedOrigins the origins to accept; each entry is normalised the same way as the
+     *            {@code Origin} header before comparison, so scheme/host case and a default port
+     *            are not significant. An empty set rejects every present {@code Origin}
      * @throws McpError with HTTP 403 and {@link ErrorCode#InvalidRequest} when {@code Origin} is
-     *             present but is neither the self origin nor a member of {@code allowedOrigins}
+     *             present but is not a member of {@code allowedOrigins}
      */
     public static void validate(final HttpServletRequest request, final Set<String> allowedOrigins) {
         final String origin = request.getHeader("Origin");
@@ -101,23 +120,10 @@ public final class OriginValidator {
             return;
         }
         final String normalizedOrigin = normalize(origin);
-        if (normalizedOrigin != null && normalizedOrigin.equals(selfOrigin(request))) {
-            return;
-        }
         if (normalizedOrigin != null && allowedOrigins.stream().map(OriginValidator::normalize).anyMatch(normalizedOrigin::equals)) {
             return;
         }
         throw new McpError(HttpServletResponse.SC_FORBIDDEN, ErrorCode.InvalidRequest, "Origin is not allowed: " + origin);
-    }
-
-    /**
-     * Builds the request's own origin from its scheme, server name, and server port.
-     *
-     * @param request the servlet request
-     * @return the normalised self origin, e.g. {@code "https://fess.example.com"}
-     */
-    private static String selfOrigin(final HttpServletRequest request) {
-        return normalizeParts(request.getScheme(), request.getServerName(), request.getServerPort());
     }
 
     /**

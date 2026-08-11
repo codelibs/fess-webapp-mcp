@@ -42,8 +42,9 @@ import org.codelibs.fess.util.ComponentUtil;
  * value falls back to the handler's own default, and the result -- default included -- is
  * always clamped to {@code >= 0} before it is reported, per the schema's {@code @minimum 0}.</li>
  * <li>For the four list methods (not {@code resources/read}, which is not paginated), an
- * inbound {@code cursor} is always rejected: this server never issues a {@code nextCursor}, so
- * any {@code cursor} a client sends is necessarily stale.</li>
+ * inbound non-null {@code cursor} is always rejected: this server never issues a
+ * {@code nextCursor}, so any {@code cursor} a client sends is necessarily stale. An explicit
+ * JSON {@code null} is treated as absent -- see {@link #rejectCursor}.</li>
  * </ul>
  */
 public abstract class AbstractCacheableHandler implements McpMethodHandler {
@@ -179,12 +180,29 @@ public abstract class AbstractCacheableHandler implements McpMethodHandler {
      * page 1.
      * </p>
      *
+     * <p>
+     * <b>An explicit JSON {@code null} is absent, not a cursor</b> -- which is why this reads the
+     * mapped value instead of asking {@code containsKey}. The schema declares
+     * {@code cursor?: string}, so {@code "cursor": null} means "no cursor", exactly like omitting
+     * the key; the two are the same request as far as the protocol is concerned. The distinction
+     * matters because the OpenSearch XContent parser that builds {@code params} keeps
+     * null-valued keys, so {@code containsKey("cursor")} answers true for both, while several
+     * mainstream serializers emit a null for an unset optional field by default -- Jackson,
+     * .NET's {@code System.Text.Json}, and a Go struct field without {@code omitempty} all do.
+     * A client built on any of them would send {@code "cursor": null} on its very first
+     * {@code tools/list} -- the call immediately after {@code server/discover} -- and, if the
+     * key's mere presence were the test, be met with {@code -32602} on all four list methods and
+     * never get off the ground. This is also what the pre-refactor implementation did: it
+     * accepted {@code cursor} and ignored it entirely, so treating a null as a rejection would
+     * be a regression, not a tightening.
+     * </p>
+     *
      * @param context the call context
      * @throws McpError with HTTP 200 and {@link ErrorCode#InvalidParams} when {@code params}
-     *             carries a {@code cursor}
+     *             carries a non-null {@code cursor}
      */
     protected void rejectCursor(final McpCallContext context) {
-        if (context.getParams().containsKey("cursor")) {
+        if (context.getParams().get("cursor") != null) {
             throw new McpError(HttpServletResponse.SC_OK, ErrorCode.InvalidParams,
                     "this server returns a single page and never issues a nextCursor");
         }

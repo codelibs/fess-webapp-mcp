@@ -15,13 +15,19 @@
  */
 package org.codelibs.fess.plugin.webapp.mcp.handler;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
 
 import org.codelibs.fess.mylasta.direction.FessConfig;
 import org.codelibs.fess.plugin.webapp.api.mcp.McpApiManager;
+import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
+import org.codelibs.fess.plugin.webapp.mcp.protocol.McpError;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -193,5 +199,53 @@ public class AbstractCacheableHandlerTest {
         // "none" default the two classes share keeps that duplication from silently drifting
         // apart -- e.g. one side being renamed to "anonymous" while the other stays "none".
         assertEquals(McpApiManager.AUTH_MODE_NONE, AbstractCacheableHandler.AUTH_MODE_NONE);
+    }
+
+    /** Builds a context whose {@code params} carry exactly the given cursor, null included. */
+    private static McpCallContext contextWithCursor(final Object cursor) {
+        // Map.of throws NPE on a null value, which is precisely why no existing test could
+        // express this case; singletonMap accepts one.
+        return new McpCallContext(null, null, Collections.singletonMap("cursor", cursor));
+    }
+
+    @Test
+    public void testExplicitNullCursorIsTreatedAsAbsent() {
+        // "cursor": null is the MCP schema's cursor?: string in its unset form, and Jackson,
+        // System.Text.Json and an omitempty-less Go struct all emit exactly that for an unset
+        // optional field. containsKey("cursor") cannot tell it apart from a real cursor -- the
+        // XContent parser keeps null-valued keys -- so testing key presence would answer -32602
+        // to such a client's very first tools/list and leave it unable to do anything at all.
+        final TestHandler handler = new TestHandler(null, 3_600_000L);
+        assertDoesNotThrow(() -> handler.rejectCursor(contextWithCursor(null)));
+    }
+
+    @Test
+    public void testNonNullCursorIsStillRejected() {
+        // The actual rule this method exists for: this server never issues a nextCursor, so any
+        // cursor a client does send is stale and must not be silently ignored.
+        final TestHandler handler = new TestHandler(null, 3_600_000L);
+
+        final McpError error = assertThrows(McpError.class, () -> handler.rejectCursor(contextWithCursor("page2")));
+
+        assertEquals(200, error.getHttpStatus());
+        assertEquals(ErrorCode.InvalidParams, error.getErrorCode());
+    }
+
+    @Test
+    public void testEmptyStringCursorIsStillRejected() {
+        // "" is a present, non-null string: still a cursor this server never issued. Pins that
+        // the null check is a null check, not a general "falsy" or isEmpty test.
+        final TestHandler handler = new TestHandler(null, 3_600_000L);
+
+        final McpError error = assertThrows(McpError.class, () -> handler.rejectCursor(contextWithCursor("")));
+
+        assertEquals(200, error.getHttpStatus());
+        assertEquals(ErrorCode.InvalidParams, error.getErrorCode());
+    }
+
+    @Test
+    public void testAbsentCursorIsAccepted() {
+        final TestHandler handler = new TestHandler(null, 3_600_000L);
+        assertDoesNotThrow(() -> handler.rejectCursor(new McpCallContext(null, null, new HashMap<>())));
     }
 }

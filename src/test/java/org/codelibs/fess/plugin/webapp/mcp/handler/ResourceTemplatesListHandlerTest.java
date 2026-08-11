@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -86,6 +87,18 @@ public class ResourceTemplatesListHandlerTest {
         final McpError error = assertThrows(McpError.class, () -> handler.handle(contextWithParams(Map.of("cursor", "page2"))));
         assertEquals(200, error.getHttpStatus());
         assertEquals(ErrorCode.InvalidParams, error.getErrorCode());
+    }
+
+    @Test
+    public void testExplicitNullCursorIsAccepted() {
+        // "cursor": null is the schema's cursor?: string in its unset form, which several
+        // mainstream serializers emit by default for an absent optional field. It must be read as
+        // absent, not as a stale cursor. Collections.singletonMap, not Map.of, because Map.of
+        // throws NPE on a null value -- which is why no existing test could express this case.
+        final Map<String, Object> result = new FixedTtlHandler().handle(contextWithParams(Collections.singletonMap("cursor", null)));
+
+        assertEquals(3600000L, result.get("ttlMs"),
+                "a null cursor is absent: handle() must return the single page instead of raising -32602");
     }
 
     @Test

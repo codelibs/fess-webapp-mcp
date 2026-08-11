@@ -122,23 +122,65 @@ public final class HeaderValidator {
      * Decodes the {@code =?base64?<b64utf8>?=} sentinel MCP 2026-07-28 uses to carry
      * non-ASCII header values, which HTTP header fields cannot transport directly.
      *
+     * <p>
+     * <b>The prefix and the suffix must not overlap.</b> The prefix {@code "=?base64?"} is nine
+     * characters and the suffix {@code "?="} is two, so the single ten-character value
+     * {@code "=?base64?="} satisfies both {@code startsWith} and {@code endsWith} using the same
+     * {@code '?'} for each -- and slicing the payload out of it would ask for
+     * {@code substring(9, 8)}, a {@link StringIndexOutOfBoundsException}. That is a
+     * <em>sibling</em> of {@link IllegalArgumentException}, not a subtype, so the catch below
+     * would not see it: it would escape this class entirely and reach {@code McpApiManager}'s
+     * last-resort {@code catch (Throwable)}, which answers HTTP 200 with {@code -32603}
+     * "internal error" and logs a stack trace at WARN -- on unauthenticated input, evaluated
+     * before the rate limiter, so it is neither throttleable nor quiet. Requiring the value to be
+     * long enough to hold both delimiters turns that input into the same clean HTTP 400 /
+     * {@code -32020} a malformed payload already produces: a value that carries the sentinel's
+     * markers but cannot be parsed as one is malformed, not "not a sentinel".
+     * </p>
+     *
+     * <p>
+     * An empty payload ({@code "=?base64??="}, eleven characters) is the boundary case one
+     * character above that, and is deliberately <em>not</em> an error: it is a well-formed
+     * sentinel, and base64 decodes it to the empty string. It is left for {@code match} to deal
+     * with, which rejects it with the same 400 as any other value that disagrees with the body --
+     * no tool, prompt, or resource URI is named by the empty string. Failing it here instead
+     * would only trade one 400 for another while inventing a rule the sentinel grammar does not
+     * have.
+     * </p>
+     *
      * @param value the raw header value; may be null when the header was absent
      * @return the decoded value when {@code value} is a well-formed sentinel; {@code value}
      *         unchanged when it is null or is not a sentinel
      * @throws McpError with HTTP 400 and {@link ErrorCode#HeaderMismatch} when {@code value}
-     *             has the sentinel's prefix and suffix but its payload is not valid base64
+     *             has the sentinel's prefix and suffix but is too short to hold both of them, or
+     *             its payload is not valid base64
      */
     public static String decodeSentinel(final String value) {
         if (value == null || !value.startsWith(SENTINEL_PREFIX) || !value.endsWith(SENTINEL_SUFFIX)) {
             return value;
         }
+        if (value.length() < SENTINEL_PREFIX.length() + SENTINEL_SUFFIX.length()) {
+            throw malformedSentinel();
+        }
         final String encoded = value.substring(SENTINEL_PREFIX.length(), value.length() - SENTINEL_SUFFIX.length());
         try {
             return new String(Base64.getDecoder().decode(encoded), StandardCharsets.UTF_8);
         } catch (final IllegalArgumentException e) {
-            throw new McpError(HttpServletResponse.SC_BAD_REQUEST, ErrorCode.HeaderMismatch,
-                    McpConstants.HEADER_NAME + " carries a malformed base64 sentinel");
+            throw malformedSentinel();
         }
+    }
+
+    /**
+     * Builds the error both malformed-sentinel paths answer with, so that overlapping delimiters
+     * and an unparseable payload are indistinguishable to the client: each is a value that
+     * announces itself as a sentinel and then fails to be one, and telling them apart would only
+     * describe this server's parser to an unauthenticated caller.
+     *
+     * @return the HTTP 400 / {@link ErrorCode#HeaderMismatch} error to throw
+     */
+    private static McpError malformedSentinel() {
+        return new McpError(HttpServletResponse.SC_BAD_REQUEST, ErrorCode.HeaderMismatch,
+                McpConstants.HEADER_NAME + " carries a malformed base64 sentinel");
     }
 
     /**

@@ -287,6 +287,50 @@ public class HeaderValidatorTest {
     }
 
     @Test
+    public void testOverlappingSentinelDelimitersIsHeaderMismatch() {
+        // "=?base64?=" is ten characters: the prefix is nine and the suffix two, so the single
+        // '?' at index 8 serves as the last character of the prefix AND the first of the suffix.
+        // Both startsWith and endsWith hold, and slicing the payload asks for substring(9, 8) --
+        // a StringIndexOutOfBoundsException, which is a *sibling* of IllegalArgumentException,
+        // not a subtype, so the malformed-base64 catch does not see it. Unguarded it escapes to
+        // McpApiManager's catch (Throwable) and is served as HTTP 200 / -32603 with a WARN stack
+        // trace, on unauthenticated input evaluated before the rate limiter. assertThrows on
+        // McpError is what makes this test fail (Unexpected exception type) if the guard goes.
+        final McpError error = assertThrows(McpError.class, () -> HeaderValidator.decodeSentinel("=?base64?="));
+        assertEquals(ErrorCode.HeaderMismatch, error.getErrorCode());
+        assertEquals(400, error.getHttpStatus(), "an unparseable sentinel is a client error, not an internal one");
+    }
+
+    @Test
+    public void testOverlappingSentinelDelimitersInNameHeaderIsHttp400() {
+        // The same value as it actually arrives: an Mcp-Name header on a real tools/call. Pins
+        // that the guard is reached on the production path, not only when decodeSentinel is
+        // called directly.
+        final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("POST", "/mcp");
+        request.addHeader(McpConstants.HEADER_PROTOCOL_VERSION, "2026-07-28");
+        request.addHeader(McpConstants.HEADER_METHOD, "tools/call");
+        request.addHeader(McpConstants.HEADER_NAME, "=?base64?=");
+
+        final McpRequest parsed = toolsCall("search");
+        HeaderValidator.requirePresent(request, parsed);
+
+        final McpError error = assertThrows(McpError.class,
+                () -> HeaderValidator.requireMatches(request, parsed, McpRequestMeta.parse(parsed.getParams())));
+        assertEquals(ErrorCode.HeaderMismatch, error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    public void testSentinelWithEmptyPayloadDecodesToEmptyString() {
+        // One character longer than the overlap case, and the boundary the length guard must sit
+        // exactly at: "=?base64??=" has its own '?' for each delimiter and an empty payload
+        // between them, which is a well-formed sentinel base64-decoding to "". If the guard were
+        // off by one (rejecting length 11 too) this would throw instead. The empty result is left
+        // to the body comparison, which rejects it like any other mismatch -- nothing is named "".
+        assertEquals("", HeaderValidator.decodeSentinel("=?base64??="));
+    }
+
+    @Test
     public void testNameHeaderMatchesDecodedNonAsciiToolName() {
         final String toolName = "検索";
         final String encoded = "=?base64?"
