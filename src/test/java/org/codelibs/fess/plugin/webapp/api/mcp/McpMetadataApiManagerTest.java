@@ -19,11 +19,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.codelibs.core.misc.Pair;
 import org.codelibs.fess.plugin.webapp.mcp.json.Json;
 import org.dbflute.utflute.mocklet.MockletHttpServletRequestImpl;
 import org.dbflute.utflute.mocklet.MockletHttpServletResponseImpl;
@@ -39,6 +41,9 @@ public class McpMetadataApiManagerTest {
         final Map<String, String> properties = new HashMap<>();
         Set<String> trustedProxies = Set.of();
 
+        /** The configured {@code api.json.response.headers} pairs; empty unless a test sets them. */
+        List<Pair<String, String>> responseHeaders = List.of();
+
         @Override
         protected String getSystemProperty(final String key, final String defaultValue) {
             return properties.getOrDefault(key, defaultValue);
@@ -47,6 +52,12 @@ public class McpMetadataApiManagerTest {
         @Override
         protected Set<String> getTrustedProxies() {
             return trustedProxies;
+        }
+
+        @Override
+        protected List<Pair<String, String>> getApiJsonResponseHeaderList() {
+            // no-op: the real implementation reads api.json.response.headers from the container
+            return responseHeaders;
         }
     }
 
@@ -86,16 +97,52 @@ public class McpMetadataApiManagerTest {
 
     @Test
     public void testMetadataIs404WhenAuthModeIsNotOauth() throws Exception {
-        final McpMetadataApiManager manager = new McpMetadataApiManager() {
-            @Override
-            protected String getAuthMode() {
-                return "none";
-            }
-        };
+        // Uses TestManager rather than an anonymous getAuthMode() override so that every
+        // ComponentUtil-touching primitive this container-free path now reaches -- process() emits
+        // api.json.response.headers before it decides anything -- is stubbed in one place.
+        final TestManager manager = new TestManager();
+        manager.properties.put("mcp.auth.mode", "none");
         final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("GET", "/.well-known/oauth-protected-resource/mcp");
         final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
         manager.process(request, response, null);
         assertEquals(404, response.getStatus());
+    }
+
+    @Test
+    public void testMetadataIsServedForWhitespaceAndCaseVariantsOfOauthMode() throws Exception {
+        // The second of the four mcp.auth.mode readers. Neither configuration channel trims or
+        // case-folds this value (see McpApiManager#normalizeAuthMode), and this manager must apply
+        // the same normalisation McpApiManager does: if it did not, "mcp.auth.mode=oauth " would
+        // 404 this document for a deployment whose /mcp endpoint really is enforcing OAuth, so a
+        // client following the 401 challenge's resource_metadata URL would find nothing there.
+        for (final String raw : List.of("oauth ", " oauth", " oauth ", "OAUTH", "OAuth", "oauth\t")) {
+            final TestManager manager = oauthManager();
+            manager.properties.put("mcp.auth.mode", raw);
+            final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("GET", "/.well-known/oauth-protected-resource/mcp");
+            final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
+
+            manager.process(request, response, null);
+
+            assertEquals(200, response.getStatus(), "mcp.auth.mode=[" + raw.replace("\t", "\\t") + "] must still serve the PRM document");
+            assertEquals("https://fess.example.com/mcp", Json.parseObject(McpHttpTestSupport.bodyOf(response)).get("resource"));
+        }
+    }
+
+    @Test
+    public void testMetadataIsStill404ForAnUnrecognisedAuthModeThatMerelyContainsOauth() throws Exception {
+        // The guard against over-widening: normalisation may fold whitespace and case, nothing
+        // else. Without this, a "normaliser" built on contains() or startsWith() would pass the
+        // test above while advertising OAuth protection for a mode McpApiManager does not enforce.
+        for (final String raw : List.of("oauth2", "not-oauth", "oauth,fess_token")) {
+            final TestManager manager = oauthManager();
+            manager.properties.put("mcp.auth.mode", raw);
+            final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("GET", "/.well-known/oauth-protected-resource/mcp");
+            final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
+
+            manager.process(request, response, null);
+
+            assertEquals(404, response.getStatus(), "mcp.auth.mode=[" + raw + "] is not oauth mode");
+        }
     }
 
     // ------------------------------------------------------------------
@@ -199,6 +246,59 @@ public class McpMetadataApiManagerTest {
 
         final Map<String, Object> body = Json.parseObject(McpHttpTestSupport.bodyOf(response));
         assertFalse(body.get("scopes_supported").toString().contains("offline_access"));
+    }
+
+    // ------------------------------------------------------------------
+    // api.json.response.headers: this manager emitted them on NO path, not even its 200. It
+    // implements WebApiManager directly, so it has no BaseApiManager#writeHeaders to inherit --
+    // which is exactly how the operator-configured headers came to be missing here while the
+    // sibling /mcp endpoint had them. It shares McpApiManager's emitter rather than
+    // re-implementing the Vary rule, so the two cannot drift.
+    // ------------------------------------------------------------------
+
+    @Test
+    public void testConfiguredResponseHeadersAreEmittedOnTheServedDocument() throws Exception {
+        final TestManager manager = oauthManager();
+        manager.responseHeaders = List.of(new Pair<>("Cache-Control", "no-store"));
+        final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("GET", "/.well-known/oauth-protected-resource/mcp");
+        final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
+
+        manager.process(request, response, null);
+
+        assertEquals(200, response.getStatus());
+        assertEquals("no-store", response.getHeader("Cache-Control"));
+    }
+
+    @Test
+    public void testConfiguredResponseHeadersAreEmittedOnThe404Too() throws Exception {
+        // The same reasoning as McpApiManager's: these are headers of this endpoint's responses,
+        // and a 404 is one of them -- so the emit happens first, ahead of every exit.
+        final TestManager manager = new TestManager();
+        manager.properties.put("mcp.auth.mode", "none");
+        manager.responseHeaders = List.of(new Pair<>("Cache-Control", "no-store"));
+        final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("GET", "/.well-known/oauth-protected-resource/mcp");
+        final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
+
+        manager.process(request, response, null);
+
+        assertEquals(404, response.getStatus());
+        assertEquals("no-store", response.getHeader("Cache-Control"));
+    }
+
+    @Test
+    public void testConfiguredVaryHeaderIsAppendedNotReplaced() throws Exception {
+        // Same hazard as on /mcp: CorsFilter has already appended Vary: Origin by the time this
+        // manager runs, so replacing it would let a shared cache serve one origin's document to
+        // another. Pins that this manager goes through the same appending emitter.
+        final TestManager manager = oauthManager();
+        manager.responseHeaders = List.of(new Pair<>("Vary", "Accept"));
+        final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("GET", "/.well-known/oauth-protected-resource/mcp");
+        final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
+        response.addHeader("Vary", "Origin");
+
+        manager.process(request, response, null);
+
+        assertEquals(List.of("Origin", "Accept"), new ArrayList<>(response.getHeaders("Vary")));
     }
 
     // ------------------------------------------------------------------

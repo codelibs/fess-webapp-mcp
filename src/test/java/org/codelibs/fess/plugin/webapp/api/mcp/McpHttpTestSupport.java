@@ -65,14 +65,24 @@ public final class McpHttpTestSupport {
     }
 
     /**
-     * Reads the body written through {@code getOutputStream()}, which is the channel
-     * {@code BaseApiManager#write} uses.
+     * Reads the response body from <em>both</em> sinks the mock keeps.
+     *
+     * <p>
+     * {@code MockletHttpServletResponseImpl} has two independent body channels:
+     * {@code getOutputStream()} drains into a {@code ByteArrayOutputStream} exposed by
+     * {@code getResponseBytes()} -- the one this plugin's writers use -- and {@code getWriter()}
+     * into a separate {@code StringWriter} exposed by {@code getResponseString()}. Reading only the
+     * first left every {@code assertEquals("", bodyOf(response))} in this suite blind to a body
+     * written through the other: a leak through {@code getWriter()} passed the whole suite. Nothing
+     * in production uses {@code getWriter()} today, which is exactly why an assertion that cannot
+     * see it is worth one line to fix rather than worth trusting.
+     * </p>
      *
      * @param response the mock response
-     * @return the response body as UTF-8 text
+     * @return the response body as UTF-8 text, the byte sink followed by the writer sink
      */
     public static String bodyOf(final MockletHttpServletResponseImpl response) {
         final byte[] bytes = response.getResponseBytes();
-        return bytes == null ? "" : new String(bytes, StandardCharsets.UTF_8);
+        return (bytes == null ? "" : new String(bytes, StandardCharsets.UTF_8)) + response.getResponseString();
     }
 }

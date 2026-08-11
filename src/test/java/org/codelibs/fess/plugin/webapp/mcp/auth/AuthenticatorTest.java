@@ -30,12 +30,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.codelibs.core.misc.Pair;
 import org.codelibs.fess.app.service.AccessTokenService;
 import org.codelibs.fess.exception.InvalidAccessTokenException;
 import org.codelibs.fess.plugin.webapp.api.mcp.McpApiManager;
 import org.codelibs.fess.plugin.webapp.api.mcp.McpHttpTestSupport;
 import org.codelibs.fess.plugin.webapp.mcp.McpConstants;
 import org.codelibs.fess.plugin.webapp.mcp.handler.McpMethodHandler;
+import org.codelibs.fess.plugin.webapp.mcp.handler.ResourcesListHandler;
+import org.codelibs.fess.plugin.webapp.mcp.handler.ToolsListHandler;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpDispatcher;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpError;
@@ -97,8 +100,12 @@ public class AuthenticatorTest {
         }
 
         @Override
-        protected void writeHeaders(final HttpServletResponse response) {
-            // no-op: the real implementation reads api.json.response.headers from the container
+        protected List<Pair<String, String>> getApiJsonResponseHeaderList() {
+            // no-op: the real implementation reads api.json.response.headers from the container.
+            // Returning an empty list (rather than overriding writeHeaders itself) leaves the
+            // production writeHeaders body running -- McpApiManagerHttpTest owns the assertions
+            // about what it emits.
+            return List.of();
         }
 
         @Override
@@ -183,14 +190,39 @@ public class AuthenticatorTest {
         String capturedKey;
         String capturedDefaultValue;
 
+        /**
+         * The raw value the simulated property holds, or {@code null} to simulate it being
+         * unset. This is the only channel that reaches {@code getAuthMode()}'s real body, so it
+         * is also the only way to exercise the normalisation that body applies -- every
+         * {@code getAuthMode()}-overriding double in this file bypasses it entirely.
+         */
+        String propertyValue;
+
+        /**
+         * Defaults to "usable", the opposite of {@link TestManager}'s default: the tests using
+         * this double drive {@code oauth} through {@code getAuthenticator()} to prove a
+         * whitespace- or case-variant mode string selects the <em>authenticating</em> path, which
+         * an unusable configuration would hide behind the {@code OAUTH_UNUSABLE} fallback.
+         */
+        OAuthResourceServerAuthenticator oauthAuthenticator = new FakeOAuthAuthenticator(true);
+
         @Override
         protected String getSystemProperty(final String key, final String defaultValue) {
-            // Simulates an unset property: real FessConfig#getSystemProperty returns
-            // defaultValue precisely when the key is unset, so echoing it back here is a
-            // faithful stand-in without needing a live container.
+            // Simulates the property: real FessConfig#getSystemProperty returns defaultValue
+            // precisely when the key is unset, so echoing it back when propertyValue is null is a
+            // faithful stand-in without needing a live container. It performs no trimming or
+            // case-folding on either channel (fess_config.properties or -Dfess.system.*), which
+            // is exactly why the value is handed through verbatim here.
             capturedKey = key;
             capturedDefaultValue = defaultValue;
-            return defaultValue;
+            return propertyValue != null ? propertyValue : defaultValue;
+        }
+
+        @Override
+        protected OAuthResourceServerAuthenticator getOAuthAuthenticator() {
+            // no-op: the real field is a live OAuthResourceServerAuthenticator whose isUsable()
+            // reads mcp.oauth.issuer via ComponentUtil
+            return oauthAuthenticator;
         }
 
         /** Exposes the protected {@code getAuthMode()} seam, for the same reason as {@code TestManager#resolveAuthenticator()}. */
@@ -496,6 +528,159 @@ public class AuthenticatorTest {
                 "getAuthMode() must pass AUTH_MODE_NONE as the default, not a different or re-typed literal");
         assertEquals("none", authMode);
         assertTrue(manager.resolveAuthenticator() instanceof NoneAuthenticator);
+    }
+
+    // ------------------------------------------------------------------
+    // mcp.auth.mode is normalised before it is compared.
+    //
+    // This is the one mcp.auth.mode-shaped misconfiguration that fails OPEN: an untrimmed or
+    // differently-cased value used to fall through every branch of resolveAuthState and select
+    // NoneAuthenticator, i.e. treat every /mcp caller as anonymous, while the operator believed
+    // they had turned authentication on. Neither channel that carries this property trims or
+    // case-folds it: java.util.Properties#load (which backs fess_config.properties, via corelib's
+    // DynamicProperties) strips only LEADING whitespace from a value and preserves a trailing run
+    // verbatim across a store/load round-trip, and -Dfess.system.mcp.auth.mode="oauth " keeps it
+    // verbatim too. The trailing-whitespace variant is also the one an operator is least likely
+    // to spot in the log, since it renders as a double space.
+    //
+    // Every double in this file overrides getAuthMode() wholesale, so these tests deliberately
+    // use SystemPropertyCapturingManager -- the only one that lets getAuthMode()'s real body,
+    // including its normalisation, actually run.
+    // ------------------------------------------------------------------
+
+    private static SystemPropertyCapturingManager managerWithAuthMode(final String rawValue) {
+        final SystemPropertyCapturingManager manager = new SystemPropertyCapturingManager();
+        manager.propertyValue = rawValue;
+        return manager;
+    }
+
+    @Test
+    public void testAuthModeIsTrimmedAndCaseFoldedBeforeSelectingTheOauthAuthenticator() {
+        for (final String raw : List.of("oauth ", " oauth", " oauth ", "OAUTH", "OAuth", "oauth\t", "\toauth\n")) {
+            final SystemPropertyCapturingManager manager = managerWithAuthMode(raw);
+            assertEquals(McpApiManager.AUTH_MODE_OAUTH, manager.resolveAuthMode(),
+                    "getAuthMode() must normalise " + describe(raw) + " before anything compares it");
+            assertSame(manager.oauthAuthenticator, manager.resolveAuthenticator(),
+                    describe(raw) + " must select the oauth authenticator, not fall through to anonymous");
+        }
+    }
+
+    @Test
+    public void testAuthModeIsTrimmedAndCaseFoldedBeforeSelectingTheFessTokenAuthenticator() {
+        for (final String raw : List.of("fess_token ", " fess_token", "FESS_TOKEN", "Fess_Token", "fess_token\t")) {
+            final SystemPropertyCapturingManager manager = managerWithAuthMode(raw);
+            assertEquals(McpApiManager.AUTH_MODE_FESS_TOKEN, manager.resolveAuthMode(),
+                    "getAuthMode() must normalise " + describe(raw) + " before anything compares it");
+            assertTrue(manager.resolveAuthenticator() instanceof FessTokenAuthenticator,
+                    describe(raw) + " must select the fess_token authenticator, not fall through to anonymous");
+        }
+    }
+
+    @Test
+    public void testNormalisingAuthModeStillLeavesAGenuinelyUnrecognisedValueAsNone() {
+        // The guard against over-widening: normalisation may only fold whitespace and case, so a
+        // value that is not one of the recognised modes must still resolve to none. Without this,
+        // a "normaliser" that mapped anything non-blank onto an authenticating mode would pass
+        // both tests above.
+        for (final String raw : List.of(" bogus-mode ", "OAUTH2", "fess-token", "  ", "")) {
+            final SystemPropertyCapturingManager manager = managerWithAuthMode(raw);
+            assertTrue(manager.resolveAuthenticator() instanceof NoneAuthenticator,
+                    describe(raw) + " is not a recognised mode and must still resolve to anonymous");
+        }
+    }
+
+    @Test
+    public void testNormalisedAuthModeStillReportsNoneAsTheUnauthenticatedPosture() {
+        // A trimmed/case-folded "none" must not accidentally become "unrecognised": it is the
+        // documented default, and resolveAuthState must keep reporting it as NONE.
+        for (final String raw : List.of("none", " none ", "NONE", "None", "none\t")) {
+            final SystemPropertyCapturingManager manager = managerWithAuthMode(raw);
+            assertEquals(McpApiManager.AUTH_MODE_NONE, manager.resolveAuthMode(), describe(raw) + " must normalise to none");
+            assertTrue(manager.resolveAuthenticator() instanceof NoneAuthenticator);
+        }
+    }
+
+    @Test
+    public void testCacheScopeDropsToPrivateForWhitespaceAndCaseVariantsOfAnAuthenticatingMode() {
+        // The third and fourth readers of mcp.auth.mode: AbstractCacheableHandler#getAuthMode(),
+        // consulted by ToolsListHandler and ResourcesListHandler to decide whether their result
+        // may be cached publicly. An untrimmed "oauth " there does not fail open in the
+        // authentication sense, but it does publish a per-caller-authorization result as
+        // cacheScope=public, so the normalisation has to be applied by every reader, not just
+        // McpApiManager's. Lives in this file rather than the handlers' own because it is the
+        // same mcp.auth.mode contract the tests above pin, and it must not be able to drift from
+        // them.
+        for (final String raw : List.of("oauth ", " oauth", "OAuth", "oauth\t", "FESS_TOKEN", "Fess_Token")) {
+            assertEquals("private", new CacheScopeProbe.Tools(raw).scope(), "tools/list cacheScope must be private for " + describe(raw));
+            assertEquals("private", new CacheScopeProbe.Resources(raw).scope(),
+                    "resources/list cacheScope must be private for " + describe(raw));
+        }
+        for (final String raw : List.of("none", " none ", "NONE")) {
+            assertEquals("public", new CacheScopeProbe.Tools(raw).scope(), "tools/list cacheScope must stay public for " + describe(raw));
+            assertEquals("public", new CacheScopeProbe.Resources(raw).scope(),
+                    "resources/list cacheScope must stay public for " + describe(raw));
+        }
+    }
+
+    /**
+     * Handler doubles that override only {@code AbstractCacheableHandler#getSystemProperty} -- the
+     * one primitive that touches {@code ComponentUtil} -- so the base class's real
+     * {@code getAuthMode()} body, normalisation included, actually runs. Every other double for
+     * these two handlers overrides {@code getAuthMode()} itself and would bypass it.
+     */
+    private interface CacheScopeProbe {
+
+        /** @return the {@code cacheScope} this handler reports for an anonymous call */
+        String scope();
+
+        /** {@link ToolsListHandler}'s {@code getCacheScope}, driven through the real {@code getAuthMode()}. */
+        final class Tools extends ToolsListHandler implements CacheScopeProbe {
+            private final String rawAuthMode;
+
+            Tools(final String rawAuthMode) {
+                this.rawAuthMode = rawAuthMode;
+            }
+
+            @Override
+            protected String getSystemProperty(final String key, final String defaultValue) {
+                return rawAuthMode;
+            }
+
+            @Override
+            public String scope() {
+                return getCacheScope(new McpCallContext());
+            }
+        }
+
+        /** {@link ResourcesListHandler}'s {@code getCacheScope}, driven the same way. */
+        final class Resources extends ResourcesListHandler implements CacheScopeProbe {
+            private final String rawAuthMode;
+
+            Resources(final String rawAuthMode) {
+                this.rawAuthMode = rawAuthMode;
+            }
+
+            @Override
+            protected String getSystemProperty(final String key, final String defaultValue) {
+                return rawAuthMode;
+            }
+
+            @Override
+            public String scope() {
+                return getCacheScope(new McpCallContext());
+            }
+        }
+    }
+
+    /**
+     * Renders a raw property value with its whitespace visible, so a failure message for
+     * {@code "oauth "} is not indistinguishable from one for {@code "oauth"}.
+     *
+     * @param raw the raw value
+     * @return a quoted form with tabs and newlines escaped
+     */
+    private static String describe(final String raw) {
+        return "mcp.auth.mode=[" + raw.replace("\t", "\\t").replace("\n", "\\n") + "]";
     }
 
     // ------------------------------------------------------------------

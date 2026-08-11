@@ -345,6 +345,89 @@ public class HeaderValidatorTest {
         HeaderValidator.requireMatches(request, parsed, McpRequestMeta.parse(parsed.getParams()));
     }
 
+    // ------------------------------------------------------------------
+    // A repeated metadata header is rejected.
+    //
+    // The MCP 2026-07-28 spec does NOT require this: its Server Validation section enumerates its
+    // failure conditions exhaustively as a missing required header, a header value that disagrees
+    // with the body, and a header value containing invalid characters -- duplicates are never
+    // mentioned, so accepting them was already conformant. This is hardening of the threat model
+    // the spec cites as the REASON for the validation: a load balancer routing on the header value
+    // while the MCP server executes based on the body value. request.getHeader() is specified to
+    // return only "the first head in the request", and Tomcat keeps duplicates as separate fields
+    // and rejects duplicates for Content-Length alone, so "Mcp-Method: tools/call" followed by
+    // "Mcp-Method: tools/list" used to pass validation against a tools/call body while a
+    // last-reading gateway routed the request as tools/list.
+    // ------------------------------------------------------------------
+
+    @Test
+    public void testDuplicateMethodHeaderIsHeaderMismatch() {
+        final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("POST", "/mcp");
+        request.addHeader(McpConstants.HEADER_PROTOCOL_VERSION, "2026-07-28");
+        request.addHeader(McpConstants.HEADER_METHOD, "tools/call");
+        request.addHeader(McpConstants.HEADER_METHOD, "tools/list");
+        request.addHeader(McpConstants.HEADER_NAME, "search");
+
+        final McpError error = assertThrows(McpError.class, () -> HeaderValidator.requirePresent(request, toolsCall("search")));
+        assertEquals(ErrorCode.HeaderMismatch, error.getErrorCode(),
+                "the first occurrence agrees with the body, so only a duplicate check can reject this");
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    public void testDuplicateProtocolVersionHeaderIsHeaderMismatch() {
+        final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("POST", "/mcp");
+        request.addHeader(McpConstants.HEADER_PROTOCOL_VERSION, "2026-07-28");
+        request.addHeader(McpConstants.HEADER_PROTOCOL_VERSION, "2025-06-18");
+        request.addHeader(McpConstants.HEADER_METHOD, "tools/call");
+        request.addHeader(McpConstants.HEADER_NAME, "search");
+
+        final McpError error = assertThrows(McpError.class, () -> HeaderValidator.requirePresent(request, toolsCall("search")));
+        assertEquals(ErrorCode.HeaderMismatch, error.getErrorCode(), "a duplicate is -32020, not -32022: the version itself is supported");
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    public void testDuplicateNameHeaderIsHeaderMismatch() {
+        final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("POST", "/mcp");
+        request.addHeader(McpConstants.HEADER_PROTOCOL_VERSION, "2026-07-28");
+        request.addHeader(McpConstants.HEADER_METHOD, "tools/call");
+        request.addHeader(McpConstants.HEADER_NAME, "search");
+        request.addHeader(McpConstants.HEADER_NAME, "get_index_stats");
+
+        final McpError error = assertThrows(McpError.class, () -> HeaderValidator.requirePresent(request, toolsCall("search")));
+        assertEquals(ErrorCode.HeaderMismatch, error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    public void testRepeatingAHeaderWithAnIdenticalValueIsStillRejected() {
+        // A repeated header is ambiguous to an intermediary regardless of whether the two values
+        // agree with each other -- and "the values happen to be equal" is not a property this
+        // server can verify cheaply for the general case, so the rule is one occurrence, full stop.
+        final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("POST", "/mcp");
+        request.addHeader(McpConstants.HEADER_PROTOCOL_VERSION, "2026-07-28");
+        request.addHeader(McpConstants.HEADER_METHOD, "tools/call");
+        request.addHeader(McpConstants.HEADER_METHOD, "tools/call");
+        request.addHeader(McpConstants.HEADER_NAME, "search");
+
+        assertThrows(McpError.class, () -> HeaderValidator.requirePresent(request, toolsCall("search")));
+    }
+
+    @Test
+    public void testARepeatedNameHeaderIsIgnoredForMethodsThatDoNotCarryOne() {
+        // Scoped to the headers this method actually requires, exactly as the single-occurrence
+        // checks are: tools/list does not mirror Mcp-Name, so a stray -- even repeated -- one is
+        // not part of its metadata and must not turn a valid request into a 400.
+        final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("POST", "/mcp");
+        request.addHeader(McpConstants.HEADER_PROTOCOL_VERSION, "2026-07-28");
+        request.addHeader(McpConstants.HEADER_METHOD, "tools/list");
+        request.addHeader(McpConstants.HEADER_NAME, "stray");
+        request.addHeader(McpConstants.HEADER_NAME, "also-stray");
+
+        HeaderValidator.requirePresent(request, toolsList());
+    }
+
     @Test
     public void testMatchingHeadersPass() {
         final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("POST", "/mcp");

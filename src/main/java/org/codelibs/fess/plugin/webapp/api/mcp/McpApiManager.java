@@ -21,6 +21,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
@@ -29,6 +30,7 @@ import java.util.stream.Collectors;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codelibs.core.lang.StringUtil;
+import org.codelibs.core.misc.Pair;
 import org.codelibs.fess.Constants;
 import org.codelibs.fess.api.BaseApiManager;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
@@ -311,7 +313,7 @@ public class McpApiManager extends BaseApiManager {
      * stops warning about (or starts wrongly warning about) a posture it actually has.
      * </p>
      *
-     * @param authMode the raw {@code mcp.auth.mode} value
+     * @param authMode the normalised {@code mcp.auth.mode} value, as {@link #getAuthMode()} returns it
      * @return the effective posture; never null
      */
     protected AuthState resolveAuthState(final String authMode) {
@@ -347,7 +349,7 @@ public class McpApiManager extends BaseApiManager {
      * </p>
      *
      * @param state the posture this request resolved
-     * @param authMode the raw {@code mcp.auth.mode} value behind it, for the message
+     * @param authMode the normalised {@code mcp.auth.mode} value behind it, for the message
      */
     protected void noteAuthState(final AuthState state, final String authMode) {
         if (lastAuthState.get() == state) {
@@ -373,7 +375,7 @@ public class McpApiManager extends BaseApiManager {
      * </p>
      *
      * @param state the posture now in effect
-     * @param authMode the raw {@code mcp.auth.mode} value behind it
+     * @param authMode the normalised {@code mcp.auth.mode} value behind it
      * @param previous the posture previously in effect, or {@code null} when this is the first
      *            resolution (startup, or a first request on a manager whose {@code @PostConstruct}
      *            never ran)
@@ -419,6 +421,11 @@ public class McpApiManager extends BaseApiManager {
         Object id = null;
         boolean hasId = false;
         try {
+            // First, ahead of every exit: api.json.response.headers is a property of this
+            // endpoint's RESPONSES, so every response it can produce -- the 405 below, the 503
+            // below that, and each error the catch blocks answer with -- has to carry them. It
+            // used to sit after both early exits, which emitted none on either.
+            writeHeaders(response);
             if (!isEnabled()) {
                 throw new McpError(HttpServletResponse.SC_SERVICE_UNAVAILABLE, ErrorCode.InternalError,
                         "The MCP endpoint is disabled (mcp.enabled=false)");
@@ -429,7 +436,6 @@ public class McpApiManager extends BaseApiManager {
                 response.setHeader("Allow", "POST");
                 return;
             }
-            writeHeaders(response);
             validateOrigin(request); // Task 10
             final McpPrincipal principal = authenticate(request, response); // Task 13-14
 
@@ -587,7 +593,7 @@ public class McpApiManager extends BaseApiManager {
      *         branch (it could only be derived from the caller-controlled {@code Host} header)
      */
     protected Set<String> getAllowedOrigins() {
-        final String value = ComponentUtil.getFessConfig().getSystemProperty("mcp.allowed.origins", StringUtil.EMPTY);
+        final String value = getSystemProperty("mcp.allowed.origins", StringUtil.EMPTY);
         if (StringUtil.isBlank(value)) {
             return Collections.emptySet();
         }
@@ -862,25 +868,75 @@ public class McpApiManager extends BaseApiManager {
      * unexercised.
      * </p>
      *
-     * @return {@code mcp.auth.mode}'s value; {@link #AUTH_MODE_NONE} when unset
+     * @return {@code mcp.auth.mode}'s normalised value; {@link #AUTH_MODE_NONE} when unset
      */
     protected String getAuthMode() {
-        return getSystemProperty("mcp.auth.mode", AUTH_MODE_NONE);
+        return normalizeAuthMode(getSystemProperty("mcp.auth.mode", AUTH_MODE_NONE));
+    }
+
+    /**
+     * Folds surrounding whitespace and letter case out of a raw {@code mcp.auth.mode} value, so
+     * that every comparison against {@link #AUTH_MODE_NONE}, {@link #AUTH_MODE_FESS_TOKEN} and
+     * {@link #AUTH_MODE_OAUTH} is made against a canonical form.
+     * <p>
+     * <b>Why this is not merely cosmetic.</b> {@code mcp.auth.mode} is the one MCP property whose
+     * misreading fails <em>open</em>: an unrecognised value resolves to {@link NoneAuthenticator}
+     * -- every {@code /mcp} caller anonymous -- so {@code mcp.auth.mode=oauth } with one trailing
+     * space used to leave the endpoint wide open while the operator believed they had turned
+     * authorization on. (The sibling {@code mcp.oauth.*} values are untrimmed too, but each of
+     * those fails <em>closed</em>: a stray space in {@code mcp.oauth.issuer} makes
+     * {@code isUsable()} reject the configuration, or makes token validation fail, both of which
+     * are self-announcing.)
+     * </p>
+     * <p>
+     * <b>Neither configuration channel normalises it for us.</b> {@code java.util.Properties#load}
+     * -- which backs {@code fess_config.properties} through corelib's {@code DynamicProperties} --
+     * strips only the whitespace <em>leading</em> a value and preserves a trailing run verbatim,
+     * including across a store/load round-trip; {@code -Dfess.system.mcp.auth.mode="oauth "} keeps
+     * it verbatim as well. And {@code FessProp#getSystemProperty} trims nothing on either channel.
+     * The trailing-whitespace form is also the variant an operator is least likely to catch in the
+     * WARN {@link #logAuthState} emits, since it renders there as an unremarkable double space.
+     * </p>
+     * <p>
+     * <b>This can only widen the set of strings that select an authenticating mode, never narrow
+     * it</b> -- {@code trim()} plus lower-casing maps each already-recognised value onto itself --
+     * so it cannot reintroduce the failure shape where a mode is selected and then falls back to
+     * anonymous behaviour: {@code oauth} still has to satisfy
+     * {@link OAuthResourceServerAuthenticator#isUsable()}, and that check is unchanged. Case
+     * folding follows Fess's own convention for mode-shaped system properties
+     * ({@code FessProp#getSystemPropertyAsBoolean} tests {@code Constants.TRUE.equalsIgnoreCase}),
+     * and uses {@link Locale#ROOT} because all three mode literals are ASCII and a locale-sensitive
+     * fold (Turkish {@code I}) would otherwise be able to change the answer with the server's
+     * default locale.
+     * </p>
+     *
+     * @param rawValue the raw property value; never null in practice, since the only caller passes
+     *            a non-null default
+     * @return the canonical form to compare, or {@code rawValue} unchanged when it is null
+     */
+    protected static String normalizeAuthMode(final String rawValue) {
+        return rawValue == null ? rawValue : rawValue.trim().toLowerCase(Locale.ROOT);
     }
 
     /**
      * Reads a String-valued Fess system property.
      * <p>
      * Isolated so {@link #getAuthMode()} itself can be exercised container-free: this is the
-     * only place in that call chain that touches {@code ComponentUtil}. {@link #getAllowedOrigins()}
-     * is the one remaining consumer of a different-typed system property that is not routed
-     * through a property-level seam ({@link #getSystemPropertyAsBoolean(String, boolean)} and
-     * {@link #getSystemPropertyAsInt(String, int)} cover the rest -- see those seams' own
-     * Javadoc); it already has its own established, reviewed container-free test double (each
-     * test file overrides {@code getAllowedOrigins()} directly), and its parsing (comma-split,
-     * trim, filter blanks) is more than a bare default-value passthrough, so routing it through
-     * {@link #getSystemProperty(String, String)} here would not exercise anything {@code
-     * getAllowedOrigins()}'s own test does not already cover.
+     * only place in that call chain that touches {@code ComponentUtil}
+     * ({@link #getSystemPropertyAsBoolean(String, boolean)} and
+     * {@link #getSystemPropertyAsInt(String, int)} cover the differently-typed reads -- see those
+     * seams' own Javadoc).
+     * </p>
+     * <p>
+     * {@link #getAllowedOrigins()} routes through this seam too. It used to call
+     * {@code ComponentUtil.getFessConfig().getSystemProperty(...)} directly, on the argument that
+     * it "already has its own container-free test double, so routing it through here would not
+     * exercise anything its own test does not already cover" -- and that argument was wrong,
+     * demonstrably: the double in question overrode {@code getAllowedOrigins()} <em>wholesale</em>,
+     * so the production body never ran in any test. A mutation that changed the key to
+     * {@code mcp.origins.allowed}, split on {@code ';'} instead of {@code ','}, and dropped the
+     * {@code trim()} left the whole suite green. Overriding this one primitive instead lets the
+     * real key, the real split and the real trim actually execute.
      * </p>
      *
      * @param key the system property key
@@ -1020,7 +1076,49 @@ public class McpApiManager extends BaseApiManager {
 
     @Override
     protected void writeHeaders(final HttpServletResponse response) {
-        ComponentUtil.getFessConfig().getApiJsonResponseHeaderList().forEach(e -> {
+        applyApiJsonResponseHeaders(response, getApiJsonResponseHeaderList());
+    }
+
+    /**
+     * Reads the configured {@code api.json.response.headers} pairs.
+     * <p>
+     * Isolated for the same reason as {@link #getSystemProperty(String, String)} and the two
+     * typed seams beside it, and it is the seam that closes a proven hole: every test double in
+     * this suite used to override {@link #writeHeaders} <em>itself</em> as a no-op, so its whole
+     * body -- the {@code Vary} distinction included -- ran in no test at all. Deleting the
+     * {@code writeHeaders(response)} call from {@link #process}, or collapsing the {@code Vary}
+     * branch onto a plain {@code setHeader}, left the entire suite green. Overriding only this
+     * read leaves the production body to run.
+     * </p>
+     *
+     * @return the configured header pairs; never null
+     */
+    protected List<Pair<String, String>> getApiJsonResponseHeaderList() {
+        return ComponentUtil.getFessConfig().getApiJsonResponseHeaderList();
+    }
+
+    /**
+     * Emits {@code api.json.response.headers} onto {@code response}, appending rather than
+     * replacing for {@code Vary}.
+     * <p>
+     * The {@code Vary} distinction is a real behavioural one, not defensive style: Fess's own
+     * {@code CorsFilter} appends {@code Vary: Origin} for every origin-bearing request, and this
+     * runs after it, so a {@code setHeader} here would <em>delete</em> that value and let a shared
+     * cache serve one origin's response to another. Every other header is set, so that a second
+     * pass over the same response cannot accumulate duplicates.
+     * </p>
+     * <p>
+     * {@code static}, and shared with {@link McpMetadataApiManager}: that class implements
+     * {@code WebApiManager} directly (it has no {@code BaseApiManager#writeHeaders} to override)
+     * yet must emit the same operator-configured headers, and re-implementing the {@code Vary}
+     * rule there is exactly the kind of duplication that drifts.
+     * </p>
+     *
+     * @param response the response to write onto
+     * @param headers the configured header pairs
+     */
+    static void applyApiJsonResponseHeaders(final HttpServletResponse response, final List<Pair<String, String>> headers) {
+        headers.forEach(e -> {
             // CorsFilter already emitted Vary: Origin; setHeader would replace it.
             if ("Vary".equalsIgnoreCase(e.getFirst())) {
                 response.addHeader(e.getFirst(), e.getSecond());

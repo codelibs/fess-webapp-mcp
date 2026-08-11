@@ -15,6 +15,7 @@
  */
 package org.codelibs.fess.plugin.webapp.mcp.handler;
 
+import java.util.Locale;
 import java.util.Map;
 
 import jakarta.servlet.http.HttpServletResponse;
@@ -147,11 +148,41 @@ public abstract class AbstractCacheableHandler implements McpMethodHandler {
      * and a typo'd key would read a property that does not exist, silently and permanently
      * falling back to {@link #AUTH_MODE_NONE} in production.
      * </p>
+     * <p>
+     * The value is {@linkplain #normalizeAuthMode normalised} before it is returned, so the
+     * {@code AUTH_MODE_NONE.equals(getAuthMode())} comparison each subclass makes is against a
+     * canonical form.
+     * </p>
      *
-     * @return {@value #AUTH_MODE_CONFIG_KEY}'s value; {@value #AUTH_MODE_NONE} when unset
+     * @return {@value #AUTH_MODE_CONFIG_KEY}'s normalised value; {@value #AUTH_MODE_NONE} when
+     *         unset
      */
     protected String getAuthMode() {
-        return getSystemProperty(AUTH_MODE_CONFIG_KEY, AUTH_MODE_NONE);
+        return normalizeAuthMode(getSystemProperty(AUTH_MODE_CONFIG_KEY, AUTH_MODE_NONE));
+    }
+
+    /**
+     * Folds surrounding whitespace and letter case out of a raw {@value #AUTH_MODE_CONFIG_KEY}
+     * value. See {@code McpApiManager#normalizeAuthMode} for why neither configuration channel
+     * does this for us, and why the fold is {@link Locale#ROOT}.
+     * <p>
+     * Duplicated from that method rather than shared, for exactly the reason
+     * {@link #AUTH_MODE_CONFIG_KEY} itself is duplicated: {@code McpApiManager} (package
+     * {@code api.mcp}) imports this package's handlers to build its dispatcher, so importing back
+     * would create a package cycle. The consequence of the two copies drifting is milder here than
+     * in {@code McpApiManager} -- this reader decides only whether a {@code tools/list} /
+     * {@code resources/list} result may be cached publicly, not whether a caller is authenticated
+     * -- but it is not nothing: an untrimmed {@code "oauth "} would report
+     * {@code cacheScope=public} for a result that now varies by the caller's authorization, so an
+     * intermediary could serve one caller's tool list to another.
+     * </p>
+     *
+     * @param rawValue the raw property value; never null in practice, since the only caller passes
+     *            a non-null default
+     * @return the canonical form to compare, or {@code rawValue} unchanged when it is null
+     */
+    protected static String normalizeAuthMode(final String rawValue) {
+        return rawValue == null ? rawValue : rawValue.trim().toLowerCase(Locale.ROOT);
     }
 
     /**

@@ -17,6 +17,7 @@ package org.codelibs.fess.plugin.webapp.mcp.protocol;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.Enumeration;
 import java.util.Set;
 
 import jakarta.servlet.http.HttpServletRequest;
@@ -37,6 +38,11 @@ import org.codelibs.fess.plugin.webapp.mcp.McpConstants;
  * {@code HeaderMismatch} answered with HTTP 400. This class does not decide whether a
  * request is a notification -- callers must not invoke either entry point for one, since
  * the transport leaves header requirements for notification POSTs undefined.
+ * </p>
+ * <p>
+ * On top of what the transport mandates, a required header <em>repeated</em> is rejected the same
+ * way. The spec does not ask for that; see {@link #require} for the threat it closes and why the
+ * spec's own stated rationale for these headers is the argument for it.
  * </p>
  */
 public final class HeaderValidator {
@@ -64,8 +70,8 @@ public final class HeaderValidator {
     }
 
     /**
-     * Verifies that every header this method requires is present, without checking whether
-     * its value agrees with the body.
+     * Verifies that every header this method requires is present exactly once, without checking
+     * whether its value agrees with the body.
      *
      * <p>
      * Call this before {@link #requireMatches}: the transport lists a missing required
@@ -78,7 +84,7 @@ public final class HeaderValidator {
      * @param mcpRequest the parsed envelope, used only to decide whether {@code Mcp-Name} is
      *            required for this method
      * @throws McpError with HTTP 400 and {@link ErrorCode#HeaderMismatch} when a header this
-     *             method requires is missing
+     *             method requires is missing, or appears more than once -- see {@link #require}
      */
     public static void requirePresent(final HttpServletRequest request, final McpRequest mcpRequest) {
         require(request, McpConstants.HEADER_PROTOCOL_VERSION);
@@ -196,16 +202,45 @@ public final class HeaderValidator {
     }
 
     /**
-     * Fails with a {@code -32020} error when {@code header} is absent from {@code request}.
+     * Fails with a {@code -32020} error when {@code header} is absent from {@code request}, or
+     * appears more than once.
+     *
+     * <p>
+     * <b>The duplicate check is hardening, not conformance.</b> MCP 2026-07-28's Server Validation
+     * section enumerates its failure conditions exhaustively -- a required standard header is
+     * missing, a header value does not match the corresponding request body value, a header value
+     * contains invalid characters -- and never mentions repetition, so accepting a repeated header
+     * was already spec-conformant. What it was not is safe against the very threat the spec gives
+     * as the <em>reason</em> for this validation: an intermediary routing on the header value while
+     * the MCP server executes based on the body value. {@code getHeader} is specified to return
+     * only "the first head in the request", and Tomcat keeps repeated fields separately and rejects
+     * repetition for {@code Content-Length} alone, so {@code Mcp-Method: tools/call} followed by
+     * {@code Mcp-Method: tools/list} would validate cleanly against a {@code tools/call} body while
+     * a last-reading gateway routed the request as {@code tools/list} -- exactly the split the
+     * headers exist to make impossible.
+     * </p>
+     *
+     * <p>
+     * Repetition is rejected even when the two values are identical: what makes a repeated header
+     * dangerous is that two hops may resolve it differently, and that is true of any repetition,
+     * not only a disagreeing one. Only the headers this method is actually called for are checked,
+     * so a stray (even repeated) {@code Mcp-Name} on a method that does not mirror one stays as
+     * ignorable as it is today.
+     * </p>
      *
      * @param request the servlet request to check
      * @param header the header name to require
      * @throws McpError with HTTP 400 and {@link ErrorCode#HeaderMismatch} when the header is
-     *             missing
+     *             missing or repeated
      */
     private static void require(final HttpServletRequest request, final String header) {
-        if (request.getHeader(header) == null) {
+        final Enumeration<String> values = request.getHeaders(header);
+        if (values == null || !values.hasMoreElements()) {
             throw new McpError(HttpServletResponse.SC_BAD_REQUEST, ErrorCode.HeaderMismatch, header + " is required");
+        }
+        values.nextElement();
+        if (values.hasMoreElements()) {
+            throw new McpError(HttpServletResponse.SC_BAD_REQUEST, ErrorCode.HeaderMismatch, header + " must appear exactly once");
         }
     }
 

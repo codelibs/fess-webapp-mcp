@@ -28,6 +28,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.codelibs.core.lang.StringUtil;
+import org.codelibs.core.misc.Pair;
 import org.codelibs.fess.plugin.webapp.mcp.McpConstants;
 import org.codelibs.fess.plugin.webapp.mcp.RateLimiter;
 import org.codelibs.fess.plugin.webapp.mcp.auth.OAuthResourceServerAuthenticator;
@@ -71,9 +73,19 @@ public class McpApiManagerHttpTest {
             return body != null ? body : super.readRequestBody(request);
         }
 
+        /**
+         * The configured {@code api.json.response.headers} pairs. Empty by default, so no test
+         * that is not about response headers has to care -- but the production
+         * {@code writeHeaders} body still runs over this list, which is the point: overriding
+         * {@code writeHeaders} itself (as this double used to) left it unexercised, and deleting
+         * its call site from {@code process} kept the whole suite green.
+         */
+        List<Pair<String, String>> responseHeaders = List.of();
+
         @Override
-        protected void writeHeaders(final HttpServletResponse response) {
+        protected List<Pair<String, String>> getApiJsonResponseHeaderList() {
             // no-op: the real implementation reads api.json.response.headers from the container
+            return responseHeaders;
         }
 
         @Override
@@ -96,13 +108,26 @@ public class McpApiManagerHttpTest {
             return maxBytes;
         }
 
+        /** The simulated Fess system properties {@link #getSystemProperty} answers from. */
+        final Map<String, String> properties = new LinkedHashMap<>();
+
+        @Override
+        protected String getSystemProperty(final String key, final String defaultValue) {
+            // The one ComponentUtil-touching primitive getAllowedOrigins()'s real body reads
+            // through. Overriding it here rather than getAllowedOrigins() itself is what lets that
+            // body -- its literal key, its comma split, its trim, its blank filter -- actually run
+            // container-free. An absent key echoes back defaultValue, exactly as
+            // FessConfig#getSystemProperty does.
+            return properties.getOrDefault(key, defaultValue);
+        }
+
         @Override
         protected Set<String> getAllowedOrigins() {
-            // no-op: the real implementation reads mcp.allowed.origins from the container.
-            // Records whether it ran at all, so tests can assert validateOrigin's
-            // presence-check actually skips this call when Origin is absent.
+            // Records whether it ran at all, so tests can assert validateOrigin's presence-check
+            // actually skips this call when Origin is absent -- then delegates, so the production
+            // parsing body still runs against the simulated properties above.
             allowedOriginsCalled = true;
-            return Set.of();
+            return super.getAllowedOrigins();
         }
 
         boolean rateLimiterCalled = false;
@@ -132,10 +157,26 @@ public class McpApiManagerHttpTest {
     private MockletHttpServletResponseImpl lastResponse;
 
     private String post(final TestManager manager, final String body, final Map<String, String> headers) throws Exception {
-        manager.body = body;
         final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("POST", "/mcp");
         headers.forEach(request::addHeader);
-        final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
+        return post(manager, body, request, McpHttpTestSupport.newResponse(request));
+    }
+
+    /**
+     * Posts against a caller-supplied request/response pair, so a test can seed the response
+     * before {@code process()} runs -- the only way to reproduce what {@code CorsFilter} has
+     * already written by the time this manager is reached.
+     *
+     * @param manager the manager under test
+     * @param body the canned request body
+     * @param request the request to process
+     * @param response the response to process onto
+     * @return the response body
+     * @throws Exception if process() throws
+     */
+    private String post(final TestManager manager, final String body, final MockletHttpServletRequestImpl request,
+            final MockletHttpServletResponseImpl response) throws Exception {
+        manager.body = body;
         manager.process(request, response, null);
         lastResponse = response;
         return McpHttpTestSupport.bodyOf(response);
@@ -565,6 +606,57 @@ public class McpApiManagerHttpTest {
         assertEquals(413, lastResponse.getStatus(), rejected);
     }
 
+    // ------------------------------------------------------------------
+    // probeSize's two clamps. Removing both left the whole suite green, yet each one stands
+    // between a misconfigured mcp.request.max.bytes and readNBytes throwing
+    // IllegalArgumentException -- which McpApiManager's last-resort catch (Throwable) launders
+    // into HTTP 200 with -32603 for EVERY request, an endpoint-wide outage whose only symptom is
+    // an "internal error" that names nothing.
+    // ------------------------------------------------------------------
+
+    @Test
+    public void testTheLargestPossibleMaxBytesStillProcessesTheRequestNormally() throws Exception {
+        // Without the upper clamp, max + 1 overflows Integer.MAX_VALUE to Integer.MIN_VALUE and
+        // readNBytes(-2147483648) throws. 2147483647 is exactly the value an operator types when
+        // they want "no limit", so this is a reachable configuration, not a contrived one.
+        final TestManager manager = new TestManager();
+        manager.maxBytes = Integer.MAX_VALUE;
+        final byte[] bytes = modernBody("no/such/method").getBytes(StandardCharsets.UTF_8);
+
+        final String body = postStream(manager, new FixedBody(bytes), modernHeaders("no/such/method"));
+
+        assertEquals(404, lastResponse.getStatus(), body);
+        assertTrue(body.contains("-32601"), "the request must be read, decoded and dispatched: " + body);
+        assertFalse(body.contains("-32603"), "an unreachable limit must not turn every request into a laundered internal error: " + body);
+    }
+
+    @Test
+    public void testAZeroOrNegativeMaxBytesRejectsEveryBodyWithA413NotAnInternalError() throws Exception {
+        // Zero and negative both mean "reject everything" -- there is no documented sentinel for
+        // "unlimited" to honour -- and the point of the lower clamp is that they do so as a 413
+        // that names the property, rather than as readNBytes(negative) laundered into -32603.
+        //
+        // -1 is included for documentation only: it CANNOT falsify the clamp on its own, because
+        // an unclamped -1 + 1 == 0 reads zero bytes and still trips the 413 by a different route.
+        // -2 and Integer.MIN_VALUE are the values that actually do, since an unclamped probe size
+        // is then negative and readNBytes throws.
+        for (final int max : new int[] { 0, -1, -2, Integer.MIN_VALUE }) {
+            final TestManager manager = new TestManager();
+            manager.maxBytes = max;
+            final byte[] bytes = modernBody("tools/list").getBytes(StandardCharsets.UTF_8);
+
+            final String body = postStream(manager, new FixedBody(bytes), modernHeaders("tools/list"));
+
+            assertEquals(413, lastResponse.getStatus(), "mcp.request.max.bytes=" + max + " must reject with 413: " + body);
+            assertTrue(body.contains("-32600"), "mcp.request.max.bytes=" + max + ": " + body);
+            assertTrue(body.contains("mcp.request.max.bytes"),
+                    "mcp.request.max.bytes=" + max + ": the message must name the property an operator has to fix: " + body);
+            assertFalse(body.contains("-32603"),
+                    "mcp.request.max.bytes=" + max + " must not reach readNBytes with a negative count, which catch (Throwable) "
+                            + "would launder into an HTTP 200 internal error for every request: " + body);
+        }
+    }
+
     @Test
     public void testForeignOriginIs403() throws Exception {
         // Wiring check: OriginValidatorTest covers the matching rules directly; this confirms
@@ -687,6 +779,151 @@ public class McpApiManagerHttpTest {
         };
         final String body = post(manager, "", modernHeaders("tools/list"));
         assertTrue(body.contains("-32603"), "an escaping exception would become a container 500; it must be converted here: " + body);
+    }
+
+    // ------------------------------------------------------------------
+    // api.json.response.headers and mcp.allowed.origins: three production code paths that ran in
+    // no test at all, because this file's double used to override writeHeaders() and
+    // getAllowedOrigins() wholesale. All three of the following mutations left the suite green:
+    //
+    //   - deleting the writeHeaders(response) call from process();
+    //   - collapsing writeHeaders' Vary branch onto a plain setHeader;
+    //   - changing getAllowedOrigins' key to mcp.origins.allowed, splitting on ';', and
+    //     dropping the trim().
+    //
+    // The mock was never the obstacle: MockletHttpServletResponseImpl keeps a
+    // Map<String, List<String>>, appends on addHeader, replaces on setHeader, and returns the
+    // list from getHeaders(name). These were self-inflicted holes, closed by overriding only the
+    // lower config seams (getApiJsonResponseHeaderList / getSystemProperty) instead.
+    // ------------------------------------------------------------------
+
+    @Test
+    public void testConfiguredResponseHeadersAreEmittedOnASuccessfulResponse() throws Exception {
+        // Kills "delete the writeHeaders(response) call". The default api.json.response.headers is
+        // a single Referrer-Policy pair whose real-world effect on a JSON endpoint is nil, which is
+        // why nobody noticed -- but the key is an operator-facing knob, and an operator who
+        // repurposes it (Cache-Control: no-store on an endpoint that answers per-caller-authorized
+        // tool lists, say) is entitled to have it actually emitted.
+        final TestManager manager = new TestManager();
+        manager.responseHeaders = List.of(new Pair<>("Cache-Control", "no-store"), new Pair<>("X-Robots-Tag", "noindex"));
+
+        post(manager, modernBody("tools/list"), modernHeaders("tools/list"));
+
+        assertEquals(200, lastResponse.getStatus());
+        assertEquals("no-store", lastResponse.getHeader("Cache-Control"), "a configured response header must reach the response");
+        assertEquals("noindex", lastResponse.getHeader("X-Robots-Tag"));
+    }
+
+    @Test
+    public void testConfiguredVaryHeaderIsAppendedSoAPreSeededValueSurvives() throws Exception {
+        // Kills "collapse the Vary branch onto setHeader". Fess's own CorsFilter appends
+        // Vary: Origin for every origin-bearing request and runs before this manager, so a
+        // setHeader here would DELETE it -- and a shared cache would then be free to serve one
+        // origin's response to another. The pre-seeded value stands in for CorsFilter's.
+        final TestManager manager = new TestManager();
+        manager.responseHeaders = List.of(new Pair<>("Vary", "Accept"));
+        final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("POST", "/mcp");
+        modernHeaders("tools/list").forEach(request::addHeader);
+        final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
+        response.addHeader("Vary", "Origin");
+
+        post(manager, modernBody("tools/list"), request, response);
+
+        assertEquals(200, response.getStatus());
+        assertEquals(List.of("Origin", "Accept"), new ArrayList<>(response.getHeaders("Vary")),
+                "Vary must be APPENDED: setHeader would have replaced CorsFilter's Vary: Origin");
+    }
+
+    @Test
+    public void testConfiguredResponseHeadersAreEmittedOnTheNonPostRejection() throws Exception {
+        // writeHeaders(response) must be the FIRST statement of process(), not sit below the
+        // method check: api.json.response.headers is an operator-configured property of this
+        // endpoint's responses, and a 405 is one of its responses. Of the two early exits this
+        // used to skip, only this one is a regression -- the mcp.enabled 503 below it did not exist
+        // before this PR -- but both are equally cheap to cover.
+        final TestManager manager = new TestManager();
+        manager.responseHeaders = List.of(new Pair<>("Cache-Control", "no-store"));
+        final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("GET", "/mcp");
+        final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
+
+        manager.process(request, response, null);
+
+        assertEquals(405, response.getStatus());
+        assertEquals("POST", response.getHeader("Allow"), "the 405's own headers must still be written");
+        assertEquals("no-store", response.getHeader("Cache-Control"), "the configured headers must be emitted on the 405 path too");
+    }
+
+    @Test
+    public void testConfiguredResponseHeadersAreEmittedOnTheDisabledEndpoint503() throws Exception {
+        final TestManager manager = new TestManager();
+        manager.enabled = false;
+        manager.responseHeaders = List.of(new Pair<>("Cache-Control", "no-store"));
+
+        final String body = post(manager, modernBody("tools/list"), modernHeaders("tools/list"));
+
+        assertEquals(503, lastResponse.getStatus(), body);
+        assertEquals("no-store", lastResponse.getHeader("Cache-Control"), "the configured headers must be emitted on the 503 path too");
+    }
+
+    @Test
+    public void testANonVaryConfiguredHeaderIsSetNotAppended() throws Exception {
+        // The other half of the same branch: everything that is not Vary must be set, so that a
+        // second pass over one response cannot accumulate duplicates of the same header.
+        final TestManager manager = new TestManager();
+        manager.responseHeaders = List.of(new Pair<>("Referrer-Policy", "strict-origin-when-cross-origin"));
+        final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("POST", "/mcp");
+        modernHeaders("tools/list").forEach(request::addHeader);
+        final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
+        response.addHeader("Referrer-Policy", "unsafe-url");
+
+        post(manager, modernBody("tools/list"), request, response);
+
+        assertEquals(List.of("strict-origin-when-cross-origin"), new ArrayList<>(response.getHeaders("Referrer-Policy")),
+                "a non-Vary header must replace whatever was there, not pile up beside it");
+    }
+
+    /** Test double: overrides only {@code getSystemProperty}, so {@code getAllowedOrigins()}'s real body runs. */
+    static class AllowedOriginsCapturingManager extends McpApiManager {
+        String capturedKey;
+        String capturedDefaultValue;
+        String propertyValue = StringUtil.EMPTY;
+
+        @Override
+        protected String getSystemProperty(final String key, final String defaultValue) {
+            capturedKey = key;
+            capturedDefaultValue = defaultValue;
+            return propertyValue;
+        }
+    }
+
+    @Test
+    public void testGetAllowedOriginsRealBodyReadsTheExpectedKeyAndParsesCommaSeparatedValues() {
+        // Kills all three parts of the getAllowedOrigins mutation at once: the key, the separator,
+        // and the trim. This method decides which browser Origins may reach /mcp, so a mutation
+        // that made it read a key no operator sets would silently reject every configured origin,
+        // and one that dropped the trim would reject " https://app.example.com" -- the shape an
+        // operator writes when they space out a comma-separated list.
+        final AllowedOriginsCapturingManager manager = new AllowedOriginsCapturingManager();
+        manager.propertyValue = " https://a.example.com , https://b.example.com ,, ";
+
+        final Set<String> origins = manager.getAllowedOrigins();
+
+        assertEquals("mcp.allowed.origins", manager.capturedKey, "getAllowedOrigins() must read this exact property key");
+        assertEquals(StringUtil.EMPTY, manager.capturedDefaultValue,
+                "an unset property must mean 'no origin allowed', not a default origin");
+        assertEquals(Set.of("https://a.example.com", "https://b.example.com"), origins,
+                "the value must be split on ',', each element trimmed, and blank elements dropped");
+    }
+
+    @Test
+    public void testGetAllowedOriginsIsEmptyWhenThePropertyIsBlank() {
+        // The default deployment: no browser origin is allowed at all, deliberately including the
+        // server's own (OriginValidator has no self-origin branch, since that could only be derived
+        // from the caller-controlled Host header).
+        final AllowedOriginsCapturingManager manager = new AllowedOriginsCapturingManager();
+        manager.propertyValue = "   ";
+
+        assertTrue(manager.getAllowedOrigins().isEmpty(), "a blank mcp.allowed.origins must allow nothing, not a set holding one blank");
     }
 
     @Test

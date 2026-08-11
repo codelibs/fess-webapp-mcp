@@ -18,12 +18,14 @@ package org.codelibs.fess.plugin.webapp.api.mcp;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codelibs.core.lang.StringUtil;
+import org.codelibs.core.misc.Pair;
 import org.codelibs.fess.api.WebApiManager;
 import org.codelibs.fess.plugin.webapp.mcp.auth.CanonicalResourceUri;
 import org.codelibs.fess.plugin.webapp.mcp.auth.OAuthResourceServerAuthenticator;
@@ -108,6 +110,13 @@ public class McpMetadataApiManager implements WebApiManager {
     @Override
     public void process(final HttpServletRequest request, final HttpServletResponse response, final FilterChain chain)
             throws IOException, ServletException {
+        // First, ahead of every exit, exactly as McpApiManager#process does it:
+        // api.json.response.headers is a property of this endpoint's RESPONSES, and both of the
+        // 404s below are responses. Until this call existed, this manager emitted the configured
+        // headers on no path at all -- not even its 200 -- because, unlike McpApiManager, it has no
+        // BaseApiManager#writeHeaders to inherit (see this class's own Javadoc for why it
+        // implements WebApiManager directly).
+        writeHeaders(response);
         if (!McpApiManager.AUTH_MODE_OAUTH.equals(getAuthMode())) {
             // Not sendError(): see SendErrorProhibitedTest -- this endpoint is not recognised by
             // WebApiUtil#isApiRequestUri either, so a container sendError() would become a 302.
@@ -156,6 +165,38 @@ public class McpMetadataApiManager implements WebApiManager {
     }
 
     /**
+     * Emits the operator-configured {@code api.json.response.headers} onto {@code response}.
+     * <p>
+     * Delegates to {@link McpApiManager#applyApiJsonResponseHeaders} rather than re-implementing
+     * the loop: that emitter <em>appends</em> {@code Vary} (Fess's {@code CorsFilter} has already
+     * added {@code Vary: Origin} by the time either manager runs, and replacing it would let a
+     * shared cache serve one origin's response to another) while setting every other header, and
+     * a second copy of that rule in this class is precisely the kind of duplication that drifts
+     * once only one of the two is ever edited.
+     * </p>
+     *
+     * @param response the servlet response
+     */
+    protected void writeHeaders(final HttpServletResponse response) {
+        McpApiManager.applyApiJsonResponseHeaders(response, getApiJsonResponseHeaderList());
+    }
+
+    /**
+     * Reads the configured {@code api.json.response.headers} pairs.
+     * <p>
+     * Isolated behind this seam for the same container-free-testing reason as
+     * {@link #getSystemProperty(String, String)}: it is the only {@code ComponentUtil} touch in
+     * {@link #writeHeaders}'s call chain, so overriding it leaves that method's real body -- the
+     * {@code Vary} distinction included -- running in the test.
+     * </p>
+     *
+     * @return the configured header pairs; never null
+     */
+    protected List<Pair<String, String>> getApiJsonResponseHeaderList() {
+        return ComponentUtil.getFessConfig().getApiJsonResponseHeaderList();
+    }
+
+    /**
      * Resolves the canonical resource URI for {@code request}, per {@link CanonicalResourceUri}
      * -- the same value {@link org.codelibs.fess.plugin.webapp.mcp.auth.OAuthResourceServerAuthenticator}
      * checks the token's {@code aud} against and attaches to a challenge's
@@ -169,12 +210,22 @@ public class McpMetadataApiManager implements WebApiManager {
     }
 
     /**
-     * Returns the configured authentication mode.
+     * Returns the configured authentication mode, normalised.
+     * <p>
+     * Shares {@link McpApiManager#normalizeAuthMode} rather than trimming and case-folding here,
+     * so this manager and the sibling {@code /mcp} endpoint can never disagree about which raw
+     * strings mean {@code oauth}: a value this class rejected but {@code McpApiManager} accepted
+     * would 404 the protected-resource document for a deployment that really is enforcing OAuth,
+     * leaving a client with a 401 challenge whose {@code resource_metadata} URL serves nothing.
+     * That sharing is possible here (and not in {@code AbstractCacheableHandler}) only because
+     * this class is in {@code McpApiManager}'s own package.
+     * </p>
      *
-     * @return {@code mcp.auth.mode}'s value; {@link McpApiManager#AUTH_MODE_NONE} when unset
+     * @return {@code mcp.auth.mode}'s normalised value; {@link McpApiManager#AUTH_MODE_NONE} when
+     *         unset
      */
     protected String getAuthMode() {
-        return getSystemProperty("mcp.auth.mode", McpApiManager.AUTH_MODE_NONE);
+        return McpApiManager.normalizeAuthMode(getSystemProperty("mcp.auth.mode", McpApiManager.AUTH_MODE_NONE));
     }
 
     /**
