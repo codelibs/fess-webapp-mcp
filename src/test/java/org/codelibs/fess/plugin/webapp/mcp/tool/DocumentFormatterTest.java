@@ -92,4 +92,15 @@ public class DocumentFormatterTest {
         };
         assertEquals(42, custom.getContentMaxLength(), "Subclasses must be able to override the configured max length");
     }
+
+    @Test
+    public void testContentMaxLengthConfigKeyAndDefaultArePinned() {
+        // getContentMaxLength()'s real body reads ComponentUtil, so every other test overrides
+        // it wholesale and neither of these literals was covered. Shrinking the default to a
+        // small number truncates the content of every indexed document handed to the model,
+        // and a typo'd key makes the operator's mcp.content.max.length setting inert -- both
+        // silently, and both with the rest of the suite still green.
+        assertEquals("mcp.content.max.length", DocumentFormatter.CONTENT_MAX_LENGTH_PROPERTY);
+        assertEquals(10000, DocumentFormatter.DEFAULT_CONTENT_MAX_LENGTH);
+    }
 }

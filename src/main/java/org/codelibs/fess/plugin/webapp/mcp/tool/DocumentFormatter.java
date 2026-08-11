@@ -28,7 +28,15 @@ import org.codelibs.fess.util.ComponentUtil;
  */
 public class DocumentFormatter {
 
-    /** The default maximum content length, used when {@code mcp.content.max.length} is unset. */
+    /**
+     * The config key selecting the maximum content length. Named rather than inlined at the
+     * {@link #getContentMaxLength()} call site so a test can assert the literal directly: a typo
+     * here fails silently, because the lookup just always misses and the default is returned no
+     * matter what the operator configured.
+     */
+    protected static final String CONTENT_MAX_LENGTH_PROPERTY = "mcp.content.max.length";
+
+    /** The default maximum content length, used when {@value #CONTENT_MAX_LENGTH_PROPERTY} is unset. */
     protected static final int DEFAULT_CONTENT_MAX_LENGTH = 10000;
 
     /**
@@ -59,6 +67,6 @@ public class DocumentFormatter {
      * @return the maximum content length
      */
     protected int getContentMaxLength() {
-        return ComponentUtil.getFessConfig().getSystemPropertyAsInt("mcp.content.max.length", DEFAULT_CONTENT_MAX_LENGTH);
+        return ComponentUtil.getFessConfig().getSystemPropertyAsInt(CONTENT_MAX_LENGTH_PROPERTY, DEFAULT_CONTENT_MAX_LENGTH);
     }
 }

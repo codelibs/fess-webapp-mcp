@@ -132,4 +132,45 @@ public class IndexStatsToolTest {
         };
         assertTrue(tool.getRequiredPermissions().isEmpty(), "A blank setting must disable the gate");
     }
+
+    @Test
+    public void testDefaultPermissionsLiteralIsPinned() {
+        // Asserts the production constant itself, not a copy of it.
+        //
+        // Every other test that exercises the gate substitutes getIndexStatsPermissions(), so
+        // before this assertion existed the literal below was referenced by no test at all:
+        // blanking it to "" -- which disables the gate outright and hands the index name,
+        // document count and JVM heap to every anonymous caller in the default
+        // mcp.auth.mode=none deployment -- left the whole suite green. Widening it to a role a
+        // guest already holds did too. This is the direct-constant-reference pattern
+        // ResourcesReadHandlerTest#testTtlDefaultsToZero already uses for DEFAULT_TTL_MS.
+        assertEquals("Radmin-api", IndexStatsTool.DEFAULT_PERMISSIONS);
+    }
+
+    @Test
+    public void testPermissionsPropertyKeyIsPinned() {
+        // A typo in the key makes getSystemProperty miss unconditionally, so the default is
+        // returned no matter what the operator configured. That fails in the confusing
+        // direction: the documented escape hatch (mcp.tools.index_stats.permissions=, blank)
+        // silently does nothing and get_index_stats stays permanently unreachable, with no
+        // error anywhere to point at the cause.
+        assertEquals("mcp.tools.index_stats.permissions", IndexStatsTool.PERMISSIONS_PROPERTY);
+    }
+
+    @Test
+    public void testDefaultPermissionsCloseTheGateEndToEnd() {
+        // The literal assertions above pin the value; this pins the consequence, by running the
+        // real DEFAULT_PERMISSIONS through the real getRequiredPermissions() parser. It closes
+        // the remaining gap between them -- a default that stayed textually intact but stopped
+        // parsing into a non-empty requirement set would still open the gate, because
+        // PermissionGate treats an empty required set as "no gate".
+        final IndexStatsTool tool = new IndexStatsTool() {
+            @Override
+            protected String getIndexStatsPermissions() {
+                return IndexStatsTool.DEFAULT_PERMISSIONS;
+            }
+        };
+        assertEquals(Set.of("Radmin-api"), tool.getRequiredPermissions(),
+                "the shipped default must parse into a non-empty requirement set");
+    }
 }

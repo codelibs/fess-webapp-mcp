@@ -132,4 +132,18 @@ public class DiscoverHandlerTest {
         final TestDiscoverHandler handler = new TestDiscoverHandler();
         assertEquals("unknown", handler.resolveServerVersion());
     }
+
+    @Test
+    public void testTtlConfigKeyAndDefaultArePinned() {
+        // Both of these reach production only through getTtlMs()'s ComponentUtil read, which
+        // every other test in the suite stubs out -- so without this assertion neither the key
+        // nor the default was referenced by any test, and either could be changed silently.
+        //
+        // The two failure modes differ in kind, which is why both are pinned. A wrong default
+        // is visible (discover results carry the wrong ttlMs); a typo'd key is invisible: the
+        // lookup simply always misses, the default is always returned, and the operator's
+        // configured value stops taking effect with nothing logged to say so.
+        assertEquals("mcp.cache.discover.ttl.ms", DiscoverHandler.TTL_CONFIG_KEY);
+        assertEquals(3_600_000L, DiscoverHandler.DEFAULT_TTL_MS);
+    }
 }
