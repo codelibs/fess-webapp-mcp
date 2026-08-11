@@ -15,12 +15,12 @@
  */
 package org.codelibs.fess.plugin.webapp.exception;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 /**
  * Test class for McpApiException.
@@ -37,8 +37,8 @@ public class McpApiExceptionTest {
 
         final McpApiException exception = new McpApiException(code, message);
 
-        assertEquals("Error code should match", code, exception.getCode());
-        assertEquals("Message should match", message, exception.getMessage());
+        assertEquals(code, exception.getCode(), "Error code should match");
+        assertEquals(message, exception.getMessage(), "Message should match");
     }
 
     @Test
@@ -49,10 +49,10 @@ public class McpApiExceptionTest {
 
         final McpApiException exception = new McpApiException(code, message, cause);
 
-        assertEquals("Error code should match", code, exception.getCode());
-        assertEquals("Message should match", message, exception.getMessage());
-        assertNotNull("Cause should not be null", exception.getCause());
-        assertEquals("Cause message should match", "Root cause", exception.getCause().getMessage());
+        assertEquals(code, exception.getCode(), "Error code should match");
+        assertEquals(message, exception.getMessage(), "Message should match");
+        assertNotNull(exception.getCause(), "Cause should not be null");
+        assertEquals("Root cause", exception.getCause().getMessage(), "Cause message should match");
     }
 
     @Test
@@ -62,7 +62,7 @@ public class McpApiExceptionTest {
 
         for (final ErrorCode code : codes) {
             final McpApiException exception = new McpApiException(code, "Test message");
-            assertEquals("Error code should match", code, exception.getCode());
+            assertEquals(code, exception.getCode(), "Error code should match");
         }
     }
 
@@ -71,28 +71,28 @@ public class McpApiExceptionTest {
         final McpApiException exception = new McpApiException(ErrorCode.ParseError, "Parse error occurred");
         final ErrorCode returnedCode = exception.getCode();
 
-        assertNotNull("Returned error code should not be null", returnedCode);
-        assertEquals("Should return ParseError", ErrorCode.ParseError, returnedCode);
-        assertEquals("Error code value should be -32700", -32700, returnedCode.getCode());
+        assertNotNull(returnedCode, "Returned error code should not be null");
+        assertEquals(ErrorCode.ParseError, returnedCode, "Should return ParseError");
+        assertEquals(-32700, returnedCode.getCode(), "Error code value should be -32700");
     }
 
     @Test
     public void testExceptionMessageWithDifferentCodes() {
         // Test exception messages with different error codes
         final McpApiException parseException = new McpApiException(ErrorCode.ParseError, "JSON parse failed");
-        assertEquals("Message should match", "JSON parse failed", parseException.getMessage());
-        assertEquals("Code should be ParseError", ErrorCode.ParseError, parseException.getCode());
+        assertEquals("JSON parse failed", parseException.getMessage(), "Message should match");
+        assertEquals(ErrorCode.ParseError, parseException.getCode(), "Code should be ParseError");
 
         final McpApiException methodException = new McpApiException(ErrorCode.MethodNotFound, "Method does not exist");
-        assertEquals("Message should match", "Method does not exist", methodException.getMessage());
-        assertEquals("Code should be MethodNotFound", ErrorCode.MethodNotFound, methodException.getCode());
+        assertEquals("Method does not exist", methodException.getMessage(), "Message should match");
+        assertEquals(ErrorCode.MethodNotFound, methodException.getCode(), "Code should be MethodNotFound");
     }
 
     @Test
     public void testExceptionWithNullMessage() {
         final McpApiException exception = new McpApiException(ErrorCode.InternalError, null);
-        assertEquals("Error code should be InternalError", ErrorCode.InternalError, exception.getCode());
-        assertEquals("Message should be null", null, exception.getMessage());
+        assertEquals(ErrorCode.InternalError, exception.getCode(), "Error code should be InternalError");
+        assertEquals(null, exception.getMessage(), "Message should be null");
     }
 
     @Test
@@ -100,8 +100,8 @@ public class McpApiExceptionTest {
         final String emptyMessage = "";
         final McpApiException exception = new McpApiException(ErrorCode.InvalidParams, emptyMessage);
 
-        assertEquals("Error code should be InvalidParams", ErrorCode.InvalidParams, exception.getCode());
-        assertEquals("Message should be empty string", emptyMessage, exception.getMessage());
+        assertEquals(ErrorCode.InvalidParams, exception.getCode(), "Error code should be InvalidParams");
+        assertEquals(emptyMessage, exception.getMessage(), "Message should be empty string");
     }
 
     @Test
@@ -110,18 +110,18 @@ public class McpApiExceptionTest {
         final IllegalArgumentException middleCause = new IllegalArgumentException("Middle cause", rootCause);
         final McpApiException exception = new McpApiException(ErrorCode.InternalError, "Top level error", middleCause);
 
-        assertNotNull("Cause should not be null", exception.getCause());
-        assertEquals("Immediate cause should be IllegalArgumentException", middleCause, exception.getCause());
-        assertEquals("Root cause should be RuntimeException", rootCause, exception.getCause().getCause());
+        assertNotNull(exception.getCause(), "Cause should not be null");
+        assertEquals(middleCause, exception.getCause(), "Immediate cause should be IllegalArgumentException");
+        assertEquals(rootCause, exception.getCause().getCause(), "Root cause should be RuntimeException");
     }
 
     @Test
     public void testExceptionInheritance() {
         final McpApiException exception = new McpApiException(ErrorCode.InternalError, "Test");
 
-        assertTrue("Should be instance of McpApiException", exception instanceof McpApiException);
-        assertTrue("Should be instance of RuntimeException", exception instanceof RuntimeException);
-        assertTrue("Should be instance of Exception", exception instanceof Exception);
+        assertTrue(exception instanceof McpApiException, "Should be instance of McpApiException");
+        assertTrue(exception instanceof RuntimeException, "Should be instance of RuntimeException");
+        assertTrue(exception instanceof Exception, "Should be instance of Exception");
     }
 
     @Test
@@ -133,9 +133,9 @@ public class McpApiExceptionTest {
 
         final McpApiException exception = new McpApiException(ErrorCode.InternalError, longMessage.toString());
 
-        assertEquals("Error code should match", ErrorCode.InternalError, exception.getCode());
-        assertEquals("Message should match", longMessage.toString(), exception.getMessage());
-        assertTrue("Message should be very long", exception.getMessage().length() > 10000);
+        assertEquals(ErrorCode.InternalError, exception.getCode(), "Error code should match");
+        assertEquals(longMessage.toString(), exception.getMessage(), "Message should match");
+        assertTrue(exception.getMessage().length() > 10000, "Message should be very long");
     }
 
     @Test
@@ -143,8 +143,8 @@ public class McpApiExceptionTest {
         final String specialMessage = "Error: 日本語 テスト \n\t\r Special chars: @#$%^&*()";
         final McpApiException exception = new McpApiException(ErrorCode.InvalidRequest, specialMessage);
 
-        assertEquals("Message should contain special characters", specialMessage, exception.getMessage());
-        assertEquals("Error code should be InvalidRequest", ErrorCode.InvalidRequest, exception.getCode());
+        assertEquals(specialMessage, exception.getMessage(), "Message should contain special characters");
+        assertEquals(ErrorCode.InvalidRequest, exception.getCode(), "Error code should be InvalidRequest");
     }
 
     @Test
@@ -153,7 +153,7 @@ public class McpApiExceptionTest {
         final McpApiException exception1 = new McpApiException(ErrorCode.InvalidParams, "First error");
         final McpApiException exception2 = new McpApiException(ErrorCode.InvalidParams, "Second error");
 
-        assertEquals("Both should have same error code", exception1.getCode(), exception2.getCode());
-        assertTrue("Messages should be different", !exception1.getMessage().equals(exception2.getMessage()));
+        assertEquals(exception1.getCode(), exception2.getCode(), "Both should have same error code");
+        assertTrue(!exception1.getMessage().equals(exception2.getMessage()), "Messages should be different");
     }
 }

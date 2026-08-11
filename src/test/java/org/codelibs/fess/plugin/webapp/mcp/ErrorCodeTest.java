@@ -15,10 +15,10 @@
  */
 package org.codelibs.fess.plugin.webapp.mcp;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 /**
  * Test class for ErrorCode enum.
@@ -30,27 +30,27 @@ public class ErrorCodeTest {
 
     @Test
     public void testParseError() {
-        assertEquals("ParseError code should be -32700", -32700, ErrorCode.ParseError.getCode());
+        assertEquals(-32700, ErrorCode.ParseError.getCode(), "ParseError code should be -32700");
     }
 
     @Test
     public void testInvalidRequest() {
-        assertEquals("InvalidRequest code should be -32600", -32600, ErrorCode.InvalidRequest.getCode());
+        assertEquals(-32600, ErrorCode.InvalidRequest.getCode(), "InvalidRequest code should be -32600");
     }
 
     @Test
     public void testMethodNotFound() {
-        assertEquals("MethodNotFound code should be -32601", -32601, ErrorCode.MethodNotFound.getCode());
+        assertEquals(-32601, ErrorCode.MethodNotFound.getCode(), "MethodNotFound code should be -32601");
     }
 
     @Test
     public void testInvalidParams() {
-        assertEquals("InvalidParams code should be -32602", -32602, ErrorCode.InvalidParams.getCode());
+        assertEquals(-32602, ErrorCode.InvalidParams.getCode(), "InvalidParams code should be -32602");
     }
 
     @Test
     public void testInternalError() {
-        assertEquals("InternalError code should be -32603", -32603, ErrorCode.InternalError.getCode());
+        assertEquals(-32603, ErrorCode.InternalError.getCode(), "InternalError code should be -32603");
     }
 
     @Test
@@ -61,18 +61,18 @@ public class ErrorCodeTest {
     @Test
     public void testEnumValues() {
         final ErrorCode[] values = ErrorCode.values();
-        assertEquals("Should have 6 error codes", 6, values.length);
+        assertEquals(6, values.length, "Should have 6 error codes");
     }
 
     @Test
     public void testValueOf() {
         // Test valueOf method for enum
-        assertEquals("valueOf ParseError should work", ErrorCode.ParseError, ErrorCode.valueOf("ParseError"));
-        assertEquals("valueOf InvalidRequest should work", ErrorCode.InvalidRequest, ErrorCode.valueOf("InvalidRequest"));
-        assertEquals("valueOf MethodNotFound should work", ErrorCode.MethodNotFound, ErrorCode.valueOf("MethodNotFound"));
-        assertEquals("valueOf InvalidParams should work", ErrorCode.InvalidParams, ErrorCode.valueOf("InvalidParams"));
-        assertEquals("valueOf InternalError should work", ErrorCode.InternalError, ErrorCode.valueOf("InternalError"));
-        assertEquals("valueOf ResourceNotFound should work", ErrorCode.ResourceNotFound, ErrorCode.valueOf("ResourceNotFound"));
+        assertEquals(ErrorCode.ParseError, ErrorCode.valueOf("ParseError"), "valueOf ParseError should work");
+        assertEquals(ErrorCode.InvalidRequest, ErrorCode.valueOf("InvalidRequest"), "valueOf InvalidRequest should work");
+        assertEquals(ErrorCode.MethodNotFound, ErrorCode.valueOf("MethodNotFound"), "valueOf MethodNotFound should work");
+        assertEquals(ErrorCode.InvalidParams, ErrorCode.valueOf("InvalidParams"), "valueOf InvalidParams should work");
+        assertEquals(ErrorCode.InternalError, ErrorCode.valueOf("InternalError"), "valueOf InternalError should work");
+        assertEquals(ErrorCode.ResourceNotFound, ErrorCode.valueOf("ResourceNotFound"), "valueOf ResourceNotFound should work");
     }
 
     @Test
@@ -81,10 +81,10 @@ public class ErrorCodeTest {
         final java.util.Set<Integer> codes = new java.util.HashSet<>();
 
         for (final ErrorCode errorCode : values) {
-            assertTrue("Error code " + errorCode.name() + " should be unique", codes.add(errorCode.getCode()));
+            assertTrue(codes.add(errorCode.getCode()), "Error code " + errorCode.name() + " should be unique");
         }
 
-        assertEquals("All error codes should be unique", values.length, codes.size());
+        assertEquals(values.length, codes.size(), "All error codes should be unique");
     }
 
     @Test
@@ -93,7 +93,7 @@ public class ErrorCodeTest {
         final ErrorCode[] values = ErrorCode.values();
 
         for (final ErrorCode errorCode : values) {
-            assertTrue("Error code " + errorCode.name() + " should be negative", errorCode.getCode() < 0);
+            assertTrue(errorCode.getCode() < 0, "Error code " + errorCode.name() + " should be negative");
         }
     }
 
@@ -104,8 +104,8 @@ public class ErrorCodeTest {
 
         for (final ErrorCode errorCode : values) {
             final int code = errorCode.getCode();
-            assertTrue("Error code " + errorCode.name() + " should be >= -32768", code >= -32768);
-            assertTrue("Error code " + errorCode.name() + " should be <= -32000", code <= -32000);
+            assertTrue(code >= -32768, "Error code " + errorCode.name() + " should be >= -32768");
+            assertTrue(code <= -32000, "Error code " + errorCode.name() + " should be <= -32000");
         }
     }
 
@@ -121,8 +121,8 @@ public class ErrorCodeTest {
         expectedCodes.put(ErrorCode.ResourceNotFound, -32002);
 
         for (final java.util.Map.Entry<ErrorCode, Integer> entry : expectedCodes.entrySet()) {
-            assertEquals("Error code " + entry.getKey().name() + " should have correct value", entry.getValue().intValue(),
-                    entry.getKey().getCode());
+            assertEquals(entry.getValue().intValue(), entry.getKey().getCode(),
+                    "Error code " + entry.getKey().name() + " should have correct value");
         }
     }
 }
