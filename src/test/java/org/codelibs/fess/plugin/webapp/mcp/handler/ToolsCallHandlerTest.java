@@ -33,7 +33,9 @@ import org.codelibs.fess.plugin.webapp.exception.McpApiException;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpError;
+import org.codelibs.fess.plugin.webapp.mcp.tool.IndexStatsTool;
 import org.codelibs.fess.plugin.webapp.mcp.tool.McpTool;
+import org.codelibs.fess.plugin.webapp.mcp.tool.SearchTool;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -154,6 +156,31 @@ public class ToolsCallHandlerTest {
         }
     }
 
+    /**
+     * The real {@code get_index_stats} tool with its two DI-backed seams substituted, so its
+     * genuine {@code call()} -- schema-conforming {@code structuredContent} included -- can run
+     * without a container.
+     * <p>
+     * The permission gate is opened the way {@code IndexStatsGateTest} opens it (a blank
+     * {@code mcp.tools.index_stats.permissions}), because what is under test here is the
+     * {@code arguments} handling, not the gate.
+     * </p>
+     */
+    private static final class StubbedIndexStatsTool extends IndexStatsTool {
+
+        @Override
+        protected String getIndexStatsPermissions() {
+            return "";
+        }
+
+        @Override
+        public Map<String, Object> collectIndexStats() {
+            return Map.of("index", Map.of("index_name", "fess.search", "document_count", Long.valueOf(7L)), "config",
+                    Map.of("max_page_size", Integer.valueOf(100)), "system", Map.of("memory", Map.of("total_bytes", Long.valueOf(1L),
+                            "free_bytes", Long.valueOf(1L), "used_bytes", Long.valueOf(0L), "max_bytes", Long.valueOf(2L))));
+        }
+    }
+
     private static final class ThrowingMcpErrorTool extends StubTool {
 
         @Override
@@ -189,11 +216,85 @@ public class ToolsCallHandlerTest {
     }
 
     @Test
-    public void testMissingArgumentsIsInvalidParams() {
+    public void testEmptyNameIsInvalidParams() {
+        // The isEmpty() half of the name guard, which nothing exercised: the test above only
+        // covers the absent/non-String half, so deleting {@code || name.isEmpty()} left the
+        // suite green while {"name": ""} fell through to findTool("") and was reported as
+        // "Unknown tool: " -- a different message, for what is really a malformed request.
         final ToolsCallHandler handler = new ToolsCallHandler(List.of(new StubTool()));
-        final McpError error = assertThrows(McpError.class, () -> handler.handle(contextWithParams(Map.of("name", "echo"))));
+        final McpError error =
+                assertThrows(McpError.class, () -> handler.handle(contextWithParams(Map.of("name", "", "arguments", Map.of()))));
+        assertEquals(200, error.getHttpStatus());
         assertEquals(ErrorCode.InvalidParams, error.getErrorCode());
-        assertTrue(error.getMessage().contains("arguments"));
+        assertEquals("Missing required parameter: name", error.getMessage(),
+                "an empty name is a missing name, not an unknown tool: " + error.getMessage());
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    public void testMissingArgumentsIsAcceptedAsAnEmptyMap() {
+        // Inverted from testMissingArgumentsIsInvalidParams, which pinned the opposite.
+        //
+        // params.arguments is OPTIONAL in the normative schema -- 2026-07-28
+        // schema.ts declares CallToolRequestParams as { name: string; arguments?: {...} }, and it
+        // was already optional in 2024-11-05 -- so refusing the call with -32602 made every
+        // conformant client's zero-argument call fail. The sibling PromptsGetHandler already
+        // handles the identically-optional GetPromptRequestParams.arguments? this way, with a
+        // Map.of() fallback.
+        //
+        // "ok:null" rather than an exception is what proves the tool ran and was handed an empty
+        // map: StubTool#call reads arguments.get("x") unconditionally, so a null map would NPE
+        // here instead.
+        final ToolsCallHandler handler = new ToolsCallHandler(List.of(new StubTool()));
+        final Map<String, Object> result = handler.handle(contextWithParams(Map.of("name", "echo")));
+        final List<Map<String, Object>> content = (List<Map<String, Object>>) result.get("content");
+        assertEquals("ok:null", content.get(0).get("text"), "an absent arguments must reach the tool as an empty map");
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    public void testNonMapArgumentsIsAlsoTreatedAsAnEmptyMap() {
+        // The other half of the instanceof check. A non-object arguments is malformed rather
+        // than absent, but it is defaulted the same way PromptsGetHandler defaults it: the
+        // alternative is a second, differently-worded rejection path for a shape no client
+        // sends, and the tool's own validation still refuses the call when it actually needs an
+        // argument (asserted below).
+        final ToolsCallHandler handler = new ToolsCallHandler(List.of(new StubTool()));
+        final Map<String, Object> result = handler.handle(contextWithParams(Map.of("name", "echo", "arguments", "not-an-object")));
+        final List<Map<String, Object>> content = (List<Map<String, Object>>) result.get("content");
+        assertEquals("ok:null", content.get(0).get("text"), "a non-object arguments must reach the tool as an empty map");
+    }
+
+    @Test
+    public void testMissingArgumentsDoesNotWeakenAToolsOwnRequiredArgumentCheck() {
+        // The safety half of accepting an absent arguments: defaulting it to an empty map must
+        // not turn a tool's required argument into an optional one. Uses the real SearchTool,
+        // whose validateArguments is container-free, rather than a stub -- a stub would prove
+        // only that a stub can still throw.
+        final ToolsCallHandler handler = new ToolsCallHandler(List.of(new SearchTool()));
+        final McpError error = assertThrows(McpError.class, () -> handler.handle(contextWithParams(Map.of("name", "search"))));
+        assertEquals(ErrorCode.InvalidParams, error.getErrorCode());
+        assertEquals(200, error.getHttpStatus());
+        assertEquals("Missing required parameter: q", error.getMessage(), "search must still refuse a call with no q");
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    public void testZeroParameterToolRunsWithNoArgumentsKeyAtAll() {
+        // Why the conformance gap mattered in practice: get_index_stats declares
+        // {"type":"object","properties":{}} and takes no arguments at all, so omitting
+        // params.arguments is its normal call shape -- and it was therefore unreachable for a
+        // conformant client. This runs the real tool's real call() (only the two DI-backed seams
+        // are substituted) to prove the whole path completes, not merely that the arguments
+        // check was passed.
+        final ToolsCallHandler handler = new ToolsCallHandler(List.of(new StubbedIndexStatsTool()));
+
+        final Map<String, Object> result = handler.handle(contextWithParams(Map.of("name", "get_index_stats")));
+
+        assertFalse(result.containsKey("isError"), "a zero-argument tool must succeed, not report a failure: " + result);
+        final Map<String, Object> structured = (Map<String, Object>) result.get("structuredContent");
+        final Map<String, Object> index = (Map<String, Object>) structured.get("index");
+        assertEquals(Long.valueOf(7L), index.get("document_count"), "the real tool's own output must come back");
     }
 
     @Test

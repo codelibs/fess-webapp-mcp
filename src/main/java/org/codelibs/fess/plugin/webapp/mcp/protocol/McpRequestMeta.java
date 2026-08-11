@@ -29,8 +29,31 @@ import org.codelibs.fess.plugin.webapp.mcp.McpConstants;
  */
 public class McpRequestMeta {
 
+    /** The declared protocol version; read by {@code HeaderValidator} and {@code McpApiManager}. */
     private final String protocolVersion;
+
+    /**
+     * The declared client capabilities.
+     * <p>
+     * Retained as the parsed content of the validated envelope, but deliberately not exposed:
+     * the accessor that used to return it had no caller anywhere in this plugin, so it was
+     * removed rather than left as an untested public surface. Their presence in the request is
+     * still <em>required</em> -- the schema declares
+     * {@code "io.modelcontextprotocol/clientCapabilities": ClientCapabilities} with no
+     * {@code ?}, and {@link #parse} enforces that -- so this field records what the caller sent
+     * to satisfy that requirement. Add an accessor back when a handler actually needs to branch
+     * on a capability, together with the test that pins the branch.
+     * </p>
+     */
     private final Map<String, Object> clientCapabilities;
+
+    /**
+     * The declared client identity, empty when not supplied ({@code clientInfo?} is optional in
+     * the schema, unlike the capabilities above).
+     * <p>
+     * Retained and unexposed for the same reason as {@link #clientCapabilities}.
+     * </p>
+     */
     private final Map<String, Object> clientInfo;
 
     private McpRequestMeta(final String protocolVersion, final Map<String, Object> clientCapabilities,
@@ -76,23 +99,5 @@ public class McpRequestMeta {
      */
     public String getProtocolVersion() {
         return protocolVersion;
-    }
-
-    /**
-     * Returns the capabilities the client declared.
-     *
-     * @return the client capabilities
-     */
-    public Map<String, Object> getClientCapabilities() {
-        return clientCapabilities;
-    }
-
-    /**
-     * Returns the client identity, empty when not supplied.
-     *
-     * @return the client info
-     */
-    public Map<String, Object> getClientInfo() {
-        return clientInfo;
     }
 }

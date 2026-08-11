@@ -67,6 +67,32 @@ public class SuggestToolTest {
     }
 
     @Test
+    public void testResolveSuggestSize_StringZero_UsesDefault() {
+        // The String path reaches the num <= 0 clamp through Integer.parseInt rather than
+        // intValue(), so it needs its own assertion: the two tests above would both stay green
+        // if the clamp were moved into the Number branch alone.
+        assertEquals(10, suggestTool.resolveSuggestSize("0", 100), "num=\"0\" should fall back to default 10");
+    }
+
+    @Test
+    public void testResolveSuggestSize_StringNegative_UsesDefault() {
+        assertEquals(10, suggestTool.resolveSuggestSize("-5", 100), "num=\"-5\" should fall back to default 10");
+    }
+
+    @Test
+    public void testResolveSuggestSize_NonPositiveMatchesSearchToolsFallbackDirection() {
+        // Cross-tool alignment, pinned here as well as in SearchToolTest because the two used to
+        // disagree: SearchTool#getPageSize() sent num <= 0 to the configured MAXIMUM page size
+        // while this tool sent it to its own default, so the same {"num": 0} meant "as many as
+        // possible" to search and "the default handful" to suggest. search was changed to match
+        // this tool; if someone ever reverses that by "fixing" this one instead, the two drift
+        // apart again silently. maxPageSize is passed deliberately larger than the default, so a
+        // regression to the cap direction cannot land on 10 by coincidence.
+        assertEquals(10, suggestTool.resolveSuggestSize(Integer.valueOf(0), 100),
+                "num<=0 must resolve to the default, never to the maximum page size");
+    }
+
+    @Test
     public void testResolveSuggestSize_OverMax_CappedAtMax() {
         assertEquals(100, suggestTool.resolveSuggestSize(Integer.valueOf(500), 100), "num exceeding max must be capped");
     }
@@ -105,6 +131,21 @@ public class SuggestToolTest {
     public void testCall_MissingQuery() {
         try {
             suggestTool.call(Map.of(), new McpCallContext());
+            fail("Should have thrown McpApiException");
+        } catch (final McpApiException e) {
+            assertEquals(ErrorCode.InvalidParams, e.getCode(), "Should be InvalidParams");
+        }
+    }
+
+    @Test
+    public void testCall_EmptyQuery() {
+        // The isEmpty() half of the q guard, which nothing exercised: testCall_MissingQuery
+        // above only covers the null half, so deleting {@code || query.isEmpty()} left the whole
+        // suite green while {"q": ""} went on to build a suggest request with an empty prefix.
+        // Follows GetDocumentToolTest#testCall_EmptyDocId, which already covers the same shape
+        // of guard for doc_id.
+        try {
+            suggestTool.call(Map.of("q", ""), new McpCallContext());
             fail("Should have thrown McpApiException");
         } catch (final McpApiException e) {
             assertEquals(ErrorCode.InvalidParams, e.getCode(), "Should be InvalidParams");

@@ -394,7 +394,26 @@ public class SearchTool implements McpTool {
 
             @Override
             public int getStartPosition() {
-                final Object value = paramMap.get("start");
+                // "offset" is a real alias of "start", not just a documented one.
+                //
+                // getInputSchema() advertises offset as "offset (alias of start)" over
+                // tools/list to every client, but this accessor used to read "start" alone, so
+                // the alias resolved to nothing here: a client that paginated with offset kept
+                // being served page 1 forever. offset was not entirely inert -- getOffset()
+                // below still reads it -- but that accessor feeds a different contract
+                // (Fess's RankFusionProcessor shifts the sub-searcher window with it) which
+                // only engages with two or more registered searchers *and* on the
+                // deep-pagination branch. A stock install has one searcher, so nothing consumed
+                // offset at all.
+                //
+                // "start" wins whenever the caller sent it, even when its value turns out to be
+                // unparseable or negative: it is the primary name, and silently substituting
+                // the alias for a start the caller got wrong would page through results from
+                // somewhere the caller never asked for, with nothing in the response to say so.
+                // A key present with an explicit JSON null is treated as absent, matching how
+                // validateArguments already treats {"q": null} as a missing q.
+                final Object startValue = paramMap.get("start");
+                final Object value = startValue != null ? startValue : paramMap.get("offset");
                 try {
                     if (value != null) {
                         final int start = value instanceof final Number n ? n.intValue() : Integer.parseInt(value.toString());
@@ -410,14 +429,29 @@ public class SearchTool implements McpTool {
 
             @Override
             public int getPageSize() {
+                // A non-positive num falls back to the default page size, not to the maximum.
+                //
+                // num <= 0 used to share the "> max" branch and therefore returned the
+                // configured MAXIMUM (100 in a stock install): {"num": 0} -- "give me no
+                // results" -- produced the largest page this server will ever emit, and so did
+                // {"num": -1}. That disagreed with the two neighbouring behaviours it should
+                // match: an unparseable num already falls through to getDefaultPageSize()
+                // below, and SuggestTool#resolveSuggestSize already documents "result <= 0 ->
+                // default". Nothing in the schema or the README ever described the old
+                // behaviour, so no caller could have been relying on it deliberately.
+                //
+                // The upper clamp is deliberately unchanged: num > max is still served as max
+                // rather than refused, because the maximum is a server-side protection the
+                // caller cannot be expected to know.
                 final Object value = paramMap.get("num");
                 try {
                     if (value != null) {
                         final int num = value instanceof final Number n ? n.intValue() : Integer.parseInt(value.toString());
-                        if (num > getFessConfig().getPagingSearchPageMaxSizeAsInteger().intValue() || num <= 0) {
-                            return getFessConfig().getPagingSearchPageMaxSizeAsInteger();
+                        if (num <= 0) {
+                            return getDefaultPageSize();
                         }
-                        return num;
+                        final int maxPageSize = getFessConfig().getPagingSearchPageMaxSizeAsInteger().intValue();
+                        return num > maxPageSize ? maxPageSize : num;
                     }
                 } catch (final NumberFormatException e) {
                     logger.debug("Failed to parse {}", value, e);
@@ -427,6 +461,12 @@ public class SearchTool implements McpTool {
 
             @Override
             public int getOffset() {
+                // Deliberately still reads "offset" alone, and deliberately does not alias
+                // "start" back the other way. Despite the name, this is not the start position:
+                // Fess's RankFusionProcessor uses it to shift each sub-searcher's window on its
+                // deep-pagination branch, on top of the start position getStartPosition()
+                // already supplied. Aliasing start into it would double-count the caller's
+                // paging offset on every hybrid/rank-fusion search.
                 final Object value = paramMap.get("offset");
                 try {
                     if (value != null) {

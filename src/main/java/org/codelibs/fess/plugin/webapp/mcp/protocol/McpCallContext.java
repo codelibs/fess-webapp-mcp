@@ -38,7 +38,20 @@ public class McpCallContext {
     /** The parsed request envelope, or null when this context was created without one. */
     private final McpRequest request;
 
-    /** The parsed {@code params._meta}, or null when this context was created without one. */
+    /**
+     * The parsed {@code params._meta}, or null when this context was created without one.
+     * <p>
+     * Retained as part of the validated request envelope this context carries, but deliberately
+     * not exposed: the {@code getMeta()} accessor that used to return it had no caller in either
+     * {@code src/main/java} or {@code src/test/java}, so it was removed rather than left as an
+     * untested public surface. The two consumers of {@code _meta} that do exist -- the
+     * protocol-version cross-check in {@code HeaderValidator} and the supported-version check in
+     * {@code McpApiManager} -- both work with the {@link McpRequestMeta} directly, before this
+     * context is built. The constructor parameter stays because it is what makes this context a
+     * faithful record of the envelope that was validated; add an accessor back when a handler
+     * actually needs to consult it, together with the test that pins the use.
+     * </p>
+     */
     private final McpRequestMeta meta;
 
     /** The request's {@code params}; never null. */
@@ -93,15 +106,6 @@ public class McpCallContext {
      */
     public McpRequest getRequest() {
         return request;
-    }
-
-    /**
-     * Returns the parsed {@code params._meta}.
-     *
-     * @return the request metadata, or null when this context was created without one
-     */
-    public McpRequestMeta getMeta() {
-        return meta;
     }
 
     /**

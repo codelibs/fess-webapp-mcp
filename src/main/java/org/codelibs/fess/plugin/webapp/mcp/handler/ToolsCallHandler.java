@@ -117,11 +117,26 @@ public class ToolsCallHandler implements McpMethodHandler {
             throw new McpError(HttpServletResponse.SC_OK, ErrorCode.InvalidParams, "Missing required parameter: name");
         }
 
+        // params.arguments is optional, per the schema: CallToolRequestParams is
+        // { name: string; arguments?: { [key: string]: unknown } }, with no "?" on name and one
+        // on arguments (2026-07-28 schema.ts; it was already optional in 2024-11-05). Refusing
+        // the call with -32602 when it was absent made the zero-argument call shape unusable:
+        // get_index_stats declares {"type":"object","properties":{}} and takes no arguments at
+        // all, so a conformant client that omitted the key -- the correct thing to send -- could
+        // never reach it. The sibling PromptsGetHandler already defaults the identically-optional
+        // GetPromptRequestParams.arguments? to Map.of(), and this mirrors it.
+        //
+        // This weakens no required-argument check. Which arguments a tool needs is the tool's own
+        // business and is enforced inside McpTool#call: with an empty map, {"name":"search"} is
+        // still refused as -32602 "Missing required parameter: q" by SearchTool#validateArguments.
+        // What changes is only who reports it, and with which message.
+        //
+        // A non-Map arguments is defaulted the same way rather than rejected separately, again
+        // mirroring PromptsGetHandler: it is a shape no client sends, the tools' own validation
+        // still refuses whatever it actually needs, and a second differently-worded rejection
+        // path would be one more thing to keep consistent for no caller's benefit.
         final Object argumentsObj = params.get("arguments");
-        if (!(argumentsObj instanceof Map)) {
-            throw new McpError(HttpServletResponse.SC_OK, ErrorCode.InvalidParams, "Missing required parameter: arguments");
-        }
-        final Map<String, Object> arguments = (Map<String, Object>) argumentsObj;
+        final Map<String, Object> arguments = argumentsObj instanceof Map ? (Map<String, Object>) argumentsObj : Map.of();
 
         final McpTool tool = findTool(name);
         // A single check, a single throw, and a single message for "no such tool" and "hidden by

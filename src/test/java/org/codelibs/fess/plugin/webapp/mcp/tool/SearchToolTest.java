@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 
 import org.codelibs.fess.entity.SearchRequestParams;
+import org.codelibs.fess.mylasta.direction.FessConfig;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpError;
@@ -442,5 +443,241 @@ public class SearchToolTest {
         // DI container, so this is safe to assert without one.
         final SearchRequestParams reqParams = searchTool.buildRequestParams(Map.of("q", "test"));
         assertEquals(SearchRequestParams.SearchRequestType.JSON, reqParams.getType());
+    }
+
+    // ------------------------------------------------------------------
+    // Paging: start / offset / num
+    // ------------------------------------------------------------------
+
+    /** The configured {@code paging.search.page.start} these tests pin against. */
+    private static final int PAGE_START = 0;
+
+    /** The configured {@code paging.search.page.max.size} these tests pin against. */
+    private static final int MAX_PAGE_SIZE = 100;
+
+    /** The effective {@code mcp.default.page.size} these tests pin against. */
+    private static final int DEFAULT_PAGE_SIZE = 3;
+
+    /**
+     * A {@code search} tool whose paging configuration is fixed, so the {@code start}/
+     * {@code offset}/{@code num} accessors can be asserted without a DI container.
+     * <p>
+     * {@code getStartPosition()} and {@code getPageSize()} both consult
+     * {@link SearchTool#getFessConfig()} for their fallbacks -- the configured page start, the
+     * configured maximum page size -- and {@code getPageSize()} additionally consults
+     * {@link SearchTool#getDefaultPageSize()}. Substituting all three keeps these tests
+     * container-free while still exercising the real accessor bodies, and pins the three
+     * distinct fallback values apart from each other ({@value #PAGE_START} /
+     * {@value #MAX_PAGE_SIZE} / {@value #DEFAULT_PAGE_SIZE}) so a test cannot accidentally pass
+     * by landing on the wrong one. Only the two paging getters are overridden on the
+     * {@code FessConfig.SimpleImpl}: it backs nothing else, so any accessor these tests do not
+     * reach would fail loudly rather than return a plausible-looking zero.
+     * </p>
+     *
+     * @return a container-free {@code search} tool with fixed paging configuration
+     */
+    private static SearchTool newSearchToolWithFixedPaging() {
+        return new SearchTool() {
+            @Override
+            protected FessConfig getFessConfig() {
+                return new FessConfig.SimpleImpl() {
+
+                    private static final long serialVersionUID = 1L;
+
+                    @Override
+                    public Integer getPagingSearchPageStartAsInteger() {
+                        return Integer.valueOf(PAGE_START);
+                    }
+
+                    @Override
+                    public Integer getPagingSearchPageMaxSizeAsInteger() {
+                        return Integer.valueOf(MAX_PAGE_SIZE);
+                    }
+                };
+            }
+
+            @Override
+            protected int getDefaultPageSize() {
+                return DEFAULT_PAGE_SIZE;
+            }
+        };
+    }
+
+    /**
+     * Returns {@code getStartPosition()} for one set of {@code search} arguments.
+     *
+     * @param arguments the raw {@code search} tool arguments
+     * @return the resolved start position
+     */
+    private static int startPositionOf(final Map<String, Object> arguments) {
+        return newSearchToolWithFixedPaging().buildRequestParams(arguments).getStartPosition();
+    }
+
+    /**
+     * Returns {@code getOffset()} for one set of {@code search} arguments.
+     *
+     * @param arguments the raw {@code search} tool arguments
+     * @return the resolved rank-fusion window offset
+     */
+    private static int offsetOf(final Map<String, Object> arguments) {
+        return newSearchToolWithFixedPaging().buildRequestParams(arguments).getOffset();
+    }
+
+    /**
+     * Returns {@code getPageSize()} for one set of {@code search} arguments.
+     *
+     * @param arguments the raw {@code search} tool arguments
+     * @return the resolved page size
+     */
+    private static int pageSizeOf(final Map<String, Object> arguments) {
+        return newSearchToolWithFixedPaging().buildRequestParams(arguments).getPageSize();
+    }
+
+    @Test
+    public void testStartPosition_StartIsUsed() {
+        // Control for the offset tests below: the primary name has always worked, so a failure
+        // here would mean the alias fix broke the thing it was extending.
+        assertEquals(20, startPositionOf(Map.of("q", "x", "start", Integer.valueOf(20))), "start must set the start position");
+    }
+
+    @Test
+    public void testStartPosition_OffsetAloneIsUsedAsAnAliasOfStart() {
+        // getInputSchema() advertises offset as "offset (alias of start)" over tools/list to
+        // every client, but getStartPosition() read only "start", so the alias was a complete
+        // no-op: a client paginating with offset re-requested page 1 forever.
+        assertEquals(20, startPositionOf(Map.of("q", "x", "offset", Integer.valueOf(20))),
+                "offset is advertised as an alias of start and must set the start position");
+    }
+
+    @Test
+    public void testStartPosition_StartWinsWhenBothArePresent() {
+        // start is the primary name; offset only stands in for it. A caller that sends both is
+        // most likely migrating from one name to the other, so the primary name decides.
+        assertEquals(5, startPositionOf(Map.of("q", "x", "start", Integer.valueOf(5), "offset", Integer.valueOf(20))),
+                "start must win over its own alias");
+    }
+
+    @Test
+    public void testStartPosition_StartWinsEvenWhenItsOwnValueIsUnusable() {
+        // The other half of the tie-break rule, and the half a plausible implementation gets
+        // wrong: "start wins" means "start wins whenever the caller sent it", not "start wins
+        // when it happens to parse". Falling through to the alias here would page through
+        // results from somewhere the caller never asked for -- offset would silently repair a
+        // start the caller got wrong, with nothing in the response to say it happened.
+        assertEquals(PAGE_START, startPositionOf(Map.of("q", "x", "start", "abc", "offset", Integer.valueOf(20))),
+                "an unparseable start must not fall through to offset");
+        assertEquals(PAGE_START, startPositionOf(Map.of("q", "x", "start", Integer.valueOf(-1), "offset", Integer.valueOf(20))),
+                "a negative start must not fall through to offset");
+    }
+
+    @Test
+    public void testStartPosition_ExplicitNullStartIsTreatedAsAbsentSoTheAliasApplies() {
+        // A key present with an explicit JSON null is indistinguishable from an absent key at
+        // this layer, and validateArguments already treats {"q": null} as a missing q, so the
+        // alias applies rather than the caller silently getting page 1.
+        final Map<String, Object> arguments = new HashMap<>();
+        arguments.put("q", "x");
+        arguments.put("start", null);
+        arguments.put("offset", Integer.valueOf(20));
+        assertEquals(20, startPositionOf(arguments), "an explicitly-null start must not suppress the offset alias");
+    }
+
+    @Test
+    public void testStartPosition_NumericStringOffsetIsParsedLikeANumericStringStart() {
+        // The alias must inherit getStartPosition()'s existing coercion, not a stricter one:
+        // testCall_WellTypedArgumentsPassValidation already pins that start accepts "10", and
+        // start/offset/num are deliberately exempt from the schema type check for that reason.
+        assertEquals(10, startPositionOf(Map.of("q", "x", "start", "10")), "a numeric String start must keep being parsed");
+        assertEquals(10, startPositionOf(Map.of("q", "x", "offset", "10")), "a numeric String offset must be parsed the same way");
+    }
+
+    @Test
+    public void testStartPosition_NonNumericOffsetFallsBackLikeANonNumericStart() {
+        // Not "offset is validated": an unparseable value falls back exactly as the primary name
+        // does, so the alias adds no new rejection path.
+        assertEquals(PAGE_START, startPositionOf(Map.of("q", "x", "start", "abc")),
+                "a non-numeric start falls back to the configured start");
+        assertEquals(PAGE_START, startPositionOf(Map.of("q", "x", "offset", "abc")), "a non-numeric offset must fall back the same way");
+    }
+
+    @Test
+    public void testStartPosition_NegativeOffsetFallsBackLikeANegativeStart() {
+        // getStartPosition() only accepts values > -1, so a negative value is ignored rather
+        // than passed to the search engine. The alias inherits that bound unchanged.
+        assertEquals(PAGE_START, startPositionOf(Map.of("q", "x", "start", Integer.valueOf(-1))), "a negative start is ignored");
+        assertEquals(PAGE_START, startPositionOf(Map.of("q", "x", "offset", Integer.valueOf(-1))), "a negative offset must be ignored too");
+    }
+
+    @Test
+    public void testStartPosition_NeitherStartNorOffsetFallsBackToTheConfiguredPageStart() {
+        assertEquals(PAGE_START, startPositionOf(Map.of("q", "x")), "with neither name present the configured page start applies");
+    }
+
+    @Test
+    public void testStartPosition_ZeroOffsetIsHonouredRatherThanTreatedAsAbsent() {
+        // A present-but-zero offset must not be confused with an absent one. It happens to
+        // coincide with PAGE_START here, so this asserts the value the caller asked for reached
+        // the accessor by also proving zero does not let a companion start through.
+        assertEquals(0, startPositionOf(Map.of("q", "x", "offset", Integer.valueOf(0))), "offset=0 is a legitimate first page");
+    }
+
+    @Test
+    public void testOffsetAccessorStillReadsOnlyOffset() {
+        // getOffset() feeds a different contract from getStartPosition(): Fess's
+        // RankFusionProcessor uses it to shift the sub-searcher window on the deep-pagination
+        // branch, so it must keep meaning "offset" alone and must not start aliasing start.
+        assertEquals(20, offsetOf(Map.of("q", "x", "offset", Integer.valueOf(20))), "getOffset() must keep reading offset");
+        assertEquals(0, offsetOf(Map.of("q", "x", "start", Integer.valueOf(20))),
+                "getOffset() must not pick start up: the rank-fusion window shift is a separate contract");
+    }
+
+    @Test
+    public void testPageSize_WithinRangeIsPreserved() {
+        assertEquals(5, pageSizeOf(Map.of("q", "x", "num", Integer.valueOf(5))), "a num within range must be preserved");
+    }
+
+    @Test
+    public void testPageSize_OverMaxIsCappedAtMax() {
+        assertEquals(MAX_PAGE_SIZE, pageSizeOf(Map.of("q", "x", "num", Integer.valueOf(MAX_PAGE_SIZE + 1))),
+                "a num over the configured maximum must be capped");
+    }
+
+    @Test
+    public void testPageSize_AbsentFallsBackToTheDefault() {
+        assertEquals(DEFAULT_PAGE_SIZE, pageSizeOf(Map.of("q", "x")), "an absent num must fall back to the default page size");
+    }
+
+    @Test
+    public void testPageSize_NonNumericFallsBackToTheDefault() {
+        // The behaviour the num<=0 cases below are aligned with, pinned first so the alignment
+        // is anchored to something asserted rather than to a claim.
+        assertEquals(DEFAULT_PAGE_SIZE, pageSizeOf(Map.of("q", "x", "num", "abc")), "an unparseable num must fall back to the default");
+    }
+
+    @Test
+    public void testPageSize_ZeroFallsBackToTheDefaultNotTheMaximum() {
+        // num<=0 used to share the "> max" branch and therefore returned the configured MAXIMUM
+        // (100 in a stock install): asking for nothing produced the largest page the server
+        // will ever emit. It now falls back to the default, matching both the unparseable-num
+        // case above and SuggestTool#resolveSuggestSize.
+        assertEquals(DEFAULT_PAGE_SIZE, pageSizeOf(Map.of("q", "x", "num", Integer.valueOf(0))), "num=0 must fall back to the default");
+    }
+
+    @Test
+    public void testPageSize_NegativeFallsBackToTheDefaultNotTheMaximum() {
+        assertEquals(DEFAULT_PAGE_SIZE, pageSizeOf(Map.of("q", "x", "num", Integer.valueOf(-1))), "num=-1 must fall back to the default");
+    }
+
+    @Test
+    public void testPageSize_NumericStringZeroFallsBackToTheDefaultNotTheMaximum() {
+        // The String path reaches the same comparison through Integer.parseInt, so it has to be
+        // pinned separately: a fix applied to only one of the two branches would leave the other
+        // still returning the maximum.
+        assertEquals(DEFAULT_PAGE_SIZE, pageSizeOf(Map.of("q", "x", "num", "0")), "num=\"0\" must fall back to the default");
+    }
+
+    @Test
+    public void testPageSize_NumericStringNegativeFallsBackToTheDefaultNotTheMaximum() {
+        assertEquals(DEFAULT_PAGE_SIZE, pageSizeOf(Map.of("q", "x", "num", "-5")), "num=\"-5\" must fall back to the default");
     }
 }

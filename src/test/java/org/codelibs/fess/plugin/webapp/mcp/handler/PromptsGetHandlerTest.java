@@ -55,6 +55,22 @@ public class PromptsGetHandlerTest {
     }
 
     @Test
+    public void testEmptyNameIsInvalidParams() {
+        // The isEmpty() half of the name guard, which nothing exercised: the test above covers
+        // only the absent/non-String half, so deleting {@code || name.isEmpty()} left the suite
+        // green while {"name": ""} fell through the switch and was reported as
+        // "Unknown prompt: " -- a different message, for what is really a malformed request.
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "");
+        params.put("arguments", Map.of("query", "test"));
+        final McpError error = assertThrows(McpError.class, () -> handler.handle(contextWithParams(params)));
+        assertEquals(200, error.getHttpStatus());
+        assertEquals(ErrorCode.InvalidParams, error.getErrorCode());
+        assertEquals("Missing required parameter: name", error.getMessage(),
+                "an empty name is a missing name, not an unknown prompt: " + error.getMessage());
+    }
+
+    @Test
     public void testUnknownPromptIsInvalidParams() {
         final Map<String, Object> params = new HashMap<>();
         params.put("name", "unknown_prompt");
@@ -90,6 +106,61 @@ public class PromptsGetHandlerTest {
         final McpError error = assertThrows(McpError.class, () -> handler.handle(contextWithParams(params)));
         assertEquals(ErrorCode.InvalidParams, error.getErrorCode());
         assertTrue(error.getMessage().contains("query"));
+    }
+
+    @Test
+    public void testBasicSearchEmptyQueryIsInvalidParams() {
+        // The isEmpty() half of the basic_search query guard. This is the one guard in this
+        // family whose loss a caller would actually notice: without it, {"query": ""} does not
+        // fail at all -- it returns a perfectly well-formed prompt reading "Please search for: "
+        // with nothing after the colon, which the model then acts on.
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "basic_search");
+        params.put("arguments", Map.of("query", ""));
+        final McpError error = assertThrows(McpError.class, () -> handler.handle(contextWithParams(params)));
+        assertEquals(200, error.getHttpStatus());
+        assertEquals(ErrorCode.InvalidParams, error.getErrorCode());
+        assertTrue(error.getMessage().contains("query"), "the message must name the argument: " + error.getMessage());
+    }
+
+    @Test
+    public void testAdvancedSearchEmptyQueryIsInvalidParams() {
+        // Same guard, duplicated in buildAdvancedSearchPrompt, so it needs its own assertion: the
+        // two copies can be broken independently. Without it the prompt is emitted with a bare
+        // "Query: " line -- and, when the caller also sent sort/num, with those lines populated,
+        // which makes it look even more like a legitimate request.
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "advanced_search");
+        params.put("arguments", Map.of("query", "", "sort", "score.desc", "num", "10"));
+        final McpError error = assertThrows(McpError.class, () -> handler.handle(contextWithParams(params)));
+        assertEquals(200, error.getHttpStatus());
+        assertEquals(ErrorCode.InvalidParams, error.getErrorCode());
+        assertTrue(error.getMessage().contains("query"), "the message must name the argument: " + error.getMessage());
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    public void testAdvancedSearchOmitsAnEmptySortAndNumEntirely() {
+        // The isEmpty() halves of the two optional-argument guards, asserted as ABSENCE.
+        //
+        // testAdvancedSearchIncludesOptionalSortAndNum pins the populated direction, and nothing
+        // pinned this one: dropping {@code && !sort.toString().isEmpty()} appends a dangling
+        // "Sort:" label with no value after it (likewise "Number of results:"), instructing the
+        // model to sort by nothing. A test that only checked the query still came through would
+        // pass with both labels present, which is why these are assertFalse on the labels rather
+        // than assertTrue on the query.
+        final Map<String, Object> params = new HashMap<>();
+        params.put("name", "advanced_search");
+        params.put("arguments", Map.of("query", "test query", "sort", "", "num", ""));
+
+        final Map<String, Object> result = handler.handle(contextWithParams(params));
+
+        final List<Map<String, Object>> messages = (List<Map<String, Object>>) result.get("messages");
+        final Map<String, Object> content = (Map<String, Object>) messages.get(0).get("content");
+        final String text = content.get("text").toString();
+        assertTrue(text.contains("Query: test query"), "the query must still be substituted");
+        assertFalse(text.contains("Sort:"), "an empty sort must not emit a dangling label: " + text);
+        assertFalse(text.contains("Number of results:"), "an empty num must not emit a dangling label: " + text);
     }
 
     @Test
