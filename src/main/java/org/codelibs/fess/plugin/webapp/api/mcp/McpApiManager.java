@@ -117,12 +117,37 @@ public class McpApiManager extends BaseApiManager {
     public static final String AUTH_MODE_OAUTH = "oauth";
 
     /**
-     * The shared rate limiter, or {@code null} until {@link #getRateLimiter()} builds it on
-     * first use. Not {@code final}: building it eagerly in a field initializer would call
+     * The shared rate limiter together with the {@code mcp.rate.limit.per.minute} value it was
+     * built from, or {@code null} until {@link #getRateLimiter()} builds it on first use.
+     * <p>
+     * Not {@code final}: building it eagerly in a field initializer would call
      * {@link #getRateLimitPerMinute()}'s {@code ComponentUtil} read for every {@code
-     * McpApiManager} construction, including every container-free test.
+     * McpApiManager} construction, including every container-free test. {@code volatile} and
+     * paired with its configuration in a single record for the same reason
+     * {@link OAuthResourceServerAuthenticator}'s cached processor is -- see
+     * {@link #getRateLimiter()}.
+     * </p>
      */
-    private RateLimiter rateLimiter;
+    private volatile CachedRateLimiter cachedRateLimiter;
+
+    /**
+     * A {@link RateLimiter} together with the configured limit it was built from.
+     *
+     * @param perMinute the {@code mcp.rate.limit.per.minute} value {@code limiter} was built from
+     * @param limiter the limiter built from {@code perMinute}
+     */
+    private record CachedRateLimiter(int perMinute, RateLimiter limiter) {
+
+        /**
+         * Returns whether this entry was built from {@code candidate}.
+         *
+         * @param candidate the currently configured limit
+         * @return {@code true} when this entry is still current
+         */
+        boolean matches(final int candidate) {
+            return perMinute == candidate;
+        }
+    }
 
     /**
      * Also one of the nine handlers in {@link #dispatcher}; held separately because
@@ -741,23 +766,48 @@ public class McpApiManager extends BaseApiManager {
 
     /**
      * Returns the shared rate limiter, building it from {@link #getRateLimitPerMinute()} on
-     * first use.
+     * first use and rebuilding it whenever that value changes.
      * <p>
      * Built lazily rather than eagerly in the constructor so that constructing a
      * {@code McpApiManager} -- something the container-free test suite does for every test --
      * never touches {@code ComponentUtil}; the {@code ComponentUtil} read only happens the first
      * time a {@code tools/call} or {@code completion/complete} request actually needs it. The
-     * built instance is cached on the instance field so its per-key windows persist across
-     * requests instead of resetting on every call.
+     * built instance is cached so its per-key windows persist across requests instead of
+     * resetting on every call.
+     * </p>
+     * <p>
+     * <b>Do not simplify this back to a null check.</b> {@code RateLimiter.perMinute} is
+     * {@code final}, so a build-once cache pins {@code mcp.rate.limit.per.minute} for the life of
+     * the JVM: an operator who raises the limit under load, or sets it to {@code 0} to disable
+     * the limiter while debugging a client, sees nothing happen and gets no log line explaining
+     * why. Restarting Fess would be the only cure. That is the same trap
+     * {@link OAuthResourceServerAuthenticator#getProcessor()} documents for the JWKS source, and
+     * every other {@code mcp.*} setting is already re-read per request, so freezing this one
+     * alone is a surprise. Keying the cache on the configured value keeps the common case to one
+     * volatile read and one {@code int} comparison while letting an edit take effect.
+     * </p>
+     * <p>
+     * A rebuild necessarily discards the in-flight windows, so callers get a fresh allowance at
+     * the moment the limit changes. That is the desired reading of a deliberate config edit, and
+     * it cannot be exploited: reaching it requires write access to
+     * {@code WEB-INF/conf/system.properties}.
      * </p>
      *
      * @return the rate limiter, shared across every request this manager processes
      */
-    protected synchronized RateLimiter getRateLimiter() {
-        if (rateLimiter == null) {
-            rateLimiter = new RateLimiter(getRateLimitPerMinute());
+    protected RateLimiter getRateLimiter() {
+        final int perMinute = getRateLimitPerMinute();
+        CachedRateLimiter cached = cachedRateLimiter;
+        if (cached == null || !cached.matches(perMinute)) {
+            synchronized (this) {
+                cached = cachedRateLimiter;
+                if (cached == null || !cached.matches(perMinute)) {
+                    cached = new CachedRateLimiter(perMinute, new RateLimiter(perMinute));
+                    cachedRateLimiter = cached;
+                }
+            }
         }
-        return rateLimiter;
+        return cached.limiter();
     }
 
     /**

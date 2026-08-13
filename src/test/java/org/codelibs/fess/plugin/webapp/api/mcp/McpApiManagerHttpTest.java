@@ -17,6 +17,7 @@ package org.codelibs.fess.plugin.webapp.api.mcp;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -1024,6 +1025,54 @@ public class McpApiManagerHttpTest {
         assertSame(manager.getRateLimiter(), manager.getRateLimiter(),
                 "getRateLimiter() must cache the built instance on the field -- returning a fresh RateLimiter per call would "
                         + "silently disable rate limiting, since every caller would always see an empty, unshared counter");
+    }
+
+    /**
+     * {@link McpApiManager} whose {@code mcp.rate.limit.per.minute} can be moved at runtime, the
+     * way an operator editing {@code WEB-INF/conf/system.properties} moves it.
+     */
+    static class MutableRateLimitManager extends McpApiManager {
+        int perMinute = 60;
+
+        @Override
+        protected int getRateLimitPerMinute() {
+            return perMinute;
+        }
+    }
+
+    @Test
+    public void testEditingTheRateLimitAtRuntimeRebindsTheLimiter() {
+        // mcp.rate.limit.per.minute is a Fess SYSTEM property, and Fess re-reads its properties
+        // within seconds of an mtime change -- as every other mcp.* setting already honours.
+        // RateLimiter.perMinute is final, so a build-once cache pinned this one value for the life
+        // of the JVM: raising the limit under load, or setting 0 to disable the limiter while
+        // debugging a client, did nothing at all and logged nothing to say why.
+        final MutableRateLimitManager manager = new MutableRateLimitManager();
+
+        final RateLimiter before = manager.getRateLimiter();
+        assertSame(before, manager.getRateLimiter(), "an unchanged limit must not rebuild the limiter");
+
+        manager.perMinute = 5;
+        final RateLimiter after = manager.getRateLimiter();
+
+        assertNotSame(before, after, "a changed mcp.rate.limit.per.minute must rebind the limiter, not be ignored until a restart");
+        assertSame(after, manager.getRateLimiter(), "the rebuilt limiter must itself be cached, or every call resets every window");
+    }
+
+    @Test
+    public void testDisablingTheRateLimitAtRuntimeTakesEffect() {
+        // The observable half of the rebind: the limit is not just a different object, it is
+        // actually enforced. 0 disables the limiter, which is what an operator reaches for first.
+        final MutableRateLimitManager manager = new MutableRateLimitManager();
+        manager.perMinute = 1;
+
+        assertTrue(manager.getRateLimiter().tryAcquire("caller"), "the first call is within a limit of 1");
+        assertFalse(manager.getRateLimiter().tryAcquire("caller"), "the second call exceeds a limit of 1");
+
+        manager.perMinute = 0;
+
+        assertTrue(manager.getRateLimiter().tryAcquire("caller"),
+                "setting mcp.rate.limit.per.minute=0 must disable the limiter without a restart");
     }
 
     // ------------------------------------------------------------------
