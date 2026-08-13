@@ -177,8 +177,10 @@ public class OriginValidatorTest {
 
     @Test
     public void testSuffixSpoofedOriginIsRejectedWith403() {
-        // "client.example.com.evil.com" ends with the trusted host as a substring; exact equality
-        // must reject it rather than an endsWith-style check that would accept it.
+        // "client.example.com.evil.com" STARTS WITH the trusted origin, so exact equality must
+        // reject it where a startsWith-style check would accept it. (Measured: it does NOT end
+        // with the trusted origin, so this input says nothing about an endsWith-style check --
+        // testSubdomainOfAnAllowedOriginIsRejectedWith403 below covers that direction.)
         final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("POST", "/mcp");
         request.addHeader("Origin", "https://client.example.com.evil.com");
         final McpError error = assertThrows(McpError.class, () -> OriginValidator.validate(request, Set.of("https://client.example.com")));
@@ -199,5 +201,29 @@ public class OriginValidatorTest {
         final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("POST", "/mcp");
         request.addHeader("Origin", "https://client.example.com");
         OriginValidator.validate(request, Set.of("HTTPS://CLIENT.EXAMPLE.COM"));
+    }
+
+    @Test
+    public void testSubdomainOfAnAllowedOriginIsRejectedWith403() {
+        // The other direction, and the one an endsWith check actually gets wrong:
+        // "evil.client.example.com" ends with the allowlisted host, so any "tolerate subdomains"
+        // relaxation of the comparison admits an origin the operator never named. Registering one
+        // hostname must not delegate trust to whoever controls a label to its left.
+        final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("POST", "/mcp");
+        request.addHeader("Origin", "https://evil.client.example.com");
+        final McpError error = assertThrows(McpError.class, () -> OriginValidator.validate(request, Set.of("https://client.example.com")));
+        assertEquals(403, error.getHttpStatus());
+    }
+
+    @Test
+    public void testHttpOriginDoesNotMatchAnHttpsAllowlistEntry() {
+        // The scheme is part of the origin, not decoration: an allowlist entry naming https must
+        // not admit the plaintext origin of the same host, which any network attacker can serve.
+        // Normalisation lowercases the scheme and drops the scheme's own default port -- it must
+        // never drop the scheme itself.
+        final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("POST", "/mcp");
+        request.addHeader("Origin", "http://client.example.com");
+        final McpError error = assertThrows(McpError.class, () -> OriginValidator.validate(request, Set.of("https://client.example.com")));
+        assertEquals(403, error.getHttpStatus());
     }
 }

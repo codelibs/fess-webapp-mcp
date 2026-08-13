@@ -45,8 +45,12 @@ import com.nimbusds.jose.JOSEObjectType;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.RemoteKeySourceException;
+import com.nimbusds.jose.crypto.MACSigner;
 import com.nimbusds.jose.crypto.RSASSASigner;
+import com.nimbusds.jose.jwk.JWK;
+import com.nimbusds.jose.jwk.OctetSequenceKey;
 import com.nimbusds.jose.jwk.RSAKey;
+import com.nimbusds.jose.jwk.gen.OctetSequenceKeyGenerator;
 import com.nimbusds.jose.jwk.gen.RSAKeyGenerator;
 import com.nimbusds.jose.jwk.source.CachingJWKSetSource;
 import com.nimbusds.jose.jwk.source.ImmutableJWKSet;
@@ -145,10 +149,19 @@ public class OAuthAuthenticatorTest {
     static class TestAuthenticator extends ConfigOnlyAuthenticator {
         RSAKey verificationKey = signingKey;
 
+        /**
+         * An additional, non-RSA key to publish in the in-memory JWKS. Only
+         * {@link OAuthAuthenticatorTest#testHmacSignedTokenIsRejectedEvenWhenTheJwksPublishesASymmetricKey}
+         * sets it; it exists because an RSA-only key set already rejects a MAC-signed token for
+         * an unrelated reason, which would make that test pin nothing.
+         */
+        JWK extraVerificationKey;
+
         @Override
         protected ConfigurableJWTProcessor<SecurityContext> getProcessor() {
-            final JWKSource<SecurityContext> inMemorySource =
-                    new ImmutableJWKSet<>(new com.nimbusds.jose.jwk.JWKSet(verificationKey.toPublicJWK()));
+            final List<JWK> keys = extraVerificationKey == null ? List.of(verificationKey.toPublicJWK())
+                    : List.of(verificationKey.toPublicJWK(), extraVerificationKey);
+            final JWKSource<SecurityContext> inMemorySource = new ImmutableJWKSet<>(new com.nimbusds.jose.jwk.JWKSet(keys));
             return newProcessor(inMemorySource);
         }
     }
@@ -1004,6 +1017,76 @@ public class OAuthAuthenticatorTest {
         final ConfigurableJWTProcessor<SecurityContext> processor = jwksConfig("https://idp.example.com/jwks").getProcessor();
         assertNotNull(jwksSourceOfType(processor, RetryingJWKSetSource.class),
                 "a transient JWKS fetch failure must be retried rather than immediately costing 30s of 401s");
+    }
+
+    // ------------------------------------------------------------------
+    // Issuer, audience and algorithm checks are EXACT, not merely present.
+    // ------------------------------------------------------------------
+
+    @Test
+    public void testIssuerThatMerelyStartsWithTheConfiguredIssuerIsRejected() throws Exception {
+        // Exact equality, not a prefix relation in either direction.
+        // testWrongIssuerIsRejected uses a wholly different issuer, so it survives the naive
+        // "tolerate a trailing slash" relaxation iss.startsWith(getIssuer()) -- which accepts
+        // a domain the attacker simply registers. The reverse relaxation accepts a truncated
+        // issuer. Both are asserted, because either one alone leaves the other open.
+        assertIssuerRejected(ISSUER + ".attacker.test");
+        assertIssuerRejected(ISSUER + "/evil");
+        assertIssuerRejected("https://idp.example");
+    }
+
+    private void assertIssuerRejected(final String issuer) throws Exception {
+        final String token = sign(validClaims().issuer(issuer), signingKey);
+        final TestAuthenticator auth = newAuthenticator("");
+        final MockletHttpServletRequestImpl request = bearerRequest(token);
+        final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
+
+        final McpError error =
+                assertThrows(McpError.class, () -> auth.authenticate(request, response), "issuer must be rejected: " + issuer);
+        assertEquals(401, error.getHttpStatus(), issuer);
+    }
+
+    @Test
+    public void testAudienceThatOnlySharesAPrefixWithTheCanonicalUriIsRejected() throws Exception {
+        // RFC 8707 audience binding is set membership, not string containment.
+        // testTokenMintedForAnotherResourceIsRejected uses a wholly different aud, so it survives
+        // any prefix-tolerant relaxation of requireAudience; these two values do not.
+        assertAudienceRejected(AUDIENCE + "-evil");
+        assertAudienceRejected("https://fess.example.com");
+    }
+
+    private void assertAudienceRejected(final String audience) throws Exception {
+        final String token = sign(validClaims().audience(audience), signingKey);
+        final TestAuthenticator auth = newAuthenticator("");
+        final MockletHttpServletRequestImpl request = bearerRequest(token);
+        final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
+
+        final McpError error =
+                assertThrows(McpError.class, () -> auth.authenticate(request, response), "audience must be rejected: " + audience);
+        assertEquals(401, error.getHttpStatus(), audience);
+    }
+
+    @Test
+    public void testHmacSignedTokenIsRejectedEvenWhenTheJwksPublishesASymmetricKey() throws Exception {
+        // The RS256-only JWSVerificationKeySelector is the ONLY thing that rejects this token.
+        // With an RSA-only JWKS an HS256 token already fails for an unrelated reason -- nimbus's
+        // JWKMatcher demands a kty:oct key for a MAC algorithm and finds none -- so the classic
+        // "sign with the RSA public key as the HMAC secret" test would pass even with HS256 added
+        // to the selector, and would pin nothing. Publishing an oct key (which an authorization
+        // server may legitimately do for a different client) removes that accidental protection
+        // and leaves the algorithm restriction itself as the only defence.
+        final OctetSequenceKey macKey = new OctetSequenceKeyGenerator(256).keyID("mac-key-1").generate();
+        final SignedJWT jwt =
+                new SignedJWT(new JWSHeader.Builder(JWSAlgorithm.HS256).keyID(macKey.getKeyID()).build(), validClaims().build());
+        jwt.sign(new MACSigner(macKey.toByteArray()));
+
+        final TestAuthenticator auth = newAuthenticator("");
+        auth.extraVerificationKey = macKey;
+        final MockletHttpServletRequestImpl request = bearerRequest(jwt.serialize());
+        final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
+
+        final McpError error = assertThrows(McpError.class, () -> auth.authenticate(request, response));
+        assertEquals(401, error.getHttpStatus(), "a MAC-signed token must be refused by the RS256-only key selector");
     }
 
     // ------------------------------------------------------------------
