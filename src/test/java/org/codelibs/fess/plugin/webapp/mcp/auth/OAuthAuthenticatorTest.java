@@ -19,10 +19,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.net.SocketTimeoutException;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
@@ -41,6 +43,7 @@ import com.nimbusds.jose.JOSEException;
 import com.nimbusds.jose.JOSEObjectType;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JWSHeader;
+import com.nimbusds.jose.RemoteKeySourceException;
 import com.nimbusds.jose.crypto.RSASSASigner;
 import com.nimbusds.jose.jwk.RSAKey;
 import com.nimbusds.jose.jwk.gen.RSAKeyGenerator;
@@ -1000,5 +1003,83 @@ public class OAuthAuthenticatorTest {
         final ConfigurableJWTProcessor<SecurityContext> processor = jwksConfig("https://idp.example.com/jwks").getProcessor();
         assertNotNull(jwksSourceOfType(processor, RetryingJWKSetSource.class),
                 "a transient JWKS fetch failure must be retried rather than immediately costing 30s of 401s");
+    }
+
+    // ------------------------------------------------------------------
+    // A JWKS outage is a server-side failure, not a bad credential.
+    // ------------------------------------------------------------------
+
+    /**
+     * {@link ConfigOnlyAuthenticator} whose JWKS source always fails the way an unreachable
+     * endpoint does. {@code RemoteKeySourceException} is what nimbus raises for DNS failures, TLS
+     * failures, connect/read timeouts and non-200 responses alike, so one throw covers the whole
+     * class of transport failures.
+     */
+    static class UnreachableJwksAuthenticator extends ConfigOnlyAuthenticator {
+        @Override
+        protected ConfigurableJWTProcessor<SecurityContext> getProcessor() {
+            return newProcessor((jwkSelector, context) -> {
+                throw new RemoteKeySourceException("Couldn't retrieve remote JWK set", new SocketTimeoutException("Read timed out"));
+            });
+        }
+    }
+
+    @Test
+    public void testJwksTransportFailureIsReportedAsUnavailableNotAsAnInvalidToken() throws Exception {
+        // RemoteKeySourceException extends KeySourceException extends JOSEException, so before the
+        // dedicated catch arm this landed in the same `catch (... | JOSEException | ...)` as a
+        // genuinely malformed token and became 401 invalid_token. That tells a perfectly healthy
+        // client its credential is bad -- so it discards a valid token and fetches another one,
+        // which cannot help, because the token was never the problem. The condition also does not
+        // self-heal: a failed build is deliberately not cached, so every following request fails
+        // the same way until the IdP comes back.
+        final UnreachableJwksAuthenticator auth = new UnreachableJwksAuthenticator();
+        auth.properties.put("mcp.oauth.issuer", ISSUER);
+        auth.properties.put("mcp.oauth.audience", AUDIENCE);
+        final MockletHttpServletRequestImpl request = bearerRequest(sign(validClaims(), signingKey));
+        final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
+
+        final McpError error = assertThrows(McpError.class, () -> auth.authenticate(request, response));
+
+        assertEquals(503, error.getHttpStatus(), "an unreachable JWKS endpoint is a server-side outage, not a bad credential");
+        assertFalse(error.getMessage().toLowerCase(java.util.Locale.ROOT).contains("token"),
+                "the message must not blame the caller's token: " + error.getMessage());
+        assertNull(response.getHeader("WWW-Authenticate"), "503 is not an authentication challenge, so it must not carry one");
+    }
+
+    @Test
+    public void testMalformedJwksUriIsReportedAsUnavailableNotAsAnInvalidToken() {
+        // getProcessor() wraps newProcessor's MalformedURLException in an IllegalStateException.
+        // That is a RuntimeException, so it too used to be laundered into 401 invalid_token --
+        // permanently, for every caller, with the real cause visible only at DEBUG. isUsable()
+        // cannot catch this case: it only checks that the value is non-blank, and deliberately so
+        // (a stricter isUsable() falls back to NoneAuthenticator, i.e. anonymous access).
+        final ConfigOnlyAuthenticator auth = new ConfigOnlyAuthenticator();
+        auth.properties.put("mcp.oauth.issuer", ISSUER);
+        auth.properties.put("mcp.oauth.audience", AUDIENCE);
+        auth.properties.put("mcp.oauth.jwks.uri", "htp://idp.example.com/jwks");
+        final MockletHttpServletRequestImpl request = bearerRequest("any.token.value");
+        final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
+
+        final McpError error = assertThrows(McpError.class, () -> auth.authenticate(request, response));
+
+        assertEquals(503, error.getHttpStatus(), "a misconfigured jwks.uri is the operator's fault, not the caller's");
+        assertNull(response.getHeader("WWW-Authenticate"), "503 is not an authentication challenge, so it must not carry one");
+    }
+
+    @Test
+    public void testAMalformedTokenIsStillAnInvalidTokenNotAnOutage() {
+        // Guards the other direction: the new 503 arms must not swallow the caller-directed case.
+        // If this ever returns 503, the catch arms have been widened too far and a bad credential
+        // is being reported as a server outage.
+        final TestAuthenticator auth = newAuthenticator("");
+        final MockletHttpServletRequestImpl request = bearerRequest("not-a-jwt");
+        final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
+
+        final McpError error = assertThrows(McpError.class, () -> auth.authenticate(request, response));
+
+        assertEquals(401, error.getHttpStatus(), "a malformed bearer token is still the caller's problem");
+        assertTrue(response.getHeader("WWW-Authenticate").contains("invalid_token"),
+                "a bad credential must still get the RFC 6750 invalid_token challenge");
     }
 }

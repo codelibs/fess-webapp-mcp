@@ -37,6 +37,7 @@ import org.codelibs.fess.util.ComponentUtil;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JOSEException;
 import com.nimbusds.jose.JOSEObjectType;
+import com.nimbusds.jose.KeySourceException;
 import com.nimbusds.jose.jwk.source.JWKSource;
 import com.nimbusds.jose.jwk.source.JWKSourceBuilder;
 import com.nimbusds.jose.proc.BadJOSEException;
@@ -182,6 +183,18 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
     private final AtomicBoolean jwksCacheFloorWarned = new AtomicBoolean();
 
     /**
+     * Tracks whether the JWKS endpoint is currently believed to be unreachable, so one outage
+     * produces one WARN rather than one per request.
+     * <p>
+     * Set when {@link #jwksUnavailable} fires and cleared by {@link #noteJwksReachable} on the
+     * next successful key retrieval, so a second outage after a recovery is reported again. A
+     * plain {@code AtomicBoolean} is enough: concurrent losers of the {@code compareAndSet}
+     * fall through to the debug line, which is exactly the intended "already reported" path.
+     * </p>
+     */
+    private final AtomicBoolean jwksUnavailableWarned = new AtomicBoolean();
+
+    /**
      * Creates an {@code oauth}-mode authenticator. Stateless at construction time: every
      * {@code ComponentUtil} read and the JWKS processor are built lazily, on first use.
      */
@@ -269,8 +282,16 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
         if (token == null) {
             throw missingCredential(response, requiredScopes, metadataUrl);
         }
+        final ConfigurableJWTProcessor<SecurityContext> processor;
         try {
-            final JWTClaimsSet claims = getProcessor().process(token, null);
+            processor = getProcessor();
+        } catch (final IllegalStateException e) {
+            // #getProcessor's only throw site: mcp.oauth.jwks.uri is not a parseable URL.
+            throw jwksUnavailable(response, e);
+        }
+        try {
+            final JWTClaimsSet claims = processor.process(token, null);
+            noteJwksReachable();
             requireIssuer(claims);
             requireAudience(claims, canonicalUri);
             final Set<String> tokenScopes = extractScopes(claims);
@@ -279,6 +300,11 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
         } catch (final McpError e) {
             // Already fully shaped (challenge header set, correct HTTP status) by requireScopes.
             throw e;
+        } catch (final KeySourceException e) {
+            // The key set could not be retrieved: DNS, TLS, connect/read timeout, a non-200 from
+            // the JWKS endpoint, or the IdP rate-limiting us. Nothing is wrong with the caller's
+            // token, so this must not be reported as invalid_token -- see #jwksUnavailable.
+            throw jwksUnavailable(response, e);
         } catch (final ParseException | BadJOSEException | JOSEException | RuntimeException e) {
             throw invalidToken(response, requiredScopes, metadataUrl, e);
         }
@@ -482,6 +508,62 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
     private McpError missingCredential(final HttpServletResponse response, final Set<String> requiredScopes, final String metadataUrl) {
         setChallenge(response, null, null, requiredScopes, metadataUrl);
         return new McpError(HttpServletResponse.SC_UNAUTHORIZED, ErrorCode.InvalidRequest, "A Bearer access token is required.");
+    }
+
+    /**
+     * Reports that the JWKS endpoint could not be consulted, as {@code 503} rather than
+     * {@code 401 invalid_token}.
+     * <p>
+     * These two failures are not interchangeable. {@code invalid_token} is an RFC 6750
+     * assertion <em>about the caller's credential</em>, and a client that receives it will
+     * discard its token and fetch a new one -- which cannot help, because the token was never
+     * the problem. Every JWKS transport failure arrives here as a
+     * {@link KeySourceException} ({@code RemoteKeySourceException} extends it), so DNS
+     * failures, TLS failures, connect and read timeouts, a non-200 from the JWKS endpoint and
+     * the IdP rate-limiting us would otherwise all be blamed on the caller.
+     * </p>
+     * <p>
+     * The log level matters as much as the status. This condition does not self-heal -- a
+     * failed build is deliberately not cached, so every subsequent request retries and fails
+     * the same way -- and shipped Fess runs at {@code warn}
+     * ({@code FESS_LOG_LEVEL=warn} in {@code fess.in.sh}, reaching the {@code org.codelibs}
+     * logger through {@code log4j2.xml}'s {@code log.level} property), so a {@code debug} line
+     * is invisible on a real installation: the operator would see a total authentication
+     * outage with nothing whatsoever in the log to attribute it to. It is deliberately not
+     * {@code error} either, because {@code org.codelibs} is wired to Fess's
+     * {@code LogNotificationAppender}, and one notification per failed request during an IdP
+     * outage is its own incident. {@link #jwksUnavailableWarned} keeps it to one WARN per
+     * outage; the throwable is attached, since the cause chain is the only thing that
+     * distinguishes a TLS failure from a 404.
+     * </p>
+     *
+     * @param response the servlet response; deliberately left without a {@code WWW-Authenticate}
+     *            challenge, since {@code 503} is not an authentication challenge
+     * @param cause the key-retrieval failure
+     * @return the error to throw; never returns normally
+     */
+    private McpError jwksUnavailable(final HttpServletResponse response, final Exception cause) {
+        if (jwksUnavailableWarned.compareAndSet(false, true)) {
+            logger.warn(
+                    "[MCP] oauth authentication cannot reach the JWKS endpoint at {} - every token-bearing request "
+                            + "is being refused with 503 until it recovers. This is a server-side outage, not a bad token.",
+                    getJwksUri(), cause);
+        } else if (logger.isDebugEnabled()) {
+            logger.debug("[MCP] oauth authentication still cannot reach the JWKS endpoint at {}: {}", getJwksUri(), cause.getMessage());
+        }
+        return new McpError(HttpServletResponse.SC_SERVICE_UNAVAILABLE, ErrorCode.InternalError,
+                "The authorization server's key set is currently unavailable.");
+    }
+
+    /**
+     * Re-arms {@link #jwksUnavailable}'s WARN after a successful key retrieval, and reports the
+     * recovery, so a second outage is reported rather than swallowed as "already warned".
+     */
+    private void noteJwksReachable() {
+        if (jwksUnavailableWarned.compareAndSet(true, false)) {
+            logger.warn("[MCP] oauth authentication reached the JWKS endpoint at {} again; token verification has recovered.",
+                    getJwksUri());
+        }
     }
 
     /**
