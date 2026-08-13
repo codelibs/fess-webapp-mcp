@@ -59,8 +59,32 @@ public class ResourcesReadHandler extends AbstractCacheableHandler {
     /** The one static resource URI this server publishes. */
     protected static final String STATS_URI = "fess://index/stats";
 
-    /** The exact shape a {@code fess://document/{doc_id}} URI must match; capture group 1 is {@code doc_id}. */
-    private static final Pattern DOCUMENT_URI = Pattern.compile("^fess://document/([A-Za-z0-9_-]{1,256})$");
+    /**
+     * The exact shape a {@code fess://document/{doc_id}} URI must match; capture group 1 is
+     * {@code doc_id}.
+     * <p>
+     * Deliberately not restricted to a character class. A stock Fess {@code doc_id} is
+     * {@code SystemHelper#generateDocId}'s 32 hex characters, but that method only runs when the
+     * crawler finds no {@code doc_id} already on the document
+     * ({@code IndexUpdateCallbackImpl}/{@code IndexUpdater} both guard it with
+     * {@code containsKey}), so a data store or a script can supply its own containing a dot, a
+     * colon or non-ASCII. An {@code [A-Za-z0-9_-]} class rejected exactly those, which both
+     * broke a URI the pre-2026-07-28 handler resolved and left this handler disagreeing with
+     * {@code get_document}, which accepts any non-empty id for the same document. The id is a
+     * term lookup key for {@code SearchHelper#getDocumentByDocId}, never interpolated into a
+     * query string, so widening it is not a query-injection surface. The length bound remains as
+     * a cheap sanity limit: it sits above OpenSearch's own 512-byte {@code _id} ceiling, so it
+     * cannot reject an id that a document could actually have been indexed under.
+     * </p>
+     * <p>
+     * It stays a <em>single path segment</em>, though, which is what
+     * {@code fess://document/{doc_id}} in {@code resources/templates/list} advertises: {@code /}
+     * is excluded, so a traversal-shaped URI still fails to match the template rather than being
+     * looked up as an id. Control characters are excluded for the same reason -- no document can
+     * be indexed under one, so accepting them would only widen the input surface.
+     * </p>
+     */
+    private static final Pattern DOCUMENT_URI = Pattern.compile("^fess://document/([^/\\p{Cntrl}]{1,512})$");
 
     /** The tool whose {@link McpTool#getRequiredPermissions()} gates {@value #STATS_URI}. */
     private final McpTool indexStatsTool;

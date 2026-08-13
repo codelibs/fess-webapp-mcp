@@ -110,8 +110,8 @@ public class ResourcesReadHandlerTest {
 
     @Test
     public void testDocumentUriEmptyDocIdDoesNotMatchTheTemplate() {
-        // fess://document/ has no [A-Za-z0-9_-]{1,256} after the slash, so the strict template
-        // regex never matches -- this must not fall through to buildDocumentResource("").
+        // fess://document/ has nothing after the slash, and the template requires at least one
+        // character -- this must not fall through to buildDocumentResource("").
         final McpError error = assertThrows(McpError.class, () -> handler.handle(contextWithUri("fess://document/")));
         assertEquals(ErrorCode.InvalidParams, error.getErrorCode());
     }
@@ -120,6 +120,24 @@ public class ResourcesReadHandlerTest {
     public void testDocumentUriWithPathTraversalDoesNotMatchTheTemplate() {
         final McpError error = assertThrows(McpError.class, () -> handler.handle(contextWithUri("fess://document/../../etc/passwd")));
         assertEquals(ErrorCode.InvalidParams, error.getErrorCode());
+    }
+
+    @Test
+    public void testDocumentUriAcceptsADocIdThatIsNotPlainAlphanumeric() {
+        // SystemHelper#generateDocId's 32 hex characters are only the DEFAULT: the crawler calls it
+        // only when the document does not already carry a doc_id (IndexUpdateCallbackImpl and
+        // IndexUpdater both guard it with containsKey), so a data store or a script can index under
+        // an id containing a dot, a colon or non-ASCII. A stricter [A-Za-z0-9_-] class rejected
+        // those with "Resource not found" even though get_document resolves the very same document,
+        // and even though the pre-2026-07-28 handler resolved the URI too.
+        //
+        // Reaching the DI container is the pass condition here: it means the URI matched the
+        // template and routing got as far as the backend fetch, which is exactly what the old
+        // character class prevented. A non-matching URI throws McpError long before that.
+        for (final String docId : List.of("doc.id.with.dots", "urn:uuid:12345", "日本語ID", "id~with-tilde")) {
+            assertThrows(IllegalStateException.class, () -> handler.handle(contextWithUri("fess://document/" + docId)),
+                    "a doc_id a data store can legitimately index under must reach the lookup: " + docId);
+        }
     }
 
     @Test
