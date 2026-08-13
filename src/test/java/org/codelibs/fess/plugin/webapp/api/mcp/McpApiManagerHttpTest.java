@@ -33,6 +33,7 @@ import org.codelibs.core.lang.StringUtil;
 import org.codelibs.core.misc.Pair;
 import org.codelibs.fess.plugin.webapp.mcp.McpConstants;
 import org.codelibs.fess.plugin.webapp.mcp.RateLimiter;
+import org.codelibs.fess.plugin.webapp.mcp.auth.McpPrincipal;
 import org.codelibs.fess.plugin.webapp.mcp.auth.OAuthResourceServerAuthenticator;
 import org.codelibs.fess.plugin.webapp.mcp.handler.McpMethodHandler;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
@@ -1175,6 +1176,25 @@ public class McpApiManagerHttpTest {
         };
         assertEquals("203.0.113.9", manager.resolveRateLimitKey(McpHttpTestSupport.newRequest("POST", "/mcp"), new McpCallContext()),
                 "the rate-limit key must come from resolveClientIp, not getRemoteAddr");
+    }
+
+    @Test
+    public void testRateLimitKeyFallsBackToTheClientIpForABlankSubject() {
+        // OAuth's claims verifier requires only exp, so an issued token can carry "sub": "".
+        // McpPrincipal stores the subject verbatim, so a null-only check keyed the limiter on the
+        // empty string -- putting every blank-sub caller, from every peer, into ONE shared bucket
+        // where they 429 each other. The README documents the blank case as falling back to the
+        // client IP, which is both what the absent case already did and the only sane reading.
+        final TestManager manager = new TestManager() {
+            @Override
+            protected String resolveClientIp(final HttpServletRequest request) {
+                return "203.0.113.9";
+            }
+        };
+        final McpCallContext context = new McpCallContext(null, null, Map.of(), new McpPrincipal("", Set.of(), Set.of()));
+
+        assertEquals("203.0.113.9", manager.resolveRateLimitKey(McpHttpTestSupport.newRequest("POST", "/mcp"), context),
+                "a blank sub is no subject at all, so it must key on the peer rather than share one global bucket");
     }
 
     @Test

@@ -704,9 +704,13 @@ public class McpApiManager extends BaseApiManager {
      */
     protected String resolveRateLimitKey(final HttpServletRequest request, final McpCallContext context) {
         final String subject = resolvePrincipalSubject(context);
-        if (subject != null) {
+        if (StringUtil.isNotBlank(subject)) {
             return subject;
         }
+        // Blank, not just null. The claims verifier requires only exp, so a token can carry
+        // "sub": "" -- and keying on that string would put every such caller, from every peer,
+        // into one shared bucket, where they would 429 each other. Absent and blank are the same
+        // thing here: no subject to key on, so fall back to the peer.
         final String clientIp = resolveClientIp(request);
         return clientIp != null ? clientIp : "unknown";
     }
