@@ -39,6 +39,7 @@ import org.codelibs.fess.mylasta.direction.FessConfig;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpError;
+import org.codelibs.fess.plugin.webapp.mcp.McpSystemProperties;
 import org.codelibs.fess.util.ComponentUtil;
 import org.dbflute.optional.OptionalThing;
 
@@ -382,8 +383,8 @@ public class SearchTool implements McpTool {
 
             @Override
             public HighlightInfo getHighlightInfo() {
-                final int fragmentSize = getFessConfig().getSystemPropertyAsInt("mcp.highlight.fragment.size", 500);
-                final int numOfFragments = getFessConfig().getSystemPropertyAsInt("mcp.highlight.num.of.fragments", 3);
+                final int fragmentSize = McpSystemProperties.getAsInt(getFessConfig(), "mcp.highlight.fragment.size", 500);
+                final int numOfFragments = McpSystemProperties.getAsInt(getFessConfig(), "mcp.highlight.num.of.fragments", 3);
                 return new HighlightInfo().fragmentSize(fragmentSize).numOfFragments(numOfFragments);
             }
 
@@ -538,7 +539,7 @@ public class SearchTool implements McpTool {
      * @return the configured page size
      */
     protected int getDefaultPageSize() {
-        return getFessConfig().getSystemPropertyAsInt("mcp.default.page.size", 3);
+        return McpSystemProperties.getAsInt(getFessConfig(), "mcp.default.page.size", 3);
     }
 
     /**

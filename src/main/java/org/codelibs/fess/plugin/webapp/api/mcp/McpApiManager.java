@@ -59,6 +59,7 @@ import org.codelibs.fess.plugin.webapp.mcp.protocol.McpError;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpRequest;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpRequestMeta;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpResponseWriter;
+import org.codelibs.fess.plugin.webapp.mcp.McpSystemProperties;
 import org.codelibs.fess.util.ComponentUtil;
 
 import jakarta.annotation.PostConstruct;
@@ -1035,7 +1036,7 @@ public class McpApiManager extends BaseApiManager {
      * @return the property's value, or {@code defaultValue} when unset
      */
     protected int getSystemPropertyAsInt(final String key, final int defaultValue) {
-        return ComponentUtil.getFessConfig().getSystemPropertyAsInt(key, defaultValue);
+        return McpSystemProperties.getAsInt(ComponentUtil.getFessConfig(), key, defaultValue);
     }
 
     /**

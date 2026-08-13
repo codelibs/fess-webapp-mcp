@@ -15,6 +15,7 @@
  */
 package org.codelibs.fess.plugin.webapp.mcp.tool;
 
+import org.codelibs.fess.plugin.webapp.mcp.McpSystemProperties;
 import org.codelibs.fess.util.ComponentUtil;
 
 /**
@@ -67,6 +68,6 @@ public class DocumentFormatter {
      * @return the maximum content length
      */
     protected int getContentMaxLength() {
-        return ComponentUtil.getFessConfig().getSystemPropertyAsInt(CONTENT_MAX_LENGTH_PROPERTY, DEFAULT_CONTENT_MAX_LENGTH);
+        return McpSystemProperties.getAsInt(ComponentUtil.getFessConfig(), CONTENT_MAX_LENGTH_PROPERTY, DEFAULT_CONTENT_MAX_LENGTH);
     }
 }

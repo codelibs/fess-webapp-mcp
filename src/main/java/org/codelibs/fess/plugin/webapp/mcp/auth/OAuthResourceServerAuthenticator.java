@@ -32,6 +32,7 @@ import org.apache.logging.log4j.Logger;
 import org.codelibs.core.lang.StringUtil;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpError;
+import org.codelibs.fess.plugin.webapp.mcp.McpSystemProperties;
 import org.codelibs.fess.util.ComponentUtil;
 
 import com.nimbusds.jose.JWSAlgorithm;
@@ -1061,6 +1062,6 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
      * @return the property's value, or {@code defaultValue} when unset
      */
     protected int getSystemPropertyAsInt(final String key, final int defaultValue) {
-        return ComponentUtil.getFessConfig().getSystemPropertyAsInt(key, defaultValue);
+        return McpSystemProperties.getAsInt(ComponentUtil.getFessConfig(), key, defaultValue);
     }
 }

@@ -151,14 +151,14 @@ curl -sS -X POST http://localhost:8080/mcp \
     "_meta": {
       "io.modelcontextprotocol/serverInfo": {
         "name": "fess-mcp-server",
-        "version": "unknown"
+        "version": "15.8.0"
       }
     }
   }
 }
 ```
 
-`resultType` and `_meta["io.modelcontextprotocol/serverInfo"]` are stamped onto *every* successful result by the response writer, not just this one — they are omitted from the remaining examples below for brevity, but are always present. `serverInfo.version` currently reports `"unknown"`: the shipped plugin JAR's manifest does not carry an `Implementation-Version` entry for `Package#getImplementationVersion()` to read.
+`resultType` and `_meta["io.modelcontextprotocol/serverInfo"]` are stamped onto *every* successful result by the response writer, not just this one — they are omitted from the remaining examples below for brevity, but are always present. `serverInfo.version` is read from the plugin JAR's `Implementation-Version` manifest entry via `Package#getImplementationVersion()`, so it reports the plugin version (e.g. `15.8.0`). It falls back to `"unknown"` only when the class was loaded from somewhere without that manifest entry, such as an exploded build directory.
 
 `ttlMs` for this method is controlled by `mcp.cache.discover.ttl.ms` (default `3600000`, i.e. one hour).
 
