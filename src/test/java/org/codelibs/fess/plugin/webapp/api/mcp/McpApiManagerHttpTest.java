@@ -1124,6 +1124,24 @@ public class McpApiManagerHttpTest {
     }
 
     @Test
+    public void testServerDiscoverIsNotExemptFromAuthentication() throws Exception {
+        // The README and CLAUDE.md both used to call server/discover "unauthenticated", meaning
+        // only that its RESULT is identity-independent (hence cacheScope: "public"). Read as a
+        // routing statement it is false, and dangerous in both directions: an operator could
+        // believe the server leaks its capability list under oauth, and an implementer could
+        // "restore" the documented behaviour by routing discover before authenticate(). This
+        // pins that authenticate() really does run first, for discover like everything else.
+        final TestManager manager = new TestManager();
+        manager.authMode = McpApiManager.AUTH_MODE_FESS_TOKEN;
+
+        post(manager, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server/discover\",\"params\":{}}",
+                Map.of(McpConstants.HEADER_PROTOCOL_VERSION, McpConstants.PROTOCOL_VERSION, McpConstants.HEADER_METHOD, "server/discover"));
+
+        assertEquals(401, lastResponse.getStatus(),
+                "server/discover is dispatched after authenticate(), so an unauthenticated call must be challenged like any other");
+    }
+
+    @Test
     public void testOauthFallingBackToNoneIsADistinctStateFromNone() throws Exception {
         // mcp.auth.mode=oauth with an incomplete configuration behaves exactly like none, so
         // collapsing it onto NONE would look like "no change" and report nothing -- yet it is

@@ -426,16 +426,37 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
     }
 
     /**
-     * Extracts the token's OAuth scopes from its {@code scope} claim (RFC 9068 &#xa7;2.2.1: a
-     * single, space-delimited string).
+     * Extracts the token's OAuth scopes, from {@code scope} (RFC 9068 &#xa7;2.2.3) or, failing
+     * that, {@code scp}.
+     * <p>
+     * Both names are needed, because the two conventions split the major authorization servers
+     * down the middle. Keycloak and Auth0 follow RFC 9068 and emit {@code scope}. <b>Microsoft
+     * Entra ID and Okta emit {@code scp}</b>, and Entra ID emits {@code scope} under no
+     * documented circumstance -- it appears in neither its access-token-claims reference nor its
+     * optional-claims reference, so an operator cannot even turn it on. Reading only
+     * {@code scope} therefore resolved an empty scope set for every token those two issue, which
+     * fails in whichever way is harder to diagnose: with
+     * {@link #getRequiredScopes() mcp.oauth.required.scopes} set, {@link #requireScopes} refuses
+     * every caller with {@code insufficient_scope}; with it unset, the empty set silently maps to
+     * no permissions and {@code McpApiManager#resolveRoles} drops the caller to the guest roles,
+     * so an admin-scoped token quietly returns guest-visible results. Spring Security's
+     * {@code JwtGrantedAuthoritiesConverter} probes exactly this pair for the same reason.
+     * </p>
+     * <p>
+     * Read through {@link #readClaimAsStrings}, which accepts a space-delimited string and a JSON
+     * array alike -- Entra ID's {@code scp} is a string, Okta's is an array, so handling only the
+     * RFC's string shape would still leave Okta broken. {@code scope} is consulted first so a
+     * token carrying both keeps its standards-defined claim.
+     * </p>
      *
      * @param claims the verified claims set
-     * @return the scopes; empty when the {@code scope} claim is absent or blank
-     * @throws ParseException if the {@code scope} claim is present but not a string
+     * @return the scopes; empty when neither claim is present or usable
+     * @throws ParseException declared for subclasses that parse the claim more strictly; this
+     *             implementation does not throw it
      */
     protected Set<String> extractScopes(final JWTClaimsSet claims) throws ParseException {
-        final String scope = claims.getStringClaim("scope");
-        return StringUtil.isBlank(scope) ? Set.of() : splitOnWhitespace(scope);
+        final Set<String> scopes = readClaimAsStrings(claims, "scope");
+        return scopes.isEmpty() ? readClaimAsStrings(claims, "scp") : scopes;
     }
 
     /**

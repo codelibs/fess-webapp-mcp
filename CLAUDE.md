@@ -51,7 +51,7 @@ mvn formatter:format && mvn license:format
 
 The dispatcher (`McpDispatcher`, constructed from nine handlers in `McpApiManager`) routes these JSON-RPC methods; every other method name, including the retired `initialize` and `ping`, is `-32601 Method not found`:
 
-- `server/discover` — replaces `initialize`; no version negotiation (this server speaks exactly one revision); unauthenticated, always `cacheScope: "public"`.
+- `server/discover` — replaces `initialize`; no version negotiation (this server speaks exactly one revision); always `cacheScope: "public"` because the result is identity-independent. It is *not* exempt from authentication: it is dispatched after `authenticate()` like every other method, so under `fess_token`/`oauth` an unauthenticated call gets a 401 challenge.
 - `tools/list` — lists `search`, `get_index_stats` (permission-gated, see below), `suggest`, `get_document`, each with `inputSchema`, `outputSchema`, and annotations.
 - `tools/call` — executes a tool by name; requires `Mcp-Name` to match `params.name`.
 - `resources/list` — lists `fess://index/stats` when the caller is authorized for it.

@@ -15,6 +15,7 @@
  */
 package org.codelibs.fess.plugin.webapp.mcp.auth;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -1003,6 +1004,55 @@ public class OAuthAuthenticatorTest {
         final ConfigurableJWTProcessor<SecurityContext> processor = jwksConfig("https://idp.example.com/jwks").getProcessor();
         assertNotNull(jwksSourceOfType(processor, RetryingJWKSetSource.class),
                 "a transient JWKS fetch failure must be retried rather than immediately costing 30s of 401s");
+    }
+
+    // ------------------------------------------------------------------
+    // Scope claim: RFC 9068's "scope" and Entra ID / Okta's "scp".
+    // ------------------------------------------------------------------
+
+    @Test
+    public void testScopesAreReadFromTheRfc9068ScopeClaim() throws Exception {
+        final McpPrincipal principal = authenticate(sign(validClaims().claim("scope", "fess:search fess:admin"), signingKey));
+        assertEquals(Set.of("fess:search", "fess:admin"), principal.getScopes(),
+                "the RFC 9068 space-delimited scope claim must keep working exactly as before");
+    }
+
+    @Test
+    public void testScopesFallBackToTheScpClaimAsAStringForEntraId() throws Exception {
+        // Microsoft Entra ID emits scp, never scope -- it is in neither the access-token-claims
+        // reference nor the optional-claims reference, so an operator cannot even enable it.
+        // Reading only "scope" resolved an empty set for every Entra-issued token, which either
+        // refuses every caller with insufficient_scope (required.scopes set) or silently drops
+        // them to the guest roles (required.scopes unset).
+        final McpPrincipal principal = authenticate(sign(validClaims().claim("scp", "fess:search fess:admin"), signingKey));
+        assertEquals(Set.of("fess:search", "fess:admin"), principal.getScopes(),
+                "an Entra ID access token carries its scopes in scp as a space-delimited string");
+    }
+
+    @Test
+    public void testScopesFallBackToTheScpClaimAsAnArrayForOkta() throws Exception {
+        // Okta also uses scp, but as a JSON array -- so handling only the RFC's string shape
+        // would fix Entra ID and leave Okta broken in exactly the same way.
+        final McpPrincipal principal = authenticate(sign(validClaims().claim("scp", List.of("fess:search", "fess:admin")), signingKey));
+        assertEquals(Set.of("fess:search", "fess:admin"), principal.getScopes(),
+                "an Okta access token carries its scopes in scp as a JSON array");
+    }
+
+    @Test
+    public void testScopeClaimWinsOverScpWhenBothArePresent() throws Exception {
+        final McpPrincipal principal = authenticate(sign(validClaims().claim("scope", "from-scope").claim("scp", "from-scp"), signingKey));
+        assertEquals(Set.of("from-scope"), principal.getScopes(), "a token carrying both must keep its standards-defined claim");
+    }
+
+    @Test
+    public void testRequiredScopesAreSatisfiedByAnScpOnlyToken() {
+        // The observable half: the fallback is not just parsed, it actually satisfies the gate
+        // that would otherwise refuse every Entra ID and Okta caller with insufficient_scope.
+        final TestAuthenticator auth = newAuthenticator("fess:search");
+        assertDoesNotThrow(() -> {
+            final MockletHttpServletRequestImpl request = bearerRequest(sign(validClaims().claim("scp", "fess:search"), signingKey));
+            auth.authenticate(request, McpHttpTestSupport.newResponse(request));
+        }, "mcp.oauth.required.scopes must be satisfiable by a token that carries scp rather than scope");
     }
 
     // ------------------------------------------------------------------
