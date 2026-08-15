@@ -29,6 +29,7 @@ import java.util.UUID;
 
 import jakarta.servlet.http.HttpServletResponse;
 
+import org.codelibs.fess.exception.InvalidQueryException;
 import org.codelibs.fess.plugin.webapp.exception.McpApiException;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
@@ -471,4 +472,120 @@ public class ToolsCallHandlerTest {
         assertFalse(result.containsKey("ttlMs"));
         assertFalse(result.containsKey("cacheScope"));
     }
+
+    /**
+     * A tool that fails the way Fess fails a caller's query.
+     */
+    private static class RejectingTool extends StubTool {
+
+        private final RuntimeException failure;
+
+        RejectingTool(final RuntimeException failure) {
+            this.failure = failure;
+        }
+
+        @Override
+        public String getName() {
+            return "search";
+        }
+
+        @Override
+        public Map<String, Object> call(final Map<String, Object> arguments, final McpCallContext context) {
+            throw failure;
+        }
+    }
+
+    /**
+     * Resolves message codes without a container, standing in for Fess's MessageManager.
+     */
+    private ToolsCallHandler handlerRejectingWith(final InvalidQueryException failure, final String resolved) {
+        return new ToolsCallHandler(List.of(new RejectingTool(failure))) {
+            @Override
+            protected String resolveCallerMessage(
+                    final org.lastaflute.web.validation.VaMessenger<org.codelibs.fess.mylasta.action.FessMessages> messageCode) {
+                return resolved;
+            }
+        };
+    }
+
+    private McpError reject(final InvalidQueryException failure, final String resolved) {
+        final ToolsCallHandler handler = handlerRejectingWith(failure, resolved);
+        return assertThrows(McpError.class,
+                () -> handler.handle(contextWithParams(Map.of("name", "search", "arguments", Map.of("q", "x")))));
+    }
+
+    @Test
+    public void testRejectedQueryIsAnInvalidParamsRatherThanACorrelationId() {
+        // A caller who sent an unusable argument value has to be told which one, or an agent
+        // retries the same call forever. This is the same shape the tools already use for a
+        // wrong-typed argument, so the two cannot disagree.
+        final McpError error = reject(new InvalidQueryException(messages -> {}, "Unsupported sort field: sort:nope.asc"),
+                "The specified sort nope.asc is unsupported.");
+        assertEquals(ErrorCode.InvalidParams, error.getErrorCode());
+        assertEquals(HttpServletResponse.SC_OK, error.getHttpStatus());
+        assertEquals("The specified sort nope.asc is unsupported.", error.getMessage());
+        assertFalse(error.getMessage().contains("error_code:"), "a caller-directed failure needs no correlation id");
+    }
+
+    @Test
+    public void testRejectedQueryNeverEchoesTheExceptionMessage() {
+        // The SearchEngineClient variant carries the executed OpenSearch DSL, role filters
+        // included. Only the resolved message code may reach the caller.
+        final String dsl = "Failed query: {\"query\":{\"bool\":{\"filter\":[{\"term\":{\"role\":\"Rguest\"}}]}}}";
+        final McpError error = reject(new InvalidQueryException(messages -> {}, dsl), "Could not process the specified query.");
+        assertEquals("Could not process the specified query.", error.getMessage());
+        assertFalse(error.getMessage().contains("Rguest"), "the caller's role filter must not leak");
+        assertFalse(error.getMessage().contains("{"), "the executed DSL must not leak");
+        assertFalse(error.getMessage().contains("bool"), "the executed DSL must not leak");
+    }
+
+    @Test
+    public void testAnUnresolvableMessageCodeStillYieldsCallerFacingText() {
+        // Whatever goes wrong resolving the bundle, the caller must not get an empty message
+        // and must not get a 500.
+        final ToolsCallHandler handler = new ToolsCallHandler(List.of());
+        assertEquals(ToolsCallHandler.FALLBACK_INVALID_QUERY, handler.resolveCallerMessage(null));
+    }
+
+    @Test
+    public void testTheResolvedTextIsLocaleIndependent() {
+        // Resolved against Locale.ROOT rather than the servlet request, so a Japanese-default
+        // host does not answer one message in Japanese while the rest of this plugin's errors
+        // stay English.
+        final ToolsCallHandler handler = new ToolsCallHandler(List.of());
+        final java.util.Locale previous = java.util.Locale.getDefault();
+        try {
+            java.util.Locale.setDefault(java.util.Locale.JAPAN);
+            assertEquals(ToolsCallHandler.FALLBACK_INVALID_QUERY, handler.resolveCallerMessage(null));
+        } finally {
+            java.util.Locale.setDefault(previous);
+        }
+    }
+
+    @Test
+    public void testAResolverFailureFallsBackInsteadOfPropagating() {
+        final ToolsCallHandler handler = new ToolsCallHandler(List.of()) {
+            @Override
+            protected String resolveCallerMessage(
+                    final org.lastaflute.web.validation.VaMessenger<org.codelibs.fess.mylasta.action.FessMessages> messageCode) {
+                // Exercise the real body, which has no container to resolve against here.
+                return super.resolveCallerMessage(messageCode);
+            }
+        };
+        assertEquals(ToolsCallHandler.FALLBACK_INVALID_QUERY, assertDoesNotThrow(() -> handler.resolveCallerMessage(messages -> {})));
+    }
+
+    @Test
+    public void testAnUnexpectedFailureIsStillRedacted() {
+        // The narrower arm must not have widened the caller-directed set: anything that is not
+        // an InvalidQueryException keeps its correlation id.
+        final ToolsCallHandler handler =
+                new ToolsCallHandler(List.of(new RejectingTool(new IllegalStateException("org.opensearch.internal detail /var/lib/fess"))));
+        final Map<String, Object> result = handler.handle(contextWithParams(Map.of("name", "search", "arguments", Map.of("q", "x"))));
+        assertEquals(Boolean.TRUE, result.get("isError"));
+        final String text = (String) ((Map<?, ?>) ((List<?>) result.get("content")).get(0)).get("text");
+        assertCarriesCorrelationId(text);
+        assertFalse(text.contains("/var/lib/fess"), "an unexpected failure must stay redacted");
+    }
+
 }
