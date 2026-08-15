@@ -120,13 +120,13 @@ public class SearchTool implements McpTool {
 
         final Map<String, Object> schema = new LinkedHashMap<>();
         schema.put("type", "object");
-        schema.put("properties",
-                Map.of("hits", Map.of("type", "array", "items", hit), "total",
-                        Map.of("type", "integer", "description", "total number of matching documents"), "total_relation",
-                        Map.of("type", "string", "description",
-                                "EQUAL_TO when total is exact, GREATER_THAN_OR_EQUAL_TO when the search engine stopped counting"),
-                        "has_more", Map.of("type", "boolean", "description", "whether a page exists after this one")));
-        schema.put("required", List.of("hits", "total", "has_more"));
+        schema.put("properties", Map.of("hits", Map.of("type", "array", "items", hit), "total",
+                Map.of("type", "integer", "description", "total number of matching documents"), "total_relation",
+                Map.of("type", "string", "description",
+                        "EQUAL_TO when total is exact, GREATER_THAN_OR_EQUAL_TO when the search engine stopped counting"),
+                "has_more", Map.of("type", "boolean", "description", "whether a page exists after this one"), "collapsed", Map.of("type",
+                        "boolean", "description", "whether near-duplicate results were folded, so fewer than total items are obtainable")));
+        schema.put("required", List.of("hits", "total", "has_more", "collapsed"));
         schema.put("additionalProperties", false);
         return schema;
     }
@@ -166,6 +166,11 @@ public class SearchTool implements McpTool {
         // defaulting to EQUAL_TO would claim an exactness this tool cannot verify.
         putIfNotNull(structured, "total_relation", data.getAllRecordCountRelation());
         structured.put("has_more", data.isExistNextPage());
+        // total counts matching documents; result collapsing folds near duplicates afterwards, so
+        // with this true fewer than total items are obtainable however far the caller pages. Fess
+        // ships result.collapsed=true, and without this flag total reads as a promise the caller
+        // cannot fulfil.
+        structured.put("collapsed", Boolean.valueOf(isResultCollapsed()));
 
         final Map<String, Object> result = new LinkedHashMap<>();
         result.put("content", contents);
@@ -558,6 +563,15 @@ public class SearchTool implements McpTool {
                         fessConfig.getIndexFieldUrl(), fessConfig.getResponseFieldContentDescription() };
             }
         };
+    }
+
+    /**
+     * Reports whether Fess folds near-duplicate results before returning them.
+     *
+     * @return {@code true} when result collapsing is active for this deployment
+     */
+    protected boolean isResultCollapsed() {
+        return getFessConfig().isResultCollapsed();
     }
 
     /**
