@@ -69,7 +69,7 @@ public class ErrorCodeTest {
 
     @Test
     public void testErrorCodeCount() {
-        assertEquals(8, ErrorCode.values().length, "5 JSON-RPC + 3 MCP-specific codes");
+        assertEquals(9, ErrorCode.values().length, "5 JSON-RPC + 3 MCP-specific + 1 implementation-defined code");
     }
 
     @Test
@@ -138,5 +138,23 @@ public class ErrorCodeTest {
             assertEquals(entry.getValue().intValue(), entry.getKey().getCode(),
                     "Error code " + entry.getKey().name() + " should have correct value");
         }
+    }
+
+    @Test
+    public void testRateLimitedUsesTheImplementationDefinedRangeNotInternalError() {
+        // A refusal by policy is not an internal JSON-RPC error. The MCP schema partitions the
+        // JSON-RPC server-error range: -32000..-32019 is implementation-defined and the
+        // specification will never define codes there, while -32020..-32099 is reserved for the
+        // specification itself. A rate limit belongs in the former; -32603 said "something broke
+        // inside the server", which is the wrong thing to tell a caller who simply went too fast.
+        assertEquals(-32000, ErrorCode.RateLimited.getCode(), "rate limiting must use the implementation-defined range");
+    }
+
+    @Test
+    public void testRateLimitedStaysOutOfTheSpecificationReservedRange() {
+        // Guards against someone "tidying" this into the -32020.. block, where it would collide
+        // with a future specification-defined code.
+        final int code = ErrorCode.RateLimited.getCode();
+        assertTrue(code <= -32000 && code >= -32019, "must sit in -32000..-32019, was " + code);
     }
 }

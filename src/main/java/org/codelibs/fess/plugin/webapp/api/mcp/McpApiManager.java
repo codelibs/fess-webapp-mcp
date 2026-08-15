@@ -676,7 +676,7 @@ public class McpApiManager extends BaseApiManager {
         if (!limiter.tryAcquire(key)) {
             final Map<String, Object> data = new LinkedHashMap<>();
             data.put("retryAfterSeconds", limiter.getRetryAfterSeconds());
-            throw new McpError(HTTP_TOO_MANY_REQUESTS, ErrorCode.InternalError, "rate limit exceeded (mcp.rate.limit.per.minute)", data);
+            throw new McpError(HTTP_TOO_MANY_REQUESTS, ErrorCode.RateLimited, "rate limit exceeded (mcp.rate.limit.per.minute)", data);
         }
     }
 

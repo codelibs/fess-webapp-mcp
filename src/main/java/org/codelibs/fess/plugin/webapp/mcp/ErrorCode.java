@@ -37,6 +37,19 @@ public enum ErrorCode {
     InvalidParams(-32602),
     /** Internal error: Internal JSON-RPC error. */
     InternalError(-32603),
+    /**
+     * The caller exceeded {@code mcp.rate.limit.per.minute}. Paired with HTTP 429 and a
+     * {@code Retry-After} header.
+     * <p>
+     * Sits in the JSON-RPC server-error range the MCP schema marks implementation-defined
+     * ({@code -32000} to {@code -32019}); the specification will never define a code there, and
+     * receivers are told not to assign cross-implementation semantics to it. A client should
+     * therefore key off the HTTP status and {@code Retry-After}, not this number. It exists so
+     * that a refusal by policy is not reported as {@link #InternalError}, which tells the caller
+     * something broke inside the server when nothing did.
+     * </p>
+     */
+    RateLimited(-32000),
     /** An HTTP metadata header disagrees with the request body, or a required header is missing. */
     HeaderMismatch(-32020),
     /** The request needs a client capability the client did not declare. Never emitted by this server. */
