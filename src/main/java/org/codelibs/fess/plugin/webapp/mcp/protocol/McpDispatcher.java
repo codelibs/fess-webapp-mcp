@@ -124,7 +124,10 @@ public class McpDispatcher {
      * sees, and naming the version this server does speak is the one thing that error can
      * usefully say. {@link #METHOD_PING} deliberately does <em>not</em> get that payload --
      * README documents it as gone outright, with no replacement and no version to fall forward
-     * to, so there is nothing for a {@code supportedVersions} list to tell that caller.
+     * to, so there is nothing for a {@code supportedVersions} list to tell that caller. It does
+     * get its own message: the reason both methods are answered ahead of header validation is so
+     * the caller learns the method is gone rather than being sent off to add a header, and the
+     * generic {@code "Unknown method"} text delivered neither.
      * </p>
      *
      * @param method the JSON-RPC method name
@@ -135,6 +138,10 @@ public class McpDispatcher {
             return new McpError(HttpServletResponse.SC_NOT_FOUND, ErrorCode.MethodNotFound,
                     "initialize was removed in MCP 2026-07-28; this server speaks " + McpConstants.PROTOCOL_VERSION,
                     Map.of("supportedVersions", List.copyOf(McpConstants.SUPPORTED_PROTOCOL_VERSIONS)));
+        }
+        if (METHOD_PING.equals(method)) {
+            return new McpError(HttpServletResponse.SC_NOT_FOUND, ErrorCode.MethodNotFound,
+                    "ping was removed in MCP 2026-07-28; there is no liveness-check method");
         }
         return new McpError(HttpServletResponse.SC_NOT_FOUND, ErrorCode.MethodNotFound, "Unknown method: " + method);
     }
