@@ -28,6 +28,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.codelibs.fess.entity.SearchRenderData;
 import org.codelibs.fess.entity.SearchRequestParams;
 import org.codelibs.fess.mylasta.direction.FessConfig;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
@@ -414,7 +415,7 @@ public class SearchToolTest {
         // stays container-free; reaching it at all means validation let the call through.
         final SearchTool tool = new SearchTool() {
             @Override
-            protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments) {
+            protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments, final SearchRenderData data) {
                 return List.of();
             }
         };
@@ -833,5 +834,88 @@ public class SearchToolTest {
         assertNotNull(structured, "structuredContent must report a digest when the text block has one");
         assertFalse(((String) structured).isEmpty(), "an empty digest would make the containment assertion below vacuous");
         assertTrue(text.contains((String) structured), "the text block must contain the digest structuredContent reports");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testSearchReportsTheTotalHitCountAndWhetherMorePagesExist() {
+        // structuredContent used to carry hits and nothing else, and the default page size is 3,
+        // so a client had no way to learn it was looking at 3 of 30 -- the only way to answer
+        // "how many match" was to page until an empty array came back. Fess already computes all
+        // of this; the tool simply discarded the SearchRenderData after taking the items.
+        final SearchTool tool = new SearchTool() {
+            @Override
+            protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments, final SearchRenderData data) {
+                data.setAllRecordCount(30L);
+                data.setAllRecordCountRelation("EQUAL_TO");
+                data.setExistNextPage(true);
+                return List.of(Map.of("title", "t", "url", "https://example.com/"));
+            }
+        };
+
+        final Map<String, Object> structured =
+                (Map<String, Object>) tool.call(Map.of("q", "x"), new McpCallContext()).get("structuredContent");
+
+        assertEquals(30L, structured.get("total"), "the total number of matching documents");
+        assertEquals(Boolean.TRUE, structured.get("has_more"), "whether another page exists after this one");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testSearchReportsWhenTheTotalIsOnlyALowerBound() {
+        // OpenSearch stops counting past its track_total_hits limit, and Fess passes that through
+        // as the relation. Reporting the capped number as if it were exact would be a lie, so the
+        // relation travels with it.
+        final SearchTool tool = new SearchTool() {
+            @Override
+            protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments, final SearchRenderData data) {
+                data.setAllRecordCount(10000L);
+                data.setAllRecordCountRelation("GREATER_THAN_OR_EQUAL_TO");
+                data.setExistNextPage(true);
+                return List.of(Map.of("title", "t", "url", "https://example.com/"));
+            }
+        };
+
+        final Map<String, Object> structured =
+                (Map<String, Object>) tool.call(Map.of("q", "x"), new McpCallContext()).get("structuredContent");
+
+        assertEquals("GREATER_THAN_OR_EQUAL_TO", structured.get("total_relation"), "the total must say when it is only a lower bound");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testOutputSchemaDeclaresAndRequiresTheTotal() {
+        // call() always populates these three, so they are required rather than optional: a
+        // client can rely on them without a presence check. The schema is additionalProperties
+        // false, so omitting the declaration would make every response fail conformance.
+        final Map<String, Object> schema = new SearchTool().getOutputSchema();
+        final Map<String, Object> properties = (Map<String, Object>) schema.get("properties");
+        final List<String> required = (List<String>) schema.get("required");
+
+        assertTrue(properties.containsKey("total"), "outputSchema must declare total");
+        assertTrue(properties.containsKey("total_relation"), "outputSchema must declare total_relation");
+        assertTrue(properties.containsKey("has_more"), "outputSchema must declare has_more");
+        assertTrue(required.containsAll(List.of("hits", "total", "has_more")), "these three are always produced: " + required);
+        assertFalse(required.contains("total_relation"),
+                "total_relation stays optional: Fess leaves it unset on searcher paths that do not report one, and "
+                        + "defaulting it to EQUAL_TO would claim an exactness this tool cannot verify");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testSearchOmitsTheTotalRelationWhenFessDidNotSupplyOne() {
+        final SearchTool tool = new SearchTool() {
+            @Override
+            protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments, final SearchRenderData data) {
+                data.setAllRecordCount(30L);
+                return List.of(Map.of("title", "t", "url", "https://example.com/"));
+            }
+        };
+
+        final Map<String, Object> structured =
+                (Map<String, Object>) tool.call(Map.of("q", "x"), new McpCallContext()).get("structuredContent");
+
+        assertEquals(30L, structured.get("total"), "the count is still reported");
+        assertFalse(structured.containsKey("total_relation"), "an unknown relation must be omitted, never emitted as null");
     }
 }
