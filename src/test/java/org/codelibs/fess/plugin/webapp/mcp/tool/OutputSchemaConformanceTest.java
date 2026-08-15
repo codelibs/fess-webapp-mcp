@@ -137,14 +137,17 @@ public class OutputSchemaConformanceTest {
         assertFalse(required.contains("score"), "score is absent for some Fess results (e.g. non-finite relevance scores)");
         assertFalse(required.contains("content_description"),
                 "content_description is kept optional out of caution across rank-fusion/hybrid search paths");
-        assertFalse(required.contains("doc_id"), "search's own responseFields never requests doc_id");
+        assertFalse(required.contains("doc_id"),
+                "doc_id stays optional: Fess only generates one when the crawler found none already on the document, "
+                        + "so a data-store or script configured id can leave it absent");
     }
 
     @Test
-    public void testSearchOutputSchemaHasNoDocIdProperty() {
-        // Guards against schema drift the other direction: SearchTool.buildRequestParams()'s
-        // getResponseFields() (title, content, url, content_description) never asks Fess for
-        // doc_id, so a doc_id *property* here would document a field this tool can never emit.
+    public void testSearchOutputSchemaDeclaresDocIdItActuallyRequests() {
+        // Keeps the schema and the _source include list moving together in both directions:
+        // declaring doc_id while getResponseFields() does not ask Fess for it would document a
+        // field this tool can never emit, and asking for it without declaring it would break
+        // additionalProperties:false. SearchToolTest pins the getResponseFields() half.
         @SuppressWarnings("unchecked")
         final Map<String, Object> hit =
                 (Map<String, Object>) ((Map<String, Object>) new SearchTool().getOutputSchema().get("properties")).get("hits");
@@ -152,7 +155,7 @@ public class OutputSchemaConformanceTest {
         final Map<String, Object> hitItems = (Map<String, Object>) hit.get("items");
         @SuppressWarnings("unchecked")
         final Map<String, Object> hitProperties = (Map<String, Object>) hitItems.get("properties");
-        assertFalse(hitProperties.containsKey("doc_id"), "search never requests doc_id via getResponseFields()");
+        assertTrue(hitProperties.containsKey("doc_id"), "search requests doc_id via getResponseFields(), so it must declare it");
     }
 
     @Test
