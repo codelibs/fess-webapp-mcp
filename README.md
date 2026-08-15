@@ -2,37 +2,57 @@ MCP WebApp Plugin for Fess
 [![Java CI with Maven](https://github.com/codelibs/fess-webapp-mcp/actions/workflows/maven.yml/badge.svg)](https://github.com/codelibs/fess-webapp-mcp/actions/workflows/maven.yml)
 ==========================
 
-## Overview
+Turn a [Fess](https://fess.codelibs.org/) server into a [Model Context Protocol](https://modelcontextprotocol.io/) (MCP)
+server, so that AI agents and LLM applications can search your indexed content, fetch whole documents,
+and get query suggestions through one standard interface.
 
-This plugin transforms Fess (Enterprise Search Server) into a Model Context Protocol (MCP) server, enabling JSON-RPC 2.0 based interactions with Fess's search capabilities. The MCP API provides a standardized interface for executing search operations, retrieving index statistics, and accessing system information.
+Install the plugin, restart Fess, and a `/mcp` endpoint appears alongside the search UI. Search results
+are produced by the same Fess search pipeline the web UI uses, so role-based access control still applies:
+an MCP caller sees only what its credential is allowed to see.
 
-This plugin implements **MCP protocol revision `2026-07-28`** exclusively.
+> **Before you install: check your MCP client.**
+> This plugin implements MCP protocol revision **`2026-07-28`** and nothing else. There is no legacy
+> `initialize` handshake and no version negotiation, so a client built against an older revision cannot
+> connect at all. See [Client compatibility](#client-compatibility) before deploying.
 
-## Note
+> **Status: work in progress.** Features, defaults, and documentation may change as the MCP specification
+> and the client ecosystem evolve. Contributions and feedback are welcome.
 
-**This project is a work in progress. Features, APIs, and documentation may evolve as development continues. Contributions and feedback are welcome.**
+## Table of Contents
 
-## Breaking Changes (MCP 2026-07-28)
+**Using the plugin**
 
-Older MCP clients built against `2024-11-05` (or any earlier revision) will not work against this endpoint at all — there is no legacy handshake and no version negotiation. Specifically:
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Client compatibility](#client-compatibility)
+- [Quick start](#quick-start)
+- [What the server exposes](#what-the-server-exposes)
+- [Search query syntax](#search-query-syntax)
+- [Reading a search result](#reading-a-search-result)
+- [Securing the endpoint](#securing-the-endpoint)
+- [Configuration reference](#configuration-reference)
+- [Troubleshooting](#troubleshooting)
 
-- **`initialize` is gone.** Calling it returns HTTP 404 with JSON-RPC `-32601` (`Method not found`); the error message and `data.supportedVersions` name the one version this server speaks. Use [`server/discover`](#1-serverdiscover) instead — it does not negotiate a protocol version, since there is only one.
-- **`ping` is gone.** There is no liveness-check method any more. Calling it returns HTTP 404 with `-32601` and a message saying it was removed; unlike `initialize` it carries no `data.supportedVersions`, because there is no replacement to fall forward to.
-- **JSON-RPC batching is gone.** A JSON array request body is rejected outright with HTTP 400 — batching was removed from the JSON-RPC layer in `2025-06-18`, and this server never re-added it as an extension.
-- **Every non-notification request now needs request-metadata headers and a `params._meta` object.** `MCP-Protocol-Version` and `Mcp-Method` are always required, plus `Mcp-Name` for `tools/call`, `prompts/get`, and `resources/read`. Every header must exactly match the corresponding body value. See [Required Headers and `_meta`](#required-headers-and-_meta). A request that omits a required *header*, or where a header disagrees with the body, is rejected with HTTP 400 and JSON-RPC `-32020` before the method is even dispatched; a missing or incomplete `params._meta` is also HTTP 400 but carries `-32602`, since the specification reserves `-32020` for the header layer (`HEADER_MISMATCH` is defined as "the HTTP headers ... or required headers are missing or malformed"). The two retired methods above are the deliberate exception: they are answered with `-32601` *before* header validation runs, because a client old enough to call them cannot send `Mcp-Method` (the header did not exist before this revision) and would otherwise be told to add a header instead of that the method is gone.
-- **`get_index_stats` is gated by a permission by default** (`mcp.tools.index_stats.permissions=Radmin-api`). Because the default `mcp.auth.mode=none` never grants any permission to any caller, **this tool and the `fess://index/stats` resource are effectively unavailable out of the box** for every caller — hidden from `tools/list`/`resources/list`, and refused (indistinguishably from "does not exist") by `tools/call`/`resources/read`. See [Get Index Stats and the permission gate](#get-index-stats-and-the-permission-gate).
-- **A per-caller rate limit is enabled by default** (`mcp.rate.limit.per.minute=60`) on `tools/call`, `completion/complete`, and `resources/read`. A caller that exceeds it gets HTTP 429 with a `Retry-After` header. `resources/read` is included even though the spec names only the first two: reading `fess://document/<id>` makes the identical backend document fetch the rate-limited `get_document` tool makes, so leaving it out left `Mcp-Method: resources/read` as an unmetered channel that simply bypassed the limit on `tools/call`.
-- **An inbound `cursor` is now rejected.** The previous implementation accepted a `cursor` on the list methods and silently ignored it, returning page 1 to a client that believed it was paging forward. `tools/list`, `resources/list`, `resources/templates/list`, and `prompts/list` now answer a non-null `cursor` with `-32602` (HTTP 200) — this server returns every item in a single page and never issues a `nextCursor`, so any inbound cursor is necessarily stale. An explicit JSON `"cursor": null` is treated as absent and accepted, since several mainstream serializers emit one for an unset optional field.
-- **`search` with `num` &le; 0 now returns the default page size, not the maximum.** `{"num": 0}` and `{"num": -1}` (and their string forms) used to yield `paging.search.page.max.size` — the largest page the server will emit, 100 by default — which is the opposite of what a client computing a page size and reaching zero intends. They now fall back to `mcp.default.page.size` (3), matching what an unparseable `num` and the `suggest` tool already did. `num` greater than the maximum is still clamped to the maximum.
-- **`search`'s `offset` argument now actually works.** It has always been advertised as an alias of `start` in the tool's `inputSchema`, but nothing read it as one: Fess consumes `SearchRequestParams#getOffset()` only as a rank-fusion window shift, which a stock single-searcher install never reaches, so a client paginating with `offset` was served page 1 forever. `offset` now sets the start position when `start` is absent. When both are sent, **`start` wins** — including when `start` itself is unparseable or negative, so the alias never silently repairs a broken `start` and pages from somewhere the caller did not ask for.
-- **`tools/call` no longer requires `params.arguments`.** The normative schema declares it optional (`CallToolRequestParams.arguments?`), and a tool with no declared parameters — `get_index_stats` — is normally called without it, so a conformant client could not reach that tool at all. An absent (or non-object) `arguments` is now treated as `{}`. No required-argument check is weakened: `tools/call {"name": "search"}` still fails with `-32602`, but now reports the real cause (`Missing required parameter: q`) instead of `Missing required parameter: arguments`.
-- **`mcp.allowed.origins` is now the complete `Origin` allowlist.** It used to list origins accepted *in addition to* the server's own, which was derived from the request. That derivation compared a caller-supplied `Origin` against a caller-supplied `Host` — a tautology a DNS-rebinding attacker satisfies by sending both — so it is gone. With the default blank value, **every present `Origin` is now rejected with HTTP 403**, including the server's own; a browser-based MCP client must be named explicitly. Clients that send no `Origin` at all (CLI bridges, stdio proxies, `curl`) are unaffected.
+**Protocol reference**
 
-Notifications (a JSON-RPC request with no `id`) are unaffected by any of the above: they are still accepted with HTTP 202 and no body, and they do not require the metadata headers or `_meta`.
+- [Transport and endpoints](#transport-and-endpoints)
+- [Required headers and `params._meta`](#required-headers-and-params_meta)
+- [Methods](#methods)
+- [Tool reference](#tool-reference)
+- [Error model](#error-model)
+- [OAuth 2.1 reference](#oauth-21-reference)
+- [Deviations from the specification](#deviations-from-the-specification)
+- [Migrating from an earlier MCP revision](#migrating-from-an-earlier-mcp-revision)
 
-## Download
+**Project**
 
-See [Maven Repository](https://maven.codelibs.org/release/org/codelibs/fess/fess-webapp-mcp/).
+- [Development](#development)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
+
+# Using the plugin
 
 ## Requirements
 
@@ -41,77 +61,54 @@ See [Maven Repository](https://maven.codelibs.org/release/org/codelibs/fess/fess
 
 ## Installation
 
-1. Download the plugin JAR from the Maven Repository
-2. Place it in your Fess plugin directory
-3. Restart Fess
+1. Download the plugin JAR from the [Maven repository](https://maven.codelibs.org/release/org/codelibs/fess/fess-webapp-mcp/).
+2. Place it in your Fess plugin directory (`WEB-INF/plugin`), or install it from **Administration > Plugin** in the Fess admin UI.
+3. Restart Fess.
 
-For detailed instructions, see the [Plugin Administration Guide](https://fess.codelibs.org/15.8/admin/plugin-guide.html).
+See the [Plugin Administration Guide](https://fess.codelibs.org/15.8/admin/plugin-guide.html) for details.
 
-## Features
+After the restart, `POST /mcp` is live. With the shipped defaults it is **unauthenticated** — read
+[Securing the endpoint](#securing-the-endpoint) before exposing it beyond a trusted network.
 
-- **MCP Protocol Support**: Implements MCP protocol revision `2026-07-28` (Streamable HTTP transport, single JSON request/response per call — no batching, no SSE-only stateful session)
-- **Search Tools**: Execute full-text search queries with advanced filtering. Each hit carries the `doc_id` that `get_document` and `fess://document/{doc_id}` take, and the result reports `total` and `has_more` so a client knows how much it has not seen
-- **Suggest Tool**: Autocomplete/suggestion queries via Fess suggest engine
-- **Get Document Tool**: Retrieve individual documents by ID
-- **Index Statistics**: Retrieve index and system information, gated behind a permission by default
-- **Structured Tool Output**: Every tool declares an `outputSchema` and returns a matching `structuredContent`. For `search`, `suggest`, and `get_document` this sits alongside the existing Markdown `content` text block; `get_index_stats`'s `content` text block is itself the same data serialized as JSON (see [Deviations From the Specification](#deviations-from-the-specification) item 2)
-- **Resources**: Access to Fess index statistics and configuration
-- **Resource Templates**: Parameterized URI templates (RFC 6570) for dynamic resource access
-- **Prompts**: Pre-defined search templates for common use cases
-- **Completion**: Argument autocomplete using Fess suggest for prompt arguments
-- **Origin Validation**: Rejects any present `Origin` header that is not in the configured allowlist (browser CSRF/DNS-rebinding defence)
-- **Rate Limiting**: Per-caller fixed-window limit on `tools/call`, `completion/complete`, and `resources/read` — every method that reaches a Fess backend
-- **Three Authorization Modes**: `none` (default, unauthenticated), `fess_token` (Fess access tokens), `oauth` (RFC 6750 Bearer JWT + RFC 9728 protected-resource metadata)
-- **Extensible Architecture**: Easy to add new tools and capabilities
+## Client compatibility
 
-## API Endpoint
+MCP revision `2026-07-28` replaced the `initialize` handshake with `server/discover` and made per-request
+metadata headers mandatory. A client that speaks an older revision fails on its very first call, with this
+server's own diagnostic:
 
-The MCP API is available at:
-
-```
-POST http://<fess-server>:<port>/mcp
+```json
+{"jsonrpc":"2.0","id":0,"error":{"code":-32601,
+ "message":"initialize was removed in MCP 2026-07-28; this server speaks 2026-07-28",
+ "data":{"supportedVersions":["2026-07-28"]}}}
 ```
 
-All non-notification requests must be sent as JSON-RPC 2.0 formatted POST requests, carrying the headers and `_meta` described below. `GET`/`DELETE` are not implemented on this endpoint (legacy Streamable HTTP session semantics); they are rejected with HTTP 405.
+At the time of writing:
 
-When `mcp.auth.mode=oauth`, this plugin also serves an RFC 9728 OAuth 2.0 Protected Resource Metadata document at `/.well-known/oauth-protected-resource` and `/.well-known/oauth-protected-resource/mcp` — see [OAuth 2.1 Setup](#oauth-21-setup).
+| Client / SDK | Newest protocol revision | Connects directly |
+|---|---|---|
+| MCP **Python** SDK 2.0 | `2026-07-28` | Yes — use `ClientSession.discover()`; there is no `initialize` to call |
+| MCP **TypeScript** SDK 1.30 | `2025-11-25` | No |
+| `mcp-remote` | (TypeScript SDK 1.x) | No |
+| Clients built on the TypeScript SDK 1.x | (TypeScript SDK 1.x) | No |
 
-## Required Headers and `_meta`
+`mcp-remote` — the most common local-to-remote bridge for desktop MCP clients — is built on the TypeScript
+SDK 1.x generation and still performs the legacy `initialize` handshake, so it cannot bridge to this endpoint.
+The SDK generation that adds `2026-07-28` support ships under new package names rather than as a drop-in
+upgrade, so this is not something a version bump of `mcp-remote` fixes today.
 
-Every request that is not a notification (i.e. carries a JSON-RPC `id`) must include:
+Until your client's SDK catches up, you have two options:
 
-| Header | Required for | Must equal |
-|--------|--------------|------------|
-| `MCP-Protocol-Version` | every method | `params._meta["io.modelcontextprotocol/protocolVersion"]` |
-| `Mcp-Method` | every method | the JSON-RPC `method` field |
-| `Mcp-Name` | `tools/call`, `prompts/get` | `params.name` |
-| `Mcp-Name` | `resources/read` | `params.uri` |
+- Drive the endpoint directly over HTTP (see [Quick start](#quick-start)) from your own agent code.
+- Put a bridge in front of it that speaks the older revision to the client and `2026-07-28` to this endpoint,
+  translating `initialize` into [`server/discover`](#serverdiscover) and adding the request-metadata headers
+  and `params._meta` this revision requires.
 
-and a `params._meta` object with:
+## Quick start
 
-| `_meta` key | Required | Meaning |
-|-------------|----------|---------|
-| `io.modelcontextprotocol/protocolVersion` | Yes | Must be `2026-07-28` — any other value is rejected with `-32022` (`UnsupportedProtocolVersion`), but only after header *presence* has already been checked |
-| `io.modelcontextprotocol/clientCapabilities` | Yes | An object; may be `{}` |
-| `io.modelcontextprotocol/clientInfo` | No | Client identity, echoed nowhere by this server today |
+The examples below assume a default install at `http://localhost:8080` with `mcp.auth.mode=none`.
 
-Presence of the required headers is checked before they are compared against the body, and both checks happen before the protocol version is validated — a request with no headers at all against an unsupported body version still gets `-32020`, not `-32022`.
+**1. Discover the server.** This replaces `initialize`.
 
-A required header sent **more than once** is also rejected with HTTP 400 and `-32020`. The specification does not ask for this — it lists missing, mismatched and malformed as the failure conditions — so it is hardening rather than conformance: with repeats allowed, which of the values the server compares against the body is a servlet-container detail, and a proxy that appends rather than replaces could turn a mismatch into a match.
-
-A `Mcp-Name` value that is not pure ASCII cannot be carried in an HTTP header field directly; encode it as `=?base64?<base64-of-utf8-bytes>?=` and this server will decode it before comparing it against the body. A value that carries the sentinel's `=?base64?` prefix and `?=` suffix but cannot be decoded as one — including the ten-character `=?base64?=`, where the two delimiters overlap — is treated as malformed, not as a plain header value, and is rejected with HTTP 400 and `-32020`.
-
-`Content-Type` and `Accept` are not validated by this server (send `application/json` and `application/json, text/event-stream` respectively as a matter of good practice, matching the transport spec).
-
-## Available Methods
-
-### 1. server/discover
-
-Replaces the retired `initialize` handshake. This server speaks exactly one protocol revision, so unlike `initialize` there is no version negotiation. The result is a `CacheableResult` (`ttlMs` + `cacheScope`), and it is always `cacheScope: "public"`: the result is identity-independent — it must never mention a permission-gated primitive (see [Get Index Stats and the permission gate](#get-index-stats-and-the-permission-gate)), so one cached copy is correct for every caller.
-
-Identity-independent is not the same as reachable without a credential. `server/discover` is dispatched like any other method, *after* authentication, so under `mcp.auth.mode=fess_token` or `oauth` an unauthenticated `server/discover` gets the same `401` with a `WWW-Authenticate` challenge as anything else — which is how a client discovers where to authenticate. Only the default `mcp.auth.mode=none` serves it to an anonymous caller.
-
-**Request:**
 ```bash
 curl -sS -X POST http://localhost:8080/mcp \
   -H 'Content-Type: application/json' \
@@ -131,52 +128,22 @@ curl -sS -X POST http://localhost:8080/mcp \
   }'
 ```
 
-**Response:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "supportedVersions": ["2026-07-28"],
-    "capabilities": {
-      "tools": {},
-      "resources": {},
-      "prompts": {},
-      "completions": {}
-    },
-    "instructions": "Fess Enterprise Search Server. Use the 'search' tool to perform full-text search with Lucene-like query syntax (AND default, OR explicit, quotes for phrase, - for exclusion). Use 'suggest' for query autocomplete.",
-    "ttlMs": 3600000,
-    "cacheScope": "public",
-    "resultType": "complete",
-    "_meta": {
-      "io.modelcontextprotocol/serverInfo": {
-        "name": "fess-mcp-server",
-        "version": "15.8.0"
-      }
-    }
-  }
-}
-```
+**2. Search.** Every request carries an `MCP-Protocol-Version` and `Mcp-Method` header, plus `Mcp-Name` for
+`tools/call`; each must match the corresponding value in the body.
 
-`resultType` and `_meta["io.modelcontextprotocol/serverInfo"]` are stamped onto *every* successful result by the response writer, not just this one — they are omitted from the remaining examples below for brevity, but are always present. `serverInfo.version` is read from the plugin JAR's `Implementation-Version` manifest entry via `Package#getImplementationVersion()`, so it reports the plugin version (e.g. `15.8.0`). It falls back to `"unknown"` only when the class was loaded from somewhere without that manifest entry, such as an exploded build directory.
-
-`ttlMs` for this method is controlled by `mcp.cache.discover.ttl.ms` (default `3600000`, i.e. one hour).
-
-### 2. tools/list
-
-List the tools available to the caller. A tool gated by a permission the caller does not hold (see [get_index_stats](#get-index-stats-and-the-permission-gate)) is silently omitted from the list.
-
-**Request:**
 ```bash
 curl -sS -X POST http://localhost:8080/mcp \
   -H 'Content-Type: application/json' \
   -H 'MCP-Protocol-Version: 2026-07-28' \
-  -H 'Mcp-Method: tools/list' \
+  -H 'Mcp-Method: tools/call' \
+  -H 'Mcp-Name: search' \
   -d '{
     "jsonrpc": "2.0",
     "id": 2,
-    "method": "tools/list",
+    "method": "tools/call",
     "params": {
+      "name": "search",
+      "arguments": { "q": "machine learning", "num": 5 },
       "_meta": {
         "io.modelcontextprotocol/protocolVersion": "2026-07-28",
         "io.modelcontextprotocol/clientCapabilities": {}
@@ -185,7 +152,423 @@ curl -sS -X POST http://localhost:8080/mcp \
   }'
 ```
 
-**Response** (as seen by a caller authorized for `get_index_stats`; under the default `mcp.auth.mode=none` configuration `get_index_stats` is omitted for everyone — see below):
+**3. Fetch one of the hits in full**, using the `doc_id` the search returned:
+
+```bash
+curl -sS -X POST http://localhost:8080/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'Mcp-Method: tools/call' \
+  -H 'Mcp-Name: get_document' \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 3,
+    "method": "tools/call",
+    "params": {
+      "name": "get_document",
+      "arguments": { "doc_id": "d82177b8ab2749909afbfd6f3a54dc57" },
+      "_meta": {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {}
+      }
+    }
+  }'
+```
+
+The same three calls in Python, without an SDK:
+
+```python
+import json
+import requests
+
+URL = "http://localhost:8080/mcp"
+VERSION = "2026-07-28"
+META = {
+    "io.modelcontextprotocol/protocolVersion": VERSION,
+    "io.modelcontextprotocol/clientCapabilities": {},
+}
+
+
+def call_tool(name, arguments, request_id=1):
+    body = {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments, "_meta": META},
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "MCP-Protocol-Version": VERSION,
+        "Mcp-Method": "tools/call",
+        "Mcp-Name": name,
+    }
+    return requests.post(URL, headers=headers, data=json.dumps(body)).json()
+
+
+result = call_tool("search", {"q": "machine learning", "num": 5})
+print(json.dumps(result, indent=2))
+```
+
+## What the server exposes
+
+### Tools
+
+| Tool | What it does | Availability |
+|------|--------------|--------------|
+| `search` | Full-text search with Lucene-like syntax, filters, sorting, and paging. Each hit carries the `doc_id` the other tools take. | Always |
+| `suggest` | Autocomplete candidates for a query prefix, from the Fess suggest engine. | Always |
+| `get_document` | Retrieve one document by `doc_id`, including its (bounded) text content. | Always |
+| `get_index_stats` | Index name, document count, page-size limit, and JVM heap usage. | **Permission-gated; unavailable with the default settings** — see [The `get_index_stats` gate](#the-get_index_stats-gate) |
+
+Every tool declares both an `inputSchema` and an `outputSchema`, and returns `structuredContent` matching the
+latter alongside a human-readable `content` text block. All four are read-only: none of them writes to Fess.
+
+Full argument and result tables are in the [Tool reference](#tool-reference).
+
+### Resources and resource templates
+
+| URI | Contents |
+|-----|----------|
+| `fess://index/stats` | The same data as `get_index_stats`, as JSON. Gated by the same permission. |
+| `fess://document/{doc_id}` | A resource template (RFC 6570). Reading a concrete `fess://document/<id>` performs the same fetch as `get_document`. |
+
+### Prompts and completion
+
+Two prompts are published for clients that offer prompt pickers:
+
+| Prompt | Arguments |
+|--------|-----------|
+| `basic_search` | `query` (required) |
+| `advanced_search` | `query` (required), `sort`, `num` |
+
+`completion/complete` fills in prompt arguments: `query` values come from the Fess suggest engine, and
+`advanced_search.sort` is completed from the accepted sort orders.
+
+## Search query syntax
+
+The `search` tool accepts Lucene-like syntax:
+
+| Syntax | Meaning | Example |
+|--------|---------|---------|
+| `term1 term2` | AND (the default) | `machine learning` |
+| `term1 OR term2` | OR | `cat OR dog` |
+| `"phrase"` | Phrase match | `"machine learning"` |
+| `-term` | Exclude | `python -java` |
+
+Beyond the query string, `search` accepts label and language filters, Fess's advanced search conditions
+(`sitesearch`, `filetype`, `timestamp`, and so on), and sorting. See the [`search` tool](#search) reference.
+
+## Reading a search result
+
+A `search` result carries more than the hits, and a client that ignores the rest will misreport what it found.
+
+```json
+{
+  "hits": [ { "doc_id": "...", "title": "...", "url": "...", "score": 1.234, "content_description": "..." } ],
+  "total": 128,
+  "total_relation": "EQUAL_TO",
+  "has_more": true,
+  "collapsed": false,
+  "partial": false
+}
+```
+
+- **`total` is how many documents matched**, and `total_relation` says whether that number is exact
+  (`EQUAL_TO`) or a floor the search engine stopped counting at (`GREATER_THAN_OR_EQUAL_TO`).
+- **`has_more`** says whether another page exists after this one. Page with `start` (or `offset`).
+- **`collapsed` says you may not be able to reach `total`.** Fess's `result.collapsed` setting — `true` in
+  the shipped `system.properties` — folds near-duplicate results *after* the count is taken, so with it on,
+  fewer than `total` items are obtainable however far you page. Measured on a corpus of 30 near-identical
+  documents: `total` is 30 with `total_relation` `EQUAL_TO`, 29 items come back, and `start=29` yields an
+  empty array. Fess's own `/api/v2/search` reports the same split. Set `result.collapsed=false` if you need
+  the two numbers to agree.
+- **`partial` says the search did not complete.** A search that timed out, or that never reached a working
+  search engine at all, still returns an ordinary short or empty result with no error. Without checking this
+  flag, an agent reports "no documents matched" when the index is simply down.
+
+Two more things worth knowing when consuming results:
+
+- **A `doc_id` is the handle for everything else.** It appears on every hit, and is what `get_document` and
+  `fess://document/{doc_id}` take.
+- **`get_document` truncates long content, and says so.** `content` is bounded by `mcp.content.max.length`
+  (10000 characters by default); `truncated` is `true` when the document was longer and `content_length`
+  gives its untruncated length, so a client can report "showing 10000 of 20957 characters". Do not read the
+  trailing `...` as the signal — it is indistinguishable from a document that genuinely ends in one. Raise
+  `mcp.content.max.length` to return whole documents; there is no way to fetch the remainder in a second call.
+
+## Securing the endpoint
+
+### Authentication modes
+
+`mcp.auth.mode` selects how a caller is identified. Whatever the mode, an authenticated caller's Fess
+permissions drive role-based filtering of search results, exactly as they do in the web UI.
+
+| Mode | Credential | Notes |
+|------|-----------|-------|
+| `none` (default) | none | Every caller is anonymous and gets Fess's configured guest roles. Kept as the default for backward compatibility. |
+| `fess_token` | `Authorization: Bearer <fess-access-token>` | Uses Fess's own access tokens, managed under **Administration > Access Token**. |
+| `oauth` | `Authorization: Bearer <JWT>` | RFC 6750 bearer JWT verified against an external authorization server, with RFC 9728 protected-resource metadata. See [OAuth 2.1 reference](#oauth-21-reference). |
+
+**The default is unauthenticated.** The MCP transport specification says a server SHOULD authenticate every
+connection; this one does not out of the box, so that an existing Fess deployment keeps working after the
+plugin is installed. The endpoint logs a WARN whenever it resolves to unauthenticated behaviour. For any
+deployment reachable beyond a trusted network, set `mcp.auth.mode` to `fess_token` or `oauth`.
+
+An `oauth` configuration that is missing a required key **falls back to `none` rather than failing hard**,
+which means the endpoint silently starts serving anonymous callers. That fallback is logged at ERROR naming
+the missing keys. Because Fess re-reads its properties on a live server, this can happen minutes after a
+configuration edit, without a restart — see [When the OAuth configuration is not usable](#when-the-oauth-configuration-is-not-usable).
+
+### The `get_index_stats` gate
+
+`get_index_stats` and `fess://index/stats` expose the index name, document count, and JVM heap. That is
+administrative information, and reading it bypasses the role-based filtering that applies to search, so it is
+gated behind `mcp.tools.index_stats.permissions` (default `Radmin-api`).
+
+Because `mcp.auth.mode=none` never resolves any permission for any caller, **the default configuration
+disables this tool and resource for everyone.** They are hidden from `tools/list` and `resources/list`, and a
+direct call is refused with the same error a non-existent tool would get, so an unauthorized caller cannot
+tell "you may not use this" from "this does not exist".
+
+To make it usable, either:
+
+- switch to `mcp.auth.mode=fess_token` or `oauth` and grant the configured permission to the token or scope; or
+- remove the gate entirely with a blank value:
+
+  ```
+  mcp.tools.index_stats.permissions=
+  ```
+
+If you take the first route, **grant a searchable role alongside it.** A principal's permissions *are* its
+role filter, and Fess adds the guest roles only for a principal that has none of its own. A token carrying
+only `Radmin-api` therefore unlocks `get_index_stats` and gets **zero hits from `search`**, because no
+document carries `Radmin-api` as a role. Grant both (for example `Radmin-api,Rguest`), or set
+`role.search.default.permissions`.
+
+### Browser clients: Origin allowlist and CORS
+
+`mcp.allowed.origins` is the complete allowlist of browser origins. It is **blank by default, which rejects
+every request that carries an `Origin` header** with HTTP 403 — including one from the Fess host itself. A
+browser-based MCP client must be named explicitly:
+
+```
+mcp.allowed.origins=https://app.example.com
+```
+
+Requests with no `Origin` at all — CLI tools, agent runtimes, `curl` — are unaffected. The server's own
+origin is deliberately not implied: it could only be derived from the caller-supplied `Host` header, which is
+exactly what a DNS-rebinding attacker controls.
+
+Each entry must be a full `scheme://host[:port]`. An entry without a scheme (`fess.example.com`) or a
+wildcard (`*`) does not parse as an origin, is dropped, and matches nothing — so `*` behaves like a blank
+value and rejects everything.
+
+**Listing an origin is necessary but not sufficient for a cross-origin browser client.** None of
+`MCP-Protocol-Version`, `Mcp-Method`, or `Mcp-Name` is CORS-safelisted, so the browser preflights; Fess's
+`DefaultCorsHandler` returns `api.cors.allow.headers` verbatim rather than echoing the requested headers, so
+the browser blocks the real request before this plugin ever sees it. Extend the Fess setting too:
+
+```
+api.cors.allow.headers=Origin, Content-Type, Accept, Authorization, X-Requested-With, X-Fess-CSRF-Token, MCP-Protocol-Version, Mcp-Method, Mcp-Name
+```
+
+Same-origin browser clients do not preflight and are unaffected.
+
+### Rate limiting
+
+`mcp.rate.limit.per.minute` (default `60`) caps how many `tools/call`, `completion/complete`, and
+`resources/read` calls one caller may make per minute — every method that reaches a Fess backend. Exceeding
+it returns HTTP 429 with a `Retry-After` header. Set it to `0` to disable.
+
+The limit is keyed on the authenticated subject, or on the client IP when there is none. **Behind a reverse
+proxy, set Fess's `rate.limit.trusted.proxies`**: without it, `X-Forwarded-For` is ignored and every caller
+behind the proxy shares one bucket. This limiter is per-caller fairness, not a flood defence — see
+[deviation 8](#deviations-from-the-specification).
+
+### Request size
+
+`mcp.request.max.bytes` (default `1048576`) bounds the request body; a larger one gets HTTP 413 without ever
+being buffered or decoded. There is no "unlimited" sentinel — `0` or a negative value rejects *every* body,
+and `2147483647` removes the bound altogether. Leave it at a real byte count.
+
+## Configuration reference
+
+Every key below is a **Fess system property**. Put it in `WEB-INF/conf/system.properties`, or pass it as
+`-Dfess.system.<key>` — note the `fess.system.` prefix, not `fess.`.
+
+> `fess_config.properties` and `-Dfess.config.*` are a different channel and have **no effect** on any key
+> below. A key placed there is silently ignored, with no error and no log line.
+
+> **Boolean keys accept only `true`, matched case-insensitively.** Any other value — including `1`, `yes`, or
+> an empty string — is `false`. So `mcp.enabled=1` silently *disables* the endpoint.
+
+> Values are read live: an edit takes effect within a few seconds, without a restart.
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `mcp.enabled` | `true` | Enables the `/mcp` endpoint. When `false`, every request gets HTTP 503. |
+| `mcp.auth.mode` | `none` | `none`, `fess_token`, or `oauth`. An unusable `oauth` configuration falls back to `none`. |
+| `mcp.allowed.origins` | *(blank)* | Comma-separated allowlist of `Origin` values, as full `scheme://host[:port]`. Blank rejects every present `Origin`; an absent `Origin` is always allowed. A host containing an underscore cannot be expressed here, because `java.net.URI` does not accept one. |
+| `mcp.request.max.bytes` | `1048576` | Maximum request body size in bytes; larger bodies get HTTP 413. `0` or negative rejects every body; `2147483647` removes the bound. `Content-Length` is deliberately ignored — it is caller-supplied and absent for a chunked body. |
+| `mcp.rate.limit.per.minute` | `60` | Per-caller limit on `tools/call`, `completion/complete`, and `resources/read`, per fixed one-minute window. `0` or negative disables it. |
+| `mcp.tools.index_stats.permissions` | `Radmin-api` | Comma-separated encoded Fess permissions required for `get_index_stats` / `fess://index/stats`. Blank disables the gate. |
+| `mcp.content.max.length` | `10000` | Maximum characters of document content returned by `search` and `get_document`; a `...` suffix is appended when truncated. |
+| `mcp.highlight.fragment.size` | `500` | Highlight fragment size, in characters. |
+| `mcp.highlight.num.of.fragments` | `3` | Highlight fragments per search result. |
+| `mcp.default.page.size` | `3` | Default `num` for `search` when the caller does not supply one. |
+| `mcp.cache.discover.ttl.ms` | `3600000` | `ttlMs` reported by `server/discover`. |
+| `mcp.cache.list.ttl.ms` | `3600000` | `ttlMs` reported by `tools/list`, `resources/list`, `resources/templates/list`, and `prompts/list`. |
+| `mcp.cache.read.ttl.ms` | `0` | `ttlMs` reported by `resources/read` (not cached by default). |
+| `mcp.oauth.issuer` | *(blank)* | The authorization server's issuer URL. Required for `oauth` mode. |
+| `mcp.oauth.audience` | *(blank)* | The canonical resource URI checked against a token's `aud` claim, and served as `resource` in the protected-resource metadata. Required for `oauth` mode, never derived from the request, and **must end in `/mcp`**. |
+| `mcp.oauth.jwks.uri` | *(blank)* | The authorization server's JWKS endpoint (RS256 only). Required for `oauth` mode. |
+| `mcp.oauth.jwks.cache.seconds` | `300` | How long a fetched JWKS is cached. **Values below 60 are raised to 60**, logged once at WARN. |
+| `mcp.oauth.required.scopes` | *(blank)* | Comma-separated leaf scopes a token must carry in full, read from `scope` or, failing that, `scp`. Blank requires none. |
+| `mcp.oauth.permission.claim` | *(blank)* | JWT claim name whose values are already-encoded Fess permissions. |
+| `mcp.oauth.scope.permission.map` | *(blank)* | Comma-separated `scope=permission` pairs mapping token scopes to encoded Fess permissions. |
+
+## Troubleshooting
+
+**Every request fails with HTTP 400 and code `-32020`.** A required metadata header is missing, duplicated, or
+disagrees with the body. All of `MCP-Protocol-Version` and `Mcp-Method` are required on every non-notification
+request, plus `Mcp-Name` on `tools/call`, `prompts/get`, and `resources/read`. See
+[Required headers and `params._meta`](#required-headers-and-params_meta).
+
+**The first call fails with `-32601` mentioning `initialize`.** Your client speaks an older MCP revision. See
+[Client compatibility](#client-compatibility).
+
+**Every request gets HTTP 403.** The request carries an `Origin` header that is not in `mcp.allowed.origins`,
+which is blank by default. See [Browser clients](#browser-clients-origin-allowlist-and-cors).
+
+**Every request gets HTTP 503.** `mcp.enabled` is not `true` — check for a value like `1` or `yes`, which
+count as `false`.
+
+**`tools/list` does not include `get_index_stats`.** Expected with the default settings. See
+[The `get_index_stats` gate](#the-get_index_stats-gate).
+
+**`search` returns zero hits for a token that works elsewhere.** The token's permissions are also its role
+filter. A credential carrying only `Radmin-api` matches no documents; grant a searchable role too.
+
+**`search` returns fewer items than `total`.** Result collapsing. Check the `collapsed` flag, and see
+[Reading a search result](#reading-a-search-result).
+
+**`search` returns zero hits and the index is fine.** Check `partial`: a value of `true` means the search did
+not complete, not that nothing matched.
+
+**A tool failed with `Tool execution failed (error_code:<uuid>)`.** That correlation id is deliberate — the
+real message is only in the Fess log. Grep the log for the uuid; the entry is at WARN. See
+[Tool errors](#tool-errors).
+
+**OAuth mode stopped requiring credentials.** The configuration became unusable and fell back to `none`. Look
+for the ERROR log line naming the missing keys, and see
+[When the OAuth configuration is not usable](#when-the-oauth-configuration-is-not-usable).
+
+---
+
+# Protocol reference
+
+## Transport and endpoints
+
+```
+POST /mcp
+```
+
+Streamable HTTP, one JSON request and one JSON response per call. There is no batching and no SSE-only
+stateful session. `GET` and `DELETE` (legacy Streamable HTTP session semantics) are not implemented and are
+rejected with HTTP 405.
+
+A **notification** — a JSON-RPC request with no `id` — is accepted with HTTP 202 and an empty body. Notifications
+do not require the metadata headers or `params._meta`.
+
+When `mcp.auth.mode=oauth` is usable, the plugin additionally serves an RFC 9728 Protected Resource Metadata
+document at `/.well-known/oauth-protected-resource` and `/.well-known/oauth-protected-resource/mcp`. Both
+return HTTP 404 in any other mode.
+
+`Content-Type` and `Accept` are not validated by this server; send `application/json` and
+`application/json, text/event-stream` respectively as a matter of good practice.
+
+## Required headers and `params._meta`
+
+Every request carrying a JSON-RPC `id` must include these headers:
+
+| Header | Required for | Must equal |
+|--------|--------------|------------|
+| `MCP-Protocol-Version` | every method | `params._meta["io.modelcontextprotocol/protocolVersion"]` |
+| `Mcp-Method` | every method | the JSON-RPC `method` field |
+| `Mcp-Name` | `tools/call`, `prompts/get` | `params.name` |
+| `Mcp-Name` | `resources/read` | `params.uri` |
+
+and a `params._meta` object:
+
+| `_meta` key | Required | Meaning |
+|-------------|----------|---------|
+| `io.modelcontextprotocol/protocolVersion` | Yes | Must be `2026-07-28`; any other value is `-32022` (`UnsupportedProtocolVersion`) |
+| `io.modelcontextprotocol/clientCapabilities` | Yes | An object; may be `{}` |
+| `io.modelcontextprotocol/clientInfo` | No | Client identity; this server does not echo it anywhere today |
+
+Validation order is: header *presence*, then header-versus-body agreement, then protocol version. A request
+with no headers at all and an unsupported body version therefore gets `-32020`, not `-32022`.
+
+A required header sent **more than once** is also rejected with `-32020`. The specification does not ask for
+this — it names missing, mismatched, and malformed as the failure conditions — but with repeats allowed, which
+value the server compares against the body is a servlet-container detail, and a proxy that appends rather than
+replaces could turn a mismatch into a match.
+
+A **non-ASCII `Mcp-Name`** cannot be carried in an HTTP header field directly. Encode it as
+`=?base64?<base64-of-utf8-bytes>?=` and this server decodes it before comparing against the body. A value that
+carries the sentinel's `=?base64?` prefix and `?=` suffix but cannot be decoded as one — including the
+ten-character `=?base64?=`, where the delimiters overlap — is treated as malformed rather than as a plain
+value, and rejected with `-32020`.
+
+## Methods
+
+Nine methods are routed. Every other method name, including the retired `initialize` and `ping`, is `-32601`.
+
+`resultType` and `_meta["io.modelcontextprotocol/serverInfo"]` are stamped onto **every** successful result by
+the response writer; they are shown once below and omitted from the rest for brevity. `serverInfo.version`
+comes from the plugin JAR's `Implementation-Version` manifest entry, so it reports the plugin version
+(for example `15.8.0`), falling back to `"unknown"` only when loaded from somewhere without that manifest
+entry, such as an exploded build directory.
+
+Results marked as cacheable carry `ttlMs` and `cacheScope`. `cacheScope` is `"public"` only when the result
+cannot vary by caller.
+
+### `server/discover`
+
+Replaces `initialize`. There is no version negotiation, because this server speaks exactly one revision.
+Always `cacheScope: "public"`: the result is identity-independent, and must never mention a permission-gated
+primitive, so one cached copy is correct for every caller.
+
+Identity-independent is not the same as unauthenticated. `server/discover` is dispatched after
+authentication like any other method, so under `fess_token` or `oauth` an unauthenticated call gets the same
+401 with a `WWW-Authenticate` challenge as anything else — which is how a client discovers where to
+authenticate.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "supportedVersions": ["2026-07-28"],
+    "capabilities": { "tools": {}, "resources": {}, "prompts": {}, "completions": {} },
+    "instructions": "Fess Enterprise Search Server. Use the 'search' tool to perform full-text search with Lucene-like query syntax (AND default, OR explicit, quotes for phrase, - for exclusion). Use 'suggest' for query autocomplete.",
+    "ttlMs": 3600000,
+    "cacheScope": "public",
+    "resultType": "complete",
+    "_meta": {
+      "io.modelcontextprotocol/serverInfo": { "name": "fess-mcp-server", "version": "15.8.0" }
+    }
+  }
+}
+```
+
+TTL: `mcp.cache.discover.ttl.ms`.
+
+### `tools/list`
+
+Lists the tools available to the caller. A tool gated by a permission the caller does not hold is silently
+omitted. No tool declares `idempotentHint`.
+
 ```json
 {
   "jsonrpc": "2.0",
@@ -195,172 +578,9 @@ curl -sS -X POST http://localhost:8080/mcp \
       {
         "name": "search",
         "description": "Search documents via Fess. Query syntax is similar to Lucene: multiple terms are combined with AND by default, use OR explicitly for OR search (e.g., \"term1 OR term2\"), use quotes for phrase search, use - for exclusion.",
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "q": { "type": "string", "description": "query string" },
-            "start": { "type": "integer", "description": "start position" },
-            "offset": { "type": "integer", "description": "offset (alias of start)" },
-            "num": { "type": "integer", "description": "number of results" },
-            "sort": { "type": "string", "description": "sort order" },
-            "fields": {
-              "type": "object",
-              "description": "field filters, keyed by field name, e.g. {\"label\": [\"label1\"]}",
-              "properties": { "label": { "type": "array", "description": "labels to return" } }
-            },
-            "lang": { "type": "string", "description": "language" },
-            "as": { "type": "object", "description": "advanced search conditions, keyed by condition name, e.g. {\"sitesearch\": [\"example.com\"]}" },
-            "ex_q": { "type": "array", "description": "extra queries", "items": { "type": "string" } },
-            "sdh": { "type": "string", "description": "similar document hash" }
-          },
-          "required": ["q"]
-        },
-        "outputSchema": {
-          "type": "object",
-          "properties": {
-            "hits": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "doc_id": { "type": "string" },
-                  "title": { "type": "string" },
-                  "url": { "type": "string" },
-                  "score": { "type": "number" },
-                  "content_description": { "type": "string" }
-                },
-                "required": [],
-                "additionalProperties": false
-              }
-            },
-            "total": { "type": "integer", "description": "total number of matching documents" },
-            "total_relation": { "type": "string", "description": "EQUAL_TO when total is exact, GREATER_THAN_OR_EQUAL_TO when the search engine stopped counting" },
-            "has_more": { "type": "boolean", "description": "whether a page exists after this one" },
-            "collapsed": { "type": "boolean", "description": "whether near-duplicate results were folded, so fewer than total items are obtainable" }
-          },
-          "required": ["hits", "total", "has_more", "collapsed"],
-          "additionalProperties": false
-        },
-        "annotations": {
-          "title": "Search Documents",
-          "readOnlyHint": true,
-          "destructiveHint": false,
-          "openWorldHint": false
-        }
-      },
-      {
-        "name": "get_index_stats",
-        "description": "Get index statistics and information",
-        "inputSchema": { "type": "object", "properties": {} },
-        "outputSchema": {
-          "type": "object",
-          "properties": {
-            "index": {
-              "type": "object",
-              "properties": {
-                "index_name": { "type": "string" },
-                "document_count": { "type": "integer" },
-                "error": { "type": "string" }
-              },
-              "required": ["document_count"],
-              "additionalProperties": false
-            },
-            "config": {
-              "type": "object",
-              "properties": { "max_page_size": { "type": "integer" } },
-              "required": ["max_page_size"],
-              "additionalProperties": false
-            },
-            "system": {
-              "type": "object",
-              "properties": {
-                "memory": {
-                  "type": "object",
-                  "properties": {
-                    "total_bytes": { "type": "integer" },
-                    "free_bytes": { "type": "integer" },
-                    "used_bytes": { "type": "integer" },
-                    "max_bytes": { "type": "integer" }
-                  },
-                  "required": ["total_bytes", "free_bytes", "used_bytes", "max_bytes"],
-                  "additionalProperties": false
-                }
-              },
-              "required": ["memory"],
-              "additionalProperties": false
-            }
-          },
-          "required": ["index", "config", "system"],
-          "additionalProperties": false
-        },
-        "annotations": {
-          "title": "Get Index Statistics",
-          "readOnlyHint": true,
-          "destructiveHint": false,
-          "openWorldHint": false
-        }
-      },
-      {
-        "name": "suggest",
-        "description": "Get autocomplete suggestions for a search query prefix",
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "q": { "type": "string", "description": "query prefix for autocomplete" },
-            "num": { "type": "integer", "description": "number of suggestions" }
-          },
-          "required": ["q"]
-        },
-        "outputSchema": {
-          "type": "object",
-          "properties": {
-            "suggestions": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": { "text": { "type": "string" } },
-                "required": ["text"],
-                "additionalProperties": false
-              }
-            }
-          },
-          "required": ["suggestions"],
-          "additionalProperties": false
-        },
-        "annotations": {
-          "title": "Suggest",
-          "readOnlyHint": true,
-          "destructiveHint": false,
-          "openWorldHint": false
-        }
-      },
-      {
-        "name": "get_document",
-        "description": "Retrieve a document by its document ID",
-        "inputSchema": {
-          "type": "object",
-          "properties": { "doc_id": { "type": "string", "description": "document ID to retrieve" } },
-          "required": ["doc_id"]
-        },
-        "outputSchema": {
-          "type": "object",
-          "properties": {
-            "doc_id": { "type": "string" },
-            "title": { "type": "string" },
-            "url": { "type": "string" },
-            "content": { "type": "string" },
-            "truncated": { "type": "boolean", "description": "whether content was cut at mcp.content.max.length" },
-            "content_length": { "type": "integer", "description": "length of the document's content before truncation" }
-          },
-          "required": ["doc_id", "title", "url", "content", "truncated", "content_length"],
-          "additionalProperties": false
-        },
-        "annotations": {
-          "title": "Get Document",
-          "readOnlyHint": true,
-          "destructiveHint": false,
-          "openWorldHint": false
-        }
+        "inputSchema": { "type": "object", "properties": { "q": { "type": "string", "description": "query string" }, "...": {} }, "required": ["q"] },
+        "outputSchema": { "type": "object", "properties": { "hits": {}, "total": {}, "total_relation": {}, "has_more": {}, "collapsed": {}, "partial": {} }, "required": ["hits", "total", "has_more", "collapsed", "partial"], "additionalProperties": false },
+        "annotations": { "title": "Search Documents", "readOnlyHint": true, "destructiveHint": false, "openWorldHint": false }
       }
     ],
     "ttlMs": 3600000,
@@ -369,35 +589,19 @@ curl -sS -X POST http://localhost:8080/mcp \
 }
 ```
 
-No tool declares `idempotentHint`. `cacheScope` is `"public"` only while `mcp.auth.mode=none`; it drops to `"private"` for any other mode, because which tools appear then depends on the caller's authorization. `ttlMs` is controlled by `mcp.cache.list.ttl.ms` (default `3600000`), shared with `resources/list`, `resources/templates/list`, and `prompts/list`.
+The full schemas are in the [Tool reference](#tool-reference). `cacheScope` is `"public"` only while
+`mcp.auth.mode=none`; under any other mode it drops to `"private"`, because which tools appear then depends on
+the caller. TTL: `mcp.cache.list.ttl.ms`, shared with the other list methods.
 
-### 3. tools/call
+### `tools/call`
 
-Execute a specific tool. Requires the `Mcp-Name` header to equal `params.name`.
+Executes a tool. Requires `Mcp-Name` to equal `params.name`. Not a cacheable result: it never carries `ttlMs`
+or `cacheScope`.
 
-**Request (Search):**
-```bash
-curl -sS -X POST http://localhost:8080/mcp \
-  -H 'Content-Type: application/json' \
-  -H 'MCP-Protocol-Version: 2026-07-28' \
-  -H 'Mcp-Method: tools/call' \
-  -H 'Mcp-Name: search' \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 3,
-    "method": "tools/call",
-    "params": {
-      "name": "search",
-      "arguments": { "q": "elasticsearch", "num": 10, "start": 0 },
-      "_meta": {
-        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-        "io.modelcontextprotocol/clientCapabilities": {}
-      }
-    }
-  }'
-```
+`params.arguments` is optional, per the normative schema (`CallToolRequestParams.arguments?`); an absent or
+non-object value is treated as `{}`. Required-argument checks are unaffected — `tools/call {"name": "search"}`
+still fails with `-32602 Missing required parameter: q`.
 
-**Response:**
 ```json
 {
   "jsonrpc": "2.0",
@@ -411,125 +615,56 @@ curl -sS -X POST http://localhost:8080/mcp \
     ],
     "structuredContent": {
       "hits": [
-        { "doc_id": "d82177b8ab2749909afbfd6f3a54dc57", "title": "Introduction to Elasticsearch", "url": "https://example.com/elasticsearch-intro", "score": 1.234, "content_description": "Elasticsearch is a distributed, RESTful search and analytics engine..." }
+        {
+          "doc_id": "d82177b8ab2749909afbfd6f3a54dc57",
+          "title": "Introduction to Elasticsearch",
+          "url": "https://example.com/elasticsearch-intro",
+          "score": 1.234,
+          "content_description": "Elasticsearch is a distributed, RESTful search and analytics engine..."
+        }
       ],
       "total": 128,
       "total_relation": "EQUAL_TO",
       "has_more": true,
-      "collapsed": false
+      "collapsed": false,
+      "partial": false
     }
   }
 }
 ```
 
-`content` stays Markdown-style text even though `structuredContent` is also present — see [Deviations From the Specification](#deviations-from-the-specification) item 2. `tools/call` is **not** a `CacheableResult`: it never carries `ttlMs` or `cacheScope`.
+A tool that fails in an expected way returns an ordinary result with `isError: true`:
 
-**How an absent field is reported differs by tool, and `search` is the strict one.** For `search`, `structuredContent` only ever carries the fields Fess actually populated (see that tool's `outputSchema` above): a `doc_id`, `title`, `url`, `score`, or `content_description` that is genuinely absent from the underlying document is omitted from the `hits[]` entry, not filled in with an empty string or `null` — which is why that schema's `items.required` is empty. `content_description` carries the same digest the text block shows: highlight markup stripped, falling back to the truncated raw content when Fess's highlighter produced no fragment (a phrase query does this routinely), and omitted entirely when there was neither. `get_document` does the opposite, and its `outputSchema` says so by marking all four fields required: it resolves `title`, `url`, and `content` with a `""` fallback, so an absent field arrives as an empty string rather than being omitted. (A field present in the document but mapped to a null value becomes the literal string `"null"` there, since the fallback is applied before the value is stringified.) `get_index_stats` strips nulls from its stats map before serializing it.
-
-**Request (Suggest):**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "tools/call",
-  "params": {
-    "name": "suggest",
-    "arguments": { "q": "machine", "num": 5 },
-    "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} }
-  }
-}
-```
-(headers: `MCP-Protocol-Version: 2026-07-28`, `Mcp-Method: tools/call`, `Mcp-Name: suggest`)
-
-**Request (Get Document):**
 ```json
 {
   "jsonrpc": "2.0",
   "id": 5,
-  "method": "tools/call",
-  "params": {
-    "name": "get_document",
-    "arguments": { "doc_id": "abc123" },
-    "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} }
-  }
-}
-```
-(headers: `MCP-Protocol-Version: 2026-07-28`, `Mcp-Method: tools/call`, `Mcp-Name: get_document`)
-
-**Response when the document is not found:**
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "result": {
-    "content": [{ "type": "text", "text": "Document not found: abc123" }],
-    "isError": true
-  }
+  "result": { "content": [{ "type": "text", "text": "Document not found: abc123" }], "isError": true }
 }
 ```
 
-`isError: true` results never carry `structuredContent` — see [Deviations From the Specification](#deviations-from-the-specification) item 3.
-
-**Request (Get Index Stats)** — requires the caller to hold `mcp.tools.index_stats.permissions` (default `Radmin-api`); see [Get Index Stats and the permission gate](#get-index-stats-and-the-permission-gate):
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 6,
-  "method": "tools/call",
-  "params": {
-    "name": "get_index_stats",
-    "arguments": {},
-    "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} }
-  }
-}
-```
-(headers: `MCP-Protocol-Version: 2026-07-28`, `Mcp-Method: tools/call`, `Mcp-Name: get_index_stats`)
-
-**Unauthorized/unknown tool** (identical response for a tool that does not exist and one the caller is not authorized for — an unauthorized caller cannot distinguish the two):
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 6,
-  "error": { "code": -32602, "message": "Unknown tool: get_index_stats" }
-}
-```
-(HTTP 200)
-
-#### Unexpected tool failures carry a correlation id, not a message
-
-An **unexpected** failure inside a tool never reaches the caller as text. It arrives as an `isError: true` result at HTTP 200 whose single content block is exactly:
+Calling an unknown tool — or one the caller is not authorized for — returns the identical error either way, at
+HTTP 200:
 
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "result": {
-    "content": [{ "type": "text", "text": "Error: Tool execution failed (error_code:5f0a1c8e-...)" }],
-    "isError": true
-  }
-}
+{ "jsonrpc": "2.0", "id": 6, "error": { "code": -32602, "message": "Unknown tool: get_index_stats" } }
 ```
 
-A tool that reports a server-side failure itself gets the same treatment through the error channel instead: `-32603` with the message `Tool execution failed (error_code:<uuid>)`. Either way the real exception message and stack trace go to the Fess log at **WARN** under that same `error_code`, and **that log line is the only way to diagnose the call** — the response deliberately says nothing else. Grep the Fess log for the uuid a client reports.
+**How an absent field is reported differs by tool.** `search` is the strict one: a `doc_id`, `title`, `url`,
+`score`, or `content_description` genuinely absent from the underlying document is omitted from the `hits[]`
+entry rather than filled in with `null` or `""` — which is why that schema's `items.required` is empty.
+`content_description` carries the same digest the text block shows: highlight markup stripped, falling back to
+truncated raw content when Fess's highlighter produced no fragment (a phrase query does this routinely), and
+omitted entirely when there was neither. `get_document` does the opposite, and marks all four fields required:
+it resolves `title`, `url`, and `content` with a `""` fallback, so an absent field arrives as an empty string.
+(A field present but mapped to a null value becomes the literal string `"null"` there, since the fallback is
+applied before the value is stringified.) `get_index_stats` strips nulls from its stats map before serializing.
 
-This is not defensiveness for its own sake: these messages routinely embed text this plugin never wrote. Fess's own `InvalidQueryException` carries the fully serialized OpenSearch query DSL, *including* the role and permission filter terms already merged into it, and a caller can provoke it with nothing but an out-of-range `start`. A fresh uuid per failure is what makes a user report ("I got `error_code:X`") pinpoint one log line.
+### `resources/list`
 
-**A rejected query is not an unexpected failure.** Fess raises `InvalidQueryException` for input the *caller* wrote — an unparseable query string, a sort field that does not exist, a `start` past the ceiling — so these are answered as `-32602` with a message you can act on, not a correlation id:
+Lists readable resources. `fess://index/stats` is omitted for a caller not authorized for `get_index_stats`;
+an unauthorized or default-configuration caller gets `"resources": []`.
 
-```json
-{ "jsonrpc": "2.0", "id": 3,
-  "error": { "code": -32602, "message": "The specified sort nope.asc is unsupported." } }
-```
-
-The text comes from Fess's own end-user message bundle (the same strings the search UI shows), never from `getMessage()` — so the DSL-bearing case above resolves to the deliberately uninformative `Could not process the specified query.` and the leak stays closed. These are logged at **DEBUG**, not WARN: the stack trace is not evidence of a server fault, and logging one per request would let any caller drive an unbounded volume of it by sending `q=foo AND`.
-
-**Caller-directed errors are not redacted.** An error describing what is wrong with the caller's own request — JSON-RPC `-32700`, `-32600`, `-32601`, or `-32602` — passes through verbatim, because those messages are written by this plugin and name nothing but the offending argument: `Unknown tool: get_index_stats`, `Missing required parameter: doc_id`, `Invalid type for parameter: q (expected a string)`. The split is fail-closed: any other code, including a new one added later, is redacted until someone decides otherwise. The `Document not found: abc123` result shown above is unaffected too — that is not a failure at all, but a normal `isError: true` result the tool builds itself.
-
-### 4. resources/list
-
-List available resources. `fess://index/stats` is omitted for a caller not authorized for `get_index_stats` (same gate, same permission).
-
-**Response** (authorized caller):
 ```json
 {
   "jsonrpc": "2.0",
@@ -548,31 +683,15 @@ List available resources. `fess://index/stats` is omitted for a caller not autho
   }
 }
 ```
-An unauthorized (or default-configuration, `mcp.auth.mode=none`) caller gets `"resources": []`. `cacheScope` follows the same `none` → `"public"`, otherwise `"private"` rule as `tools/list`.
 
-### 5. resources/read
+`cacheScope` follows the same `none` → `"public"`, otherwise `"private"` rule as `tools/list`.
 
-Read a specific resource by URI. Requires the `Mcp-Name` header to equal `params.uri`. Not cached by default (`mcp.cache.read.ttl.ms` defaults to `0`). This method is rate-limited (see [Configuration](#configuration)), the same as `tools/call`: both shapes below reach a Fess backend — `fess://document/<id>` makes the same document fetch `get_document` does, and `fess://index/stats` runs a live cluster/JVM stats collection.
+### `resources/read`
 
-**Request:**
-```bash
-curl -sS -X POST http://localhost:8080/mcp \
-  -H 'Content-Type: application/json' \
-  -H 'MCP-Protocol-Version: 2026-07-28' \
-  -H 'Mcp-Method: resources/read' \
-  -H 'Mcp-Name: fess://index/stats' \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 8,
-    "method": "resources/read",
-    "params": {
-      "uri": "fess://index/stats",
-      "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} }
-    }
-  }'
-```
+Reads one resource. Requires `Mcp-Name` to equal `params.uri`. Rate-limited like `tools/call`, because both
+accepted URI shapes reach a Fess backend: `fess://document/<id>` performs the same document fetch as
+`get_document`, and `fess://index/stats` runs a live cluster and JVM stats collection.
 
-**Response:**
 ```json
 {
   "jsonrpc": "2.0",
@@ -591,13 +710,13 @@ curl -sS -X POST http://localhost:8080/mcp \
 }
 ```
 
-`fess://document/{doc_id}` (the resource-template shape from `resources/templates/list`) is also accepted here, e.g. `uri: "fess://document/abc123"`; a `uri` matching neither shape, or `fess://index/stats` read by an unauthorized caller, gets the same `-32602 Resource not found: <uri>` (HTTP 200) regardless of which of the two applies.
+A `uri` matching neither shape, and `fess://index/stats` read by an unauthorized caller, both get the same
+`-32602 Resource not found: <uri>` at HTTP 200. TTL: `mcp.cache.read.ttl.ms`, `0` by default.
 
-### 6. resources/templates/list
+### `resources/templates/list`
 
-List parameterized resource templates (RFC 6570 URI templates). Always `cacheScope: "public"`, with no auth-mode-dependent rule (unlike `tools/list` and `resources/list`).
+Lists RFC 6570 URI templates. Always `cacheScope: "public"`, with no auth-mode-dependent rule.
 
-**Response:**
 ```json
 {
   "jsonrpc": "2.0",
@@ -617,11 +736,10 @@ List parameterized resource templates (RFC 6570 URI templates). Always `cacheSco
 }
 ```
 
-### 7. prompts/list
+### `prompts/list`
 
-List available prompts. Always `cacheScope: "public"`.
+Always `cacheScope: "public"`.
 
-**Response:**
 ```json
 {
   "jsonrpc": "2.0",
@@ -631,9 +749,7 @@ List available prompts. Always `cacheScope: "public"`.
       {
         "name": "basic_search",
         "description": "Perform a basic search with a query string",
-        "arguments": [
-          { "name": "query", "description": "The search query", "required": true }
-        ]
+        "arguments": [{ "name": "query", "description": "The search query", "required": true }]
       },
       {
         "name": "advanced_search",
@@ -651,30 +767,10 @@ List available prompts. Always `cacheScope: "public"`.
 }
 ```
 
-### 8. prompts/get
+### `prompts/get`
 
-Get a prompt with arguments substituted. Requires the `Mcp-Name` header to equal `params.name`. Not a `CacheableResult`.
+Substitutes prompt arguments. Requires `Mcp-Name` to equal `params.name`. Not a cacheable result.
 
-**Request:**
-```bash
-curl -sS -X POST http://localhost:8080/mcp \
-  -H 'Content-Type: application/json' \
-  -H 'MCP-Protocol-Version: 2026-07-28' \
-  -H 'Mcp-Method: prompts/get' \
-  -H 'Mcp-Name: basic_search' \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 11,
-    "method": "prompts/get",
-    "params": {
-      "name": "basic_search",
-      "arguments": { "query": "machine learning" },
-      "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} }
-    }
-  }'
-```
-
-**Response:**
 ```json
 {
   "jsonrpc": "2.0",
@@ -687,325 +783,236 @@ curl -sS -X POST http://localhost:8080/mcp \
 }
 ```
 
-### 9. completion/complete
+### `completion/complete`
 
-Request argument autocomplete. Not a `CacheableResult`. The completion source depends on `ref.type` and the argument name:
+Argument autocomplete. Not a cacheable result. Rate-limited like `tools/call`. The `values` array is capped at
+100 entries.
 
-- `ref.type == "ref/prompt"` — dispatched by argument name:
-  - `basic_search.query`, `advanced_search.query`: candidates come from the Fess suggest engine.
-  - `advanced_search.sort`: candidates are prefix-filtered from a static enum (`score.desc`, `score.asc`, `last_modified.desc`, `last_modified.asc`, `create_timestamp.desc`, `create_timestamp.asc`).
-  - `advanced_search.num`: no completions are returned.
-- `ref.type == "ref/resource"`: no completions are returned (there is no source for `doc_id` completion).
-- Any other `ref.type`: no completions are returned.
+The completion source depends on `ref.type` and the argument name:
 
-The `values` array is capped at 100 entries. This method is rate-limited (see [Configuration](#configuration)), the same as `tools/call`.
+- `ref.type == "ref/prompt"`:
+  - `basic_search.query`, `advanced_search.query` — candidates from the Fess suggest engine.
+  - `advanced_search.sort` — prefix-filtered from a static enum: `score.desc`, `score.asc`,
+    `last_modified.desc`, `last_modified.asc`, `create_timestamp.desc`, `create_timestamp.asc`.
+  - `advanced_search.num` — no completions.
+- `ref.type == "ref/resource"` — no completions; there is no source for `doc_id` completion.
+- Any other `ref.type` — no completions.
 
-**Request:**
-```bash
-curl -sS -X POST http://localhost:8080/mcp \
-  -H 'Content-Type: application/json' \
-  -H 'MCP-Protocol-Version: 2026-07-28' \
-  -H 'Mcp-Method: completion/complete' \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 12,
-    "method": "completion/complete",
-    "params": {
-      "ref": { "type": "ref/prompt", "name": "basic_search" },
-      "argument": { "name": "query", "value": "mach" },
-      "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} }
-    }
-  }'
-```
-
-**Response:**
 ```json
 {
   "jsonrpc": "2.0",
   "id": 12,
   "result": {
-    "completion": {
-      "values": ["machine learning", "machine translation"],
-      "total": 2,
-      "hasMore": false
-    }
+    "completion": { "values": ["machine learning", "machine translation"], "total": 2, "hasMore": false }
   }
 }
 ```
 
-## Search Tool Parameters
+## Tool reference
+
+### `search`
+
+**Arguments**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `q` | string | Yes | Query string for full-text search |
-| `start` | integer | No | Start position for pagination (default: 0) |
-| `offset` | integer | No | Alias for `start`. Used only when `start` is absent; if both are sent, `start` wins (even when `start` is itself unparseable or negative). |
-| `num` | integer | No | Number of results to return (default: `mcp.default.page.size`, 3). Greater than `paging.search.page.max.size` is clamped to that maximum; **zero or negative falls back to the default**, not the maximum. |
-| `sort` | string | No | Sort order, as `<field>.asc` / `<field>.desc` (e.g. `score.desc`, `last_modified.desc`). The advertised `inputSchema` description lists the fields this deployment accepts, so a client does not have to guess: Fess ships `score`, `filename`, `created`, `content_length`, `last_modified`, `timestamp`, `click_count`, `favorite_count`, and `query.additional.sort.fields` extends it. An unaccepted field is rejected with `-32602` naming it |
+| `q` | string | Yes | Query string |
+| `start` | integer | No | Start position for paging (default `0`) |
+| `offset` | integer | No | Alias for `start`, used only when `start` is absent. When both are sent, **`start` wins** — including when `start` is itself unparseable or negative, so the alias never silently repairs a broken `start` and pages from somewhere the caller did not ask for. |
+| `num` | integer | No | Results per page. Default `mcp.default.page.size` (3). A value above `paging.search.page.max.size` is clamped to that maximum; **zero or negative falls back to the default**, not the maximum. |
+| `sort` | string | No | `<field>.asc` / `<field>.desc`. The advertised `inputSchema` description lists the fields this deployment accepts, so a client need not guess: Fess ships `score`, `filename`, `created`, `content_length`, `last_modified`, `timestamp`, `click_count`, `favorite_count`, and `query.additional.sort.fields` extends the list. An unaccepted field is rejected with `-32602` naming it. |
 | `fields` | object | No | Field filters keyed by field name, e.g. `{"label": ["label1"]}` |
 | `lang` | string | No | Language filter |
-| `as` | object | No | Advanced search conditions, keyed by condition name (`q`, `epq`, `oq`, `nq`, `filetype`, `sitesearch`, `timestamp`, `occt`). Each value is an array of strings. Combined with `q`, never instead of it — see the note below |
+| `as` | object | No | Advanced search conditions keyed by condition name (`q`, `epq`, `oq`, `nq`, `filetype`, `sitesearch`, `timestamp`, `occt`), each an array of strings. Combined with `q`, never instead of it — see the note below. |
 | `ex_q` | array of string | No | Extra queries |
 | `sdh` | string | No | Similar document hash |
 
-> Note: `as` narrows `q`, it does not replace it. Fess builds the query from the advanced conditions *instead of* the plain query string as soon as one of them is query-bearing, so `q` is folded into `as.q` before the search runs. `q=zebrafish` with `as={"filetype":["html"]}` returns HTML documents matching *zebrafish*; before 15.8 it returned every HTML document, discarding `q` with no error. If you send `as.q` as well, both are kept.
+**Result** (`structuredContent`)
 
-> Note: an argument's **top-level** JSON type is enforced — `q`, `sort`, and `sdh` must be strings, `fields` and `as` objects, `ex_q` an array — and a mismatch is rejected with `-32602` naming the argument and the expected type, e.g. `Invalid type for parameter: q (expected a string)`. The same holds for `q` on `suggest` and `doc_id` on `get_document`. `start`, `offset`, `num`, and `lang` are deliberate exceptions: their accessors accept a numeric string (or, for `lang`, any value) by design, so rejecting one would be a behaviour change rather than a fix. Inside `fields`, `as`, and `ex_q`, each value must be an array, and `fields`/`ex_q` elements must be strings — a mismatch is rejected with `-32602` naming the path, e.g. `Invalid type for parameter: as.q (expected an array)`. Formats and ranges are still not validated; see [Deviations From the Specification](#deviations-from-the-specification) item 12.
+| Field | Type | Always present | Description |
+|-------|------|----------------|-------------|
+| `hits` | array | Yes | Each entry may carry `doc_id`, `title`, `url`, `score`, `content_description`; none is guaranteed |
+| `total` | integer | Yes | Number of matching documents |
+| `total_relation` | string | No | `EQUAL_TO` when `total` is exact, `GREATER_THAN_OR_EQUAL_TO` when the engine stopped counting. Omitted rather than fabricated when Fess did not supply one. |
+| `has_more` | boolean | Yes | Whether a page exists after this one |
+| `collapsed` | boolean | Yes | Whether near-duplicate results were folded, so fewer than `total` items are obtainable |
+| `partial` | boolean | Yes | Whether the search did not complete, so these results are not the whole answer |
 
-## Suggest Tool Parameters
+> **`as` narrows `q`, it does not replace it.** Fess builds the query from the advanced conditions *instead
+> of* the plain query string as soon as one of them is query-bearing, so `q` is folded into `as.q` before the
+> search runs. `q=zebrafish` with `as={"filetype":["html"]}` returns HTML documents matching *zebrafish*.
+> (Before 15.8 it returned every HTML document, discarding `q` with no error.) If you send `as.q` as well,
+> both are kept.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `q` | string | Yes | Query prefix for autocomplete |
-| `num` | integer | No | Number of suggestions (default: 10) |
-
-> Note: `num` is capped by Fess's `paging.search.page.max.size` configuration. Requests exceeding this upper bound are clamped to the configured maximum.
-
-### `total` counts matches; `collapsed` says whether you can reach them all
-
-`total` is the number of documents that matched, exactly as Fess computes it. Fess's
-`result.collapsed` setting — **`true` in the shipped `system.properties`** — folds near-duplicate
-results *after* that count, so with it on fewer than `total` items are obtainable however far a
-client pages. `collapsed` reports it, because otherwise `total` reads as a promise the caller
-cannot fulfil.
-
-Measured on a corpus of 30 near-identical documents with collapsing on: `total` is 30 with
-`total_relation` `EQUAL_TO`, 29 items are returned, and `start=29` yields an empty array. Fess's
-own `/api/v2/search` reports the same 30/29 split — the count is not wrong, it simply answers a
-different question from "how many can I fetch". Set `result.collapsed=false` if you need the two
-to agree.
-
-## Get Document Tool Parameters
+### `suggest`
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `doc_id` | string | Yes | Document ID to retrieve |
+| `q` | string | Yes | Query prefix to autocomplete |
+| `num` | integer | No | Number of suggestions (default 10), capped by `paging.search.page.max.size` |
 
-A `doc_id` comes from a `search` hit — every hit carries one. It is also what the
-`fess://document/{doc_id}` resource template takes.
+Returns `{"suggestions": [{"text": "..."}]}`.
 
-**`content` is bounded by `mcp.content.max.length` (10000 by default), and the result says so.**
-`truncated` is `true` when the document was longer, and `content_length` is its untruncated
-length, so a client can report "showing 10000 of 20957 characters" rather than silently
-summarising part of a document. Do not read the trailing `...` as the signal: it is
-indistinguishable from a document that genuinely ends in one. To return whole documents, raise
-`mcp.content.max.length`; this tool does not offer a way to fetch the remainder.
+### `get_document`
 
-## Get Index Stats and the Permission Gate
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `doc_id` | string | Yes | Document ID, as carried by every `search` hit |
 
-`get_index_stats` (and the equivalent `fess://index/stats` resource) exposes the index name, document count, and JVM heap usage. Since `2026-07-28` it is gated behind `mcp.tools.index_stats.permissions` (default `Radmin-api`): reading it bypasses Fess's normal role-based search filtering, so it is treated as an administrative capability rather than a search primitive open to every caller.
+Returns `doc_id`, `title`, `url`, `content`, `truncated`, and `content_length` — all required. See
+[Reading a search result](#reading-a-search-result) for what `truncated` and `content_length` mean.
 
-Because the default `mcp.auth.mode=none` never resolves any permission for any caller, **the default configuration disables this tool and resource for everyone**, not just anonymous users — there is no way for a `none`-mode caller to ever hold `Radmin-api`. To restore the pre-`2026-07-28` open behaviour, set:
+### `get_index_stats`
 
-```
-mcp.tools.index_stats.permissions=
-```
+Takes no arguments. Returns `index` (`index_name`, `document_count`, and `error` when stats collection
+failed), `config` (`max_page_size`), and `system` (`memory` with `total_bytes`, `free_bytes`, `used_bytes`,
+`max_bytes`). Gated — see [The `get_index_stats` gate](#the-get_index_stats-gate).
 
-(a blank value disables the gate entirely). To keep it gated but usable, switch to `mcp.auth.mode=fess_token` or `mcp.auth.mode=oauth` and grant the configured permission to the credential/token/scope in question.
+### Argument type checking
 
-**Grant a searchable role alongside it.** A principal's permissions *are* its role filter, and the guest roles are added only for a principal that has no permissions of its own (`role.search.default.permissions` is blank by default). A token or `mcp.oauth.permission.claim` carrying only `Radmin-api` therefore unlocks `get_index_stats` and gets **zero hits from `search`**, because no document carries `Radmin-api` as a role. Grant the searchable role too (e.g. `Radmin-api,Rguest`), or set `role.search.default.permissions`.
+An argument's **top-level** JSON type is enforced: `q`, `sort`, and `sdh` must be strings, `fields` and `as`
+objects, `ex_q` an array. A mismatch is `-32602` naming the argument and the expected type, for example
+`Invalid type for parameter: q (expected a string)`. The same holds for `q` on `suggest` and `doc_id` on
+`get_document`.
 
-An unauthorized caller cannot distinguish "this tool doesn't exist" from "you may not use this tool": both `tools/call` and `resources/read` answer with the identical `-32602` error a genuinely-unknown tool or resource would get.
+`start`, `offset`, `num`, and `lang` are deliberate exceptions: their accessors accept a numeric string (or,
+for `lang`, any value) by design, so rejecting one would be a behaviour change rather than a fix.
 
-### Query Syntax
+Inside `fields`, `as`, and `ex_q`, each value must be an array, and `fields`/`ex_q` elements must be strings;
+a mismatch is `-32602` naming the path, for example `Invalid type for parameter: as.q (expected an array)`.
 
-The search tool supports Lucene-like query syntax:
+Formats, ranges, and enums are **not** validated — see [deviation 12](#deviations-from-the-specification).
 
-| Syntax | Description | Example |
-|--------|-------------|---------|
-| `term1 term2` | AND search (default) | `machine learning` |
-| `term1 OR term2` | OR search | `cat OR dog` |
-| `"phrase"` | Phrase search | `"machine learning"` |
-| `-term` | Exclude term | `python -java` |
+## Error model
 
-## Usage Examples
-
-### Using curl
-
-```bash
-# server/discover
-curl -sS -X POST http://localhost:8080/mcp \
-  -H 'Content-Type: application/json' \
-  -H 'MCP-Protocol-Version: 2026-07-28' \
-  -H 'Mcp-Method: server/discover' \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "server/discover",
-    "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } }
-  }'
-
-# Search documents
-curl -sS -X POST http://localhost:8080/mcp \
-  -H 'Content-Type: application/json' \
-  -H 'MCP-Protocol-Version: 2026-07-28' \
-  -H 'Mcp-Method: tools/call' \
-  -H 'Mcp-Name: search' \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 2,
-    "method": "tools/call",
-    "params": {
-      "name": "search",
-      "arguments": { "q": "machine learning", "num": 5 },
-      "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} }
-    }
-  }'
-
-# Get index statistics (requires mcp.auth.mode=fess_token or oauth, and the configured permission)
-curl -sS -X POST http://localhost:8080/mcp \
-  -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer <fess-access-token>' \
-  -H 'MCP-Protocol-Version: 2026-07-28' \
-  -H 'Mcp-Method: tools/call' \
-  -H 'Mcp-Name: get_index_stats' \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 3,
-    "method": "tools/call",
-    "params": {
-      "name": "get_index_stats",
-      "arguments": {},
-      "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} }
-    }
-  }'
-```
-
-### Using Python
-
-```python
-import requests
-import json
-
-url = "http://localhost:8080/mcp"
-headers = {
-    "Content-Type": "application/json",
-    "MCP-Protocol-Version": "2026-07-28",
-    "Mcp-Method": "tools/call",
-    "Mcp-Name": "search",
-}
-
-search_request = {
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "tools/call",
-    "params": {
-        "name": "search",
-        "arguments": {"q": "elasticsearch", "num": 10},
-        "_meta": {
-            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-            "io.modelcontextprotocol/clientCapabilities": {},
-        },
-    },
-}
-
-response = requests.post(url, headers=headers, data=json.dumps(search_request))
-result = response.json()
-print(json.dumps(result, indent=2))
-```
-
-### Using with an MCP Client
-
-Client support for `2026-07-28` is not universal yet, and a client that does not speak it cannot
-connect at all — there is no legacy handshake to fall back to. Check your client's SDK before
-configuring it:
-
-| Client / SDK | Newest protocol revision | Connects directly |
-|---|---|---|
-| MCP **Python** SDK 2.0 | `2026-07-28` | Yes — use `ClientSession.discover()`; there is no `initialize` to call |
-| MCP **TypeScript** SDK 1.30 | `2025-11-25` | No |
-| `mcp-remote` | (TypeScript SDK) | No |
-| Clients built on the TypeScript SDK | (TypeScript SDK) | No |
-
-A TypeScript-SDK client fails on its opening `initialize` with this server's own diagnostic:
+Errors are standard JSON-RPC 2.0:
 
 ```json
-{"jsonrpc":"2.0","id":0,"error":{"code":-32601,
- "message":"initialize was removed in MCP 2026-07-28; this server speaks 2026-07-28",
- "data":{"supportedVersions":["2026-07-28"]}}}
+{ "jsonrpc": "2.0", "id": 1, "error": { "code": -32601, "message": "Unknown method: invalid_method" } }
 ```
 
-Until those SDKs catch up, such a client needs a bridge that speaks an older revision to the
-client and `2026-07-28` to this endpoint — translating `initialize` into
-[`server/discover`](#1-serverdiscover) and adding the request-metadata headers and `params._meta`
-described above. Once the client's SDK supports `2026-07-28`, point it at the endpoint directly.
+The HTTP status for a given JSON-RPC code depends on *where* the error is raised, not on the code alone. For
+example `-32602` is HTTP 400 for a malformed `params._meta`, but HTTP 200 for an unknown or unauthorized tool,
+a wrong-typed tool argument, or an inbound `cursor`.
 
-**`mcp-remote` does not currently speak `2026-07-28`.** As of this writing, `mcp-remote` (the most common local-to-remote MCP bridge for desktop clients) is built against the `1.x` generation of the TypeScript SDK, which still performs the legacy `initialize` handshake — it will fail against this endpoint, since `initialize` now returns `-32601`. The MCP SDKs that add `2026-07-28` support (TypeScript/Python SDK v2, in beta as of this writing) ship under new, separate package names rather than as a drop-in upgrade to `mcp-remote`'s dependency. Until a `2026-07-28`-aware bridge is available, drive this endpoint directly with `curl`/`requests` as shown above, or with an MCP client whose own HTTP transport has been updated for `2026-07-28`.
+### Error codes
 
-## Error Handling
+| Code | Name | Description |
+|------|------|-------------|
+| -32700 | Parse error | Invalid JSON. Also covers a JSON array body: the array shape is rejected before Request-object validation, so a batch request never reaches it. |
+| -32600 | Invalid Request | Not a valid Request object (for example an explicit `"id": null`) |
+| -32601 | Method not found | Unknown method, including the retired `initialize` and `ping` |
+| -32602 | Invalid params | Invalid parameters; also an unknown, gated, or otherwise unusable tool/prompt/resource, a tool argument whose JSON type disagrees with `inputSchema`, and a non-null inbound `cursor` |
+| -32603 | Internal error | Internal JSON-RPC error; also a tool reporting a server-side failure, whose message is always the fixed `Tool execution failed (error_code:<uuid>)` |
+| -32000 | RateLimited | `mcp.rate.limit.per.minute` exceeded. Always paired with HTTP 429, a `Retry-After` header, and `data.retryAfterSeconds`. This number sits in the range the MCP schema marks implementation-defined (`-32000`–`-32019`), which receivers are told not to give cross-implementation meaning — **key off the HTTP status and `Retry-After`, not the code.** |
+| -32020 | HeaderMismatch | A required metadata header is missing, duplicated, or disagrees with the body. A missing or incomplete `params._meta` is `-32602` instead: the specification scopes this code to the header layer. |
+| -32021 | MissingRequiredClientCapability | Defined by this server but **never emitted** — nothing here currently requires an optional client capability. |
+| -32022 | UnsupportedProtocolVersion | The declared protocol version is not `2026-07-28`; `error.data` carries both `supported` and `requested`. |
 
-The API returns standard JSON-RPC 2.0 error responses:
+`-32002` (`Resource not found`, used by earlier revisions) no longer exists as a distinct code: a not-found
+resource, prompt, or tool is `-32602` in `2026-07-28`.
+
+### Tool errors
+
+An **unexpected** failure inside a tool never reaches the caller as text. It arrives as an `isError: true`
+result at HTTP 200 whose single content block is exactly:
 
 ```json
 {
   "jsonrpc": "2.0",
-  "id": 1,
-  "error": {
-    "code": -32601,
-    "message": "Unknown method: invalid_method"
+  "id": 3,
+  "result": {
+    "content": [{ "type": "text", "text": "Error: Tool execution failed (error_code:5f0a1c8e-...)" }],
+    "isError": true
   }
 }
 ```
 
-Unlike a strict per-code HTTP status mapping, the HTTP status for a given JSON-RPC code depends on *where* it is raised: for example `-32602` is HTTP 400 for a malformed `params._meta`, but HTTP 200 (with a JSON-RPC error body) for an unknown/unauthorized tool, prompt, or resource, for a wrong-typed tool argument, or for an inbound `cursor`.
+A tool reporting a server-side failure through the error channel gets the same treatment: `-32603` with the
+message `Tool execution failed (error_code:<uuid>)`. Either way the real exception and stack trace go to the
+Fess log at **WARN** under that uuid, and **that log line is the only way to diagnose the call.**
 
-An error raised by a tool is a special case: caller-directed codes carry their real message, a rejected query carries the resolved text of Fess's own end-user message, and anything else is replaced with a correlation id you must look up in the Fess log. See [Unexpected tool failures carry a correlation id, not a message](#unexpected-tool-failures-carry-a-correlation-id-not-a-message).
+This is not defensiveness for its own sake. Fess's `InvalidQueryException` carries the fully serialized
+OpenSearch query DSL, *including* the role and permission filter terms already merged into it, and a caller
+can provoke it with nothing but an out-of-range `start`. A fresh uuid per failure is what makes a user report
+("I got `error_code:X`") pinpoint one log line.
 
-### Error Codes
+**A rejected query is not an unexpected failure.** Input the *caller* wrote — an unparseable query string, a
+sort field that does not exist, a `start` past the ceiling — is answered as `-32602` with a message you can
+act on:
 
-| Code | Message | Description |
-|------|---------|--------------|
-| -32700 | Parse error | Invalid JSON was received; also covers a JSON array request body — `Json.parseObject` rejects the array shape before `McpRequest.parse` ever runs, so a batch request never reaches Request-object validation |
-| -32600 | Invalid Request | The JSON sent is not a valid Request object (e.g. an explicit `"id": null`) |
-| -32601 | Method not found | The method does not exist, including the retired `initialize` and `ping` |
-| -32602 | Invalid params | Invalid method parameter(s), including a tool argument whose JSON type disagrees with the tool's `inputSchema`; also covers an unknown, gated, or otherwise unusable tool/prompt/resource, and a non-null inbound `cursor` (this server never issues one; an explicit `null` is treated as absent) |
-| -32603 | Internal error | Internal JSON-RPC error; also used for a tool reporting a server-side failure, whose message is always the fixed `Tool execution failed (error_code:<uuid>)` |
-| -32000 | RateLimited | The caller exceeded `mcp.rate.limit.per.minute`. Always paired with HTTP 429 and a `Retry-After` header, plus `data.retryAfterSeconds`. This number sits in the JSON-RPC range the MCP schema marks implementation-defined (`-32000`–`-32019`), which receivers are told not to give cross-implementation meaning — **key off the HTTP status and `Retry-After`, not the code** |
-| -32020 | HeaderMismatch | A required MCP request-metadata header (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`) is missing, is sent more than once, or disagrees with the request body. A missing or incomplete `params._meta` is `-32602` instead — the specification scopes this code to the header layer |
-| -32021 | MissingRequiredClientCapability | The request needs a client capability the client did not declare. **Defined by this server but never emitted** — nothing in this plugin currently requires an optional client capability. |
-| -32022 | UnsupportedProtocolVersion | The client's declared protocol version is not `2026-07-28`; `error.data` carries both `supported` and `requested` |
+```json
+{ "jsonrpc": "2.0", "id": 3,
+  "error": { "code": -32602, "message": "The specified sort nope.asc is unsupported." } }
+```
 
-`-32002` (`Resource not found`, used by earlier protocol revisions) no longer exists as a distinct code: a not-found resource, prompt, or tool is `-32602` in `2026-07-28`.
+The text comes from Fess's own end-user message bundle — the same strings the search UI shows — never from
+`getMessage()`, so the DSL-bearing case above resolves to the deliberately uninformative
+`Could not process the specified query.` These are logged at **DEBUG**, not WARN: the stack trace is not
+evidence of a server fault, and logging one per request would let any caller drive an unbounded volume of it
+by sending `q=foo AND`.
 
-## OAuth 2.1 Setup
+**Caller-directed errors are not redacted.** `-32700`, `-32600`, `-32601`, and `-32602` pass through verbatim,
+because those messages are written by this plugin and name nothing but the offending argument:
+`Unknown tool: get_index_stats`, `Missing required parameter: doc_id`,
+`Invalid type for parameter: q (expected a string)`. The split is fail-closed: any other code, including one
+added later, is redacted until someone decides otherwise. A normal `isError: true` result a tool builds itself
+— `Document not found: abc123` — is not a failure at all and is unaffected.
 
-Setting `mcp.auth.mode=oauth` turns on RFC 6750 Bearer-JWT verification against an external authorization server, per RFC 9728 (OAuth 2.0 Protected Resource Metadata) and the MCP Authorization specification. This mode is a pure resource-server token *verifier*: it never issues tokens itself.
+## OAuth 2.1 reference
 
-1. **`mcp.oauth.issuer`** (required) — the authorization server's issuer URL. Without this, `oauth` mode is not usable and every request falls back to `none`-mode behaviour (reported at ERROR — see [When the configuration is not usable](#when-the-configuration-is-not-usable)).
-2. **`mcp.oauth.audience`** (required) — the canonical resource URI this server checks a token's `aud` claim against (RFC 8707), and the value served as the `resource` field of the RFC 9728 protected-resource metadata document (see below). **This server never derives it from the request** (e.g. from the `Host` header): an unset audience makes `oauth` mode unusable, the same as an unset issuer, falling back to `none`-mode behaviour. Deriving a security-critical resource identifier from a caller-controlled `Host` header would let an attacker holding a token legitimately minted by the *same* issuer for a *different* resource simply send that resource's hostname and be admitted — the confused-deputy case RFC 8707 audience binding exists to prevent, so this server requires an explicit, operator-pinned value instead. **It must end in `/mcp`** — this server's protected-resource metadata endpoint only serves the well-known path for a resource path ending in that segment, so an audience ending anywhere else also makes `oauth` mode unusable. Example: `https://fess.example.com/mcp`.
-3. **`mcp.oauth.jwks.uri`** (required) — the authorization server's JWKS endpoint. Signatures are verified RS256-only; the fetched key set is cached for `mcp.oauth.jwks.cache.seconds` (default 300). A configured cache lifetime below 60 seconds is raised to 60 — see the settings table below. Without this, `oauth` mode is not usable and falls back to `none`-mode behaviour — a deployment that instead let this mode be selected with no JWKS endpoint configured would 401 every request with a misleading "invalid token" message, since the failure only surfaces once a token-bearing request actually reaches JWKS resolution.
-4. **`mcp.oauth.required.scopes`** (optional) — a comma-separated list of scopes a token must carry, in full, before the caller is admitted. The scopes are read from the token's `scope` claim (RFC 9068) or, when that is absent, its `scp` claim — **Microsoft Entra ID and Okta use `scp` and never emit `scope`**, and either a space-delimited string or a JSON array is accepted, since Entra ID uses the former and Okta the latter. **Write this using the authorization server's own leaf scopes** — the literal scopes an issued token actually carries. This server performs a plain subset check with no scope-hierarchy resolution: if your authorization server treats (say) `fess:admin` as implying `fess:search`, list `fess:search` explicitly too, because this server will not expand it for you.
-5. **Permission mapping** — how a verified token's claims become Fess's own encoded permission strings (e.g. `Radmin-api`, `Rguest`), which drive both search-result role filtering and the `get_index_stats` gate. Two independent, additive sources:
-   - **`mcp.oauth.permission.claim`** — the name of a JWT claim (a JSON array, or a space-delimited string) whose values are already Fess-encoded permissions.
-   - **`mcp.oauth.scope.permission.map`** — a comma-separated list of `scope=permission` pairs, keyed on the scopes resolved from `scope`/`scp` above, e.g. `fess:search=Rguest,fess:search=1guest,fess:admin=Radmin-api`. A scope may appear in more than one pair; every mapped permission accumulates.
+`mcp.auth.mode=oauth` turns on RFC 6750 bearer-JWT verification against an external authorization server, per
+RFC 9728 (OAuth 2.0 Protected Resource Metadata) and the MCP Authorization specification. This mode is a pure
+resource-server token *verifier*: it never issues tokens.
 
-   If neither source contributes anything for a given token, the caller falls back to Fess's configured guest role list, exactly as an anonymous `none`-mode caller would.
+**Required settings**
 
-### When the configuration is not usable
+1. **`mcp.oauth.issuer`** — the authorization server's issuer URL.
+2. **`mcp.oauth.audience`** — the canonical resource URI checked against a token's `aud` claim (RFC 8707), and
+   served as the `resource` field of the metadata document. **It must end in `/mcp`.** Example:
+   `https://fess.example.com/mcp`. This server never derives it from the request: deriving a
+   security-critical resource identifier from a caller-controlled `Host` header would let an attacker holding
+   a token legitimately minted by the *same* issuer for a *different* resource simply send that resource's
+   hostname and be admitted — the confused-deputy case RFC 8707 audience binding exists to prevent.
+3. **`mcp.oauth.jwks.uri`** — the authorization server's JWKS endpoint. Signatures are verified **RS256 only**;
+   the fetched key set is cached for `mcp.oauth.jwks.cache.seconds` (default 300, values below 60 raised to 60).
 
-`mcp.auth.mode=oauth` with an unset `mcp.oauth.issuer`, `mcp.oauth.audience`, or `mcp.oauth.jwks.uri` — or an audience that does not end in `/mcp` — is **not** a hard failure: the endpoint falls back to `none`-mode behaviour and serves `/mcp` anonymously. That fallback is reported at ERROR, naming all three keys, and the accompanying `mcp.auth.mode=none` WARN says every caller is now anonymous.
+**Optional settings**
 
-"Anonymously" describes how roles are resolved, and it is not the whole story for a client that keeps sending the credential it was configured with. In `none` mode this plugin does not own role resolution, so Fess's own `RoleQueryHelper` runs and hands the request to `AccessTokenService`, which reads the raw `Authorization` header and interprets it as a **Fess access token**. An OAuth bearer JWT therefore does not match any Fess token and is rejected (`Invalid token: ...`), and an `Authorization: Basic ...` header is rejected earlier still (`Invalid format: ...`) — so `search` and `get_document` fail with `isError: true` for precisely the clients that were working before the fallback. A client must drop its `Authorization` header to actually be served anonymously. This is long-standing Fess behaviour rather than something this revision introduced, but it is what the fallback means in practice.
+4. **`mcp.oauth.required.scopes`** — scopes a token must carry in full. Read from the token's `scope` claim
+   (RFC 9068) or, when absent, its `scp` claim — **Microsoft Entra ID and Okta use `scp` and never emit
+   `scope`** — accepting either a space-delimited string (Entra ID) or a JSON array (Okta). Write these using
+   the authorization server's own **leaf** scopes: this server performs a plain subset check with no
+   hierarchy resolution, so if your authorization server treats `fess:admin` as implying `fess:search`, list
+   `fess:search` explicitly too.
+5. **Permission mapping** — how a verified token's claims become Fess's encoded permission strings (for
+   example `Radmin-api`, `Rguest`), which drive both search-result role filtering and the `get_index_stats`
+   gate. Two independent, additive sources:
+   - **`mcp.oauth.permission.claim`** — a JWT claim name (a JSON array, or a space-delimited string) whose
+     values are already Fess-encoded permissions.
+   - **`mcp.oauth.scope.permission.map`** — comma-separated `scope=permission` pairs, keyed on the scopes
+     resolved above, e.g. `fess:search=Rguest,fess:search=1guest,fess:admin=Radmin-api`. A scope may appear in
+     more than one pair; every mapped permission accumulates.
 
-**This is not a startup-only check.** Every request re-reads `mcp.auth.mode` and the `mcp.oauth.*` keys, and Fess re-reads its properties file within about five seconds of an edit, so `/mcp` can flip between "credential required" and "anonymous for everyone" on a live server with no restart. The startup log line therefore is not the whole story: a transition is logged when it happens — once per transition, not once per request, because this is an unauthenticated endpoint and a per-request WARN would be a disk-filling amplifier a caller controls. Going the other way (a fix taking effect) is logged at INFO.
-
-"OAuth was configured but rejected" is tracked as a state distinct from "the operator chose `none`", so an operator who meant to enable OAuth and got the configuration wrong is told so, rather than seeing the same message a deliberately unauthenticated deployment sees. That also means flipping between `none` and a typo'd mode string is correctly *not* logged: both are the same posture.
-
-### Deployments under a context path
-
-`mcp.oauth.audience` must *end in* `/mcp`, but it may carry leading path segments: if Fess runs under a context path (`FESS_CONTEXT_PATH` / `-Dfess.context.path`) or behind a reverse proxy mounting it at a subpath, the correct audience is `https://fess.example.com/api/mcp`, and the protected-resource metadata document is served at `https://fess.example.com/api/.well-known/oauth-protected-resource/mcp`.
-
-That URL is built under the application's own prefix rather than the host-rooted form RFC 9728 §3.1 specifies (`https://fess.example.com/.well-known/oauth-protected-resource/api/mcp`). The deviation is forced: the §3.1 URL lies outside the servlet context and Fess cannot serve it under a context path at all. The two forms are identical when Fess is deployed at the root. Clients that follow the `resource_metadata` URL advertised in the `WWW-Authenticate` challenge — the discovery flow RFC 9728 and the MCP Authorization specification both prescribe — are unaffected; a client that instead constructs the §3.1 URL itself will get a 404 under a subpath deployment. See [Deviations From the Specification](#deviations-from-the-specification) item 11.
+   If neither source contributes anything, the caller falls back to Fess's configured guest roles, exactly as
+   an anonymous `none`-mode caller would.
 
 ### Accepted token `typ`
 
-Access tokens are accepted with a `typ` header of `at+jwt` or `application/at+jwt` (RFC 9068 §4), with `typ: JWT`, or with no `typ` at all — matched case-insensitively. Any other `typ` is rejected. The two RFC 9068 values were previously rejected; `typ: JWT` is what Entra ID, Auth0, Okta, and a default-configured Keycloak actually emit for access tokens, which is why accepting only `at+jwt` is not an option.
+Access tokens are accepted with a `typ` header of `at+jwt` or `application/at+jwt` (RFC 9068 §4), with
+`typ: JWT`, or with no `typ` at all — matched case-insensitively. Any other `typ` is rejected. `typ: JWT` is
+what Entra ID, Auth0, Okta, and a default-configured Keycloak actually emit for access tokens, so accepting
+only `at+jwt` is not an option.
 
-Widening this does not weaken anything. An OIDC ID Token carries `typ: JWT` or no `typ` at all — both already accepted before — so adding two values no ID Token uses changes nothing about that exposure. What keeps an ID Token out is the issuer and audience checks: an ID Token's `aud` is the client's `client_id`, never this server's canonical resource URI, so it fails RFC 8707 audience binding whatever its `typ` says.
+Widening this does not weaken anything: an OIDC ID Token carries `typ: JWT` or no `typ` at all, both already
+accepted. What keeps an ID Token out is the issuer and audience checks — an ID Token's `aud` is the client's
+`client_id`, never this server's canonical resource URI, so it fails RFC 8707 audience binding whatever its
+`typ` says.
 
 ### Protected Resource Metadata
 
-When `oauth` mode is usable, this plugin serves an RFC 9728 document at both `/.well-known/oauth-protected-resource` and `/.well-known/oauth-protected-resource/mcp` (both return HTTP 404 otherwise):
+When `oauth` mode is usable, the plugin serves an RFC 9728 document at both
+`/.well-known/oauth-protected-resource` and `/.well-known/oauth-protected-resource/mcp`:
 
 ```bash
 curl -sS http://localhost:8080/.well-known/oauth-protected-resource/mcp
@@ -1019,100 +1026,194 @@ curl -sS http://localhost:8080/.well-known/oauth-protected-resource/mcp
 }
 ```
 
-`scopes_supported` is `mcp.oauth.required.scopes`, parsed the same way it is enforced, minus `offline_access` (this server never issues refresh tokens, so it never advertises that scope even if accidentally listed). A rejected request also carries the metadata URL in its `WWW-Authenticate` challenge, e.g.:
+`scopes_supported` is `mcp.oauth.required.scopes`, parsed the same way it is enforced, minus `offline_access`
+(this server never issues refresh tokens, so it never advertises that scope even if one is listed by mistake).
+
+A rejected request carries the metadata URL in its `WWW-Authenticate` challenge:
 
 ```
 WWW-Authenticate: Bearer realm="fess-mcp", error="insufficient_scope", error_description="The token is missing a required scope.", scope="fess:search", resource_metadata="https://fess.example.com/.well-known/oauth-protected-resource/mcp"
 ```
 
-## Configuration
+### Deployments under a context path
 
-The following system properties can be configured in Fess. They are read through `FessProp#getSystemProperty`, so they belong in **`WEB-INF/conf/system.properties`** (or, as a JVM argument, **`-Dfess.system.<key>`** — note the `fess.system.` prefix, not `fess.`). `fess_config.properties` and `-Dfess.config.*` are a different channel and have **no effect** on any key below; a key put there is silently ignored, with no error and no log line. **Boolean keys accept only `true`, matched case-insensitively** (so `True`/`TRUE` also work) — any other value, including `1`, `yes`, or an empty string, is treated as `false` (`FessProp#getSystemPropertyAsBoolean` is `Constants.TRUE.equalsIgnoreCase(...)`) — so `mcp.enabled=1` silently disables the endpoint rather than enabling it.
+`mcp.oauth.audience` must *end in* `/mcp`, but it may carry leading path segments. If Fess runs under a
+context path (`FESS_CONTEXT_PATH` / `-Dfess.context.path`) or behind a reverse proxy mounting it at a subpath,
+the correct audience is `https://fess.example.com/api/mcp`, and the metadata document is served at
+`https://fess.example.com/api/.well-known/oauth-protected-resource/mcp`.
 
-| Property | Default | Description |
-|----------|---------|-------------|
-| `mcp.enabled` | `true` | Enables the `/mcp` endpoint. When `false` (or unparseable-as-true), every request gets HTTP 503. |
-| `mcp.auth.mode` | `none` | `none` (no authentication — the default, kept for backward compatibility), `fess_token` (Bearer + Fess access token), or `oauth` (Bearer JWT, RFC 9728). An unusable `oauth` configuration falls back to `none`. |
-| `mcp.allowed.origins` | *(blank)* | Comma-separated allowed `Origin` values — the complete allowlist. A present `Origin` that is not listed is rejected with HTTP 403; an absent `Origin` header is always allowed (non-browser clients rarely send one). **Blank means no browser origin is allowed, including the server's own**: a browser-based MCP client must be listed explicitly (e.g. `https://fess.example.com`), even when it is served from the Fess host itself. The server's own origin is deliberately not implied, because it could only be derived from the caller-supplied `Host` header — a DNS-rebinding attacker simply sends a matching `Host`/`Origin` pair, which is the attack this check exists to stop. Listing an origin here is necessary but **not sufficient** for a cross-origin browser client — see [Browser Clients and CORS](#browser-clients-and-cors). Each entry must be a full `scheme://host[:port]`: an entry with no scheme (`fess.example.com`) or a wildcard (`*`) does not parse as an origin, is dropped, and therefore matches nothing — a value of `*` behaves exactly like a blank one and rejects every request that carries an `Origin`. A host containing an underscore cannot be expressed here at all, because `java.net.URI` does not accept one. |
-| `mcp.request.max.bytes` | `1048576` | Maximum accepted request body size, in bytes. Larger bodies get HTTP 413. The limit bounds the read itself — at most `max + 1` bytes are ever buffered, which is all it takes to prove a body is over — so an oversized body is never read into memory and never decoded. `Content-Length` is deliberately ignored: it is caller-supplied and absent entirely for a chunked body. There is no "unlimited" sentinel: `0` or a negative value rejects **every** body, and `2147483647` (`Integer.MAX_VALUE`) removes the bound altogether, restoring an unbounded read of an attacker-chosen body size before authentication and before rate limiting. Leave it at a real byte count. |
-| `mcp.rate.limit.per.minute` | `60` | Per-caller limit on `tools/call`, `completion/complete`, and `resources/read` calls per **fixed** one-minute window (`System.currentTimeMillis() / 60_000`, not a rolling window — so a caller can burst up to 2× the limit across a window boundary). Keyed on the authenticated subject; when unauthenticated, on the client IP as resolved by Fess's `RateLimitHelper#getClientIp`, which honours `X-Forwarded-For`/`X-Real-IP` **only** when the peer is listed in Fess's `rate.limit.trusted.proxies` (default `127.0.0.1,::1`) and returns `getRemoteAddr()` otherwise. **Behind a reverse proxy, set `rate.limit.trusted.proxies`** — see [Deviations From the Specification](#deviations-from-the-specification) item 8 for why, and for the residual trade-off. `0` or negative disables the limiter. A token with no (or a blank) `sub` claim is authenticated but has no subject to key on, so it falls back to the client IP and therefore shares one bucket with every other such caller behind the same peer. |
-| `mcp.tools.index_stats.permissions` | `Radmin-api` | Comma-separated encoded Fess permissions required to use `get_index_stats` / read `fess://index/stats`. Blank disables the gate. |
-| `mcp.cache.discover.ttl.ms` | `3600000` | `ttlMs` reported by `server/discover`. |
-| `mcp.cache.list.ttl.ms` | `3600000` | `ttlMs` reported by `tools/list`, `resources/list`, `resources/templates/list`, and `prompts/list`. |
-| `mcp.cache.read.ttl.ms` | `0` | `ttlMs` reported by `resources/read` (not cached by default). |
-| `mcp.oauth.issuer` | *(blank)* | The authorization server's issuer URL. Required for `oauth` mode to be usable. |
-| `mcp.oauth.audience` | *(blank)* | The canonical resource URI used for `aud` validation and `resource_metadata`. **Required for `oauth` mode to be usable** — never derived from the request. Must *end in* `/mcp`; leading path segments are supported, so `https://host/api/mcp` is correct under a context path — see [Deployments under a context path](#deployments-under-a-context-path). |
-| `mcp.oauth.jwks.uri` | *(blank)* | The authorization server's JWKS endpoint (RS256 signature verification). Required for `oauth` mode to be usable. |
-| `mcp.oauth.jwks.cache.seconds` | `300` | How long a fetched JWKS is cached before refreshing. **Values below 60 are raised to 60** (logged once at WARN with both the configured and effective value). 60 seconds is the smallest lifetime the underlying JWKS source can be built with: it must accommodate both a 30-second refresh-ahead window and a 30-second refresh timeout, and must be strictly longer than the 30-second rate-limiter interval. Before this clamp, a smaller value made the JWKS source fail to build and every token-bearing request return a misleading `invalid_token` 401, permanently. |
-| `mcp.oauth.required.scopes` | *(blank)* | Comma-separated leaf scopes a token must fully carry, read from its `scope` claim or, failing that, its `scp` claim (Entra ID and Okta use `scp`; a space-delimited string and a JSON array are both accepted). Blank means no scope is required. |
-| `mcp.oauth.permission.claim` | *(blank)* | JWT claim name whose values are already-encoded Fess permissions. |
-| `mcp.oauth.scope.permission.map` | *(blank)* | Comma-separated `scope=permission` pairs mapping token scopes to encoded Fess permissions. |
-| `mcp.content.max.length` | `10000` | Maximum length of search/get_document result content in characters (a `...` suffix is appended when truncated). |
-| `mcp.highlight.fragment.size` | `500` | Size of highlight fragments in characters. |
-| `mcp.highlight.num.of.fragments` | `3` | Number of highlight fragments per search result. |
-| `mcp.default.page.size` | `3` | Default number of search results when `num` is not supplied. |
+That URL is built under the application's own prefix rather than the host-rooted form RFC 9728 §3.1 specifies
+(`https://fess.example.com/.well-known/oauth-protected-resource/api/mcp`). The deviation is forced: the §3.1
+URL lies outside the servlet context and Fess cannot serve it under a context path at all. The two forms are
+identical at the root. Clients that follow the `resource_metadata` URL advertised in the `WWW-Authenticate`
+challenge — the discovery flow both RFC 9728 and the MCP Authorization specification prescribe — are
+unaffected; a client that constructs the §3.1 URL itself gets a 404 under a subpath deployment.
 
-### Browser Clients and CORS
+### When the OAuth configuration is not usable
 
-Every MCP request carries `MCP-Protocol-Version` and `Mcp-Method` (and `Mcp-Name` for some methods). None of the three is CORS-safelisted, so a **cross-origin** browser client always preflights. Fess's shipped `api.cors.allow.headers` is `Origin, Content-Type, Accept, Authorization, X-Requested-With, X-Fess-CSRF-Token`, and Fess's `DefaultCorsHandler` returns that list **verbatim** — it does not echo `Access-Control-Request-Headers`. The browser therefore blocks the real request before this plugin's `Origin` check ever runs, and `mcp.allowed.origins` has no effect for that client.
+`mcp.auth.mode=oauth` with an unset `mcp.oauth.issuer`, `mcp.oauth.audience`, or `mcp.oauth.jwks.uri` — or an
+audience that does not end in `/mcp` — is **not** a hard failure. The endpoint falls back to `none`-mode
+behaviour and serves `/mcp` anonymously. That fallback is reported at ERROR naming all three keys, and the
+accompanying `mcp.auth.mode=none` WARN says every caller is now anonymous.
 
-The fix is operator-side: extend Fess's `api.cors.allow.headers` with the three MCP headers, alongside adding the client to `mcp.allowed.origins`.
+"Anonymously" describes how roles are resolved, and it is not the whole story for a client that keeps sending
+the credential it was configured with. In `none` mode this plugin does not own role resolution, so Fess's
+`RoleQueryHelper` runs and hands the request to `AccessTokenService`, which reads the raw `Authorization`
+header and interprets it as a **Fess access token**. An OAuth bearer JWT matches no Fess token and is rejected
+(`Invalid token: ...`), and an `Authorization: Basic ...` header is rejected earlier still
+(`Invalid format: ...`). So `search` and `get_document` fail with `isError: true` for precisely the clients
+that were working before the fallback; a client must drop its `Authorization` header to actually be served
+anonymously. This is long-standing Fess behaviour rather than something this revision introduced, but it is
+what the fallback means in practice.
 
-```
-api.cors.allow.headers=Origin, Content-Type, Accept, Authorization, X-Requested-With, X-Fess-CSRF-Token, MCP-Protocol-Version, Mcp-Method, Mcp-Name
-```
+**This is not a startup-only check.** Every request re-reads `mcp.auth.mode` and the `mcp.oauth.*` keys, and
+Fess re-reads its properties file within about five seconds of an edit, so `/mcp` can flip between "credential
+required" and "anonymous for everyone" on a live server with no restart. A transition is logged when it
+happens — once per transition, not once per request, because this is an unauthenticated endpoint and a
+per-request WARN would be a disk-filling amplifier a caller controls. A fix taking effect is logged at INFO.
 
-A **same-origin** browser client does not preflight and is unaffected, as is every non-browser client.
+"OAuth was configured but rejected" is tracked as a state distinct from "the operator chose `none`", so an
+operator who meant to enable OAuth and got the configuration wrong is told so, rather than seeing the message
+a deliberately unauthenticated deployment sees.
 
-## Deviations From the Specification
+### Large tokens and `maxHttpHeaderSize`
+
+A bearer JWT carrying many claims — especially a large `mcp.oauth.permission.claim` array — can exceed
+Tomcat's default `maxHttpHeaderSize` of 8 KB. Deployments issuing larger tokens should raise that setting.
+
+## Deviations from the specification
 
 These are deliberate, reviewed choices, not oversights:
 
-1. **`mcp.auth.mode` defaults to `none`.** The MCP Streamable HTTP transport's Security Considerations say a server SHOULD authenticate every connection. This server does not, by default — kept for backward compatibility, so an existing Fess deployment keeps working unmodified after upgrading this plugin. The endpoint logs a WARN whenever it resolves to unauthenticated behaviour (including an unrecognised `mcp.auth.mode` value, or an `oauth` configuration that turned out not to be usable): at startup, and again on any later transition into or out of that posture, since the mode is re-resolved per request and Fess's properties are live. See [When the configuration is not usable](#when-the-configuration-is-not-usable).
-2. **`search`, `suggest`, and `get_document` keep Markdown text blocks, not serialized JSON.** The spec SHOULDs that a tool result's `content` text block, when `structuredContent` is also present, carry the same information serialized as JSON. These three tools keep their pre-existing human-readable Markdown text instead, so clients already parsing today's `content` blocks are not broken by this migration. **`get_index_stats` is the exception, and is already spec-compliant on this point**: its `content[0].text` has always been `JsonXContent.contentBuilder().map(stats).toString()` — the same data `structuredContent` carries (minus nulls), serialized as JSON, not Markdown.
-3. **`isError: true` results carry no `structuredContent`.** Verified correct against the MCP schema: `structuredContent` is optional on `CallToolResult` (`structuredContent?: unknown`), and there is nothing structured to report for a failure. Note that `content` is *not* optional — the schema declares it `content: ContentBlock[]` — so an error result still carries its text block, and every tool here does.
-4. **No automatic scope-hierarchy resolution.** `mcp.oauth.required.scopes` must be written using the authorization server's own leaf scopes — see [OAuth 2.1 Setup](#oauth-21-setup).
-5. **`mcp.oauth.audience` is required for `oauth` mode, and must end in `/mcp`.** It is never derived from the request. An unset audience, or one not ending in `/mcp`, makes `oauth` mode unusable and falls back to `none` (reported at ERROR — at startup and on any later transition; see [When the configuration is not usable](#when-the-configuration-is-not-usable)). Leading path segments *are* supported: `https://fess.example.com/api/mcp` is correct and usable for a context-path deployment — see item 11. This server used to derive the audience from the request's `Host` header (honouring `X-Forwarded-Host` only from a trusted proxy) when `mcp.oauth.audience` was unset; that derivation let an attacker holding a token legitimately minted by the same issuer for a *different* resource simply send that resource's hostname as `Host` and be admitted — RFC 8707 audience binding exists precisely to prevent this confused-deputy case, so it is now a hard requirement rather than an optional override.
-6. **`oauth` mode with an unset `mcp.oauth.issuer` or `mcp.oauth.jwks.uri` falls back to `none`.** RFC 9728 requires a protected-resource metadata document's `authorization_servers` to be non-empty; serving one with none would be worse than not enabling authorization at all, so this server refuses to try rather than serving a broken document. An unset `mcp.oauth.jwks.uri` would otherwise let `oauth` mode be selected but fail every request with a misleading "invalid token" 401, since the missing endpoint only surfaces once a token-bearing request reaches JWKS resolution.
-7. **`get_index_stats` is gated by default** (`mcp.tools.index_stats.permissions=Radmin-api`), so it is unavailable in the default `none` mode. This tool bypasses Fess's normal role-based search filtering and exposes the index name, document count, and JVM heap — administrative information, not a search result. See [Get Index Stats and the permission gate](#get-index-stats-and-the-permission-gate).
-8. **The rate limiter is per-principal fairness, not a flood defence.** It has no cross-key cap: `MAX_TRACKED_KEYS` (10,000 distinct keys) is a *sweep trigger* that prompts the limiter to evict stale-window entries once the tracked-key count crosses it, not a hard ceiling — a flood from more distinct keys than that within one window is not throttled by this mechanism at all. For IP-level flood defence, enable Fess's own `rate.limit.*` filter alongside this plugin.
+1. **`mcp.auth.mode` defaults to `none`.** The Streamable HTTP transport's Security Considerations say a
+   server SHOULD authenticate every connection. This one does not by default, so that an existing Fess
+   deployment keeps working unmodified after the plugin is installed. The endpoint logs a WARN whenever it
+   resolves to unauthenticated behaviour — including an unrecognised `mcp.auth.mode` value or an unusable
+   `oauth` configuration — at startup and on any later transition.
+2. **`search`, `suggest`, and `get_document` keep Markdown text blocks, not serialized JSON.** The
+   specification SHOULDs that a tool result's `content` text block, when `structuredContent` is also present,
+   carry the same information serialized as JSON. These three keep their pre-existing human-readable Markdown
+   instead, so clients already parsing today's `content` blocks are not broken. **`get_index_stats` is the
+   exception and is already compliant on this point**: its `content[0].text` has always been the same data
+   `structuredContent` carries (minus nulls), serialized as JSON.
+3. **`isError: true` results carry no `structuredContent`.** Verified against the MCP schema:
+   `structuredContent` is optional on `CallToolResult`, and there is nothing structured to report for a
+   failure. `content` is *not* optional, so an error result still carries its text block, and every tool here
+   provides one.
+4. **No automatic scope-hierarchy resolution.** `mcp.oauth.required.scopes` must be written using the
+   authorization server's own leaf scopes.
+5. **`mcp.oauth.audience` is required and must end in `/mcp`.** It is never derived from the request; an unset
+   or wrongly-shaped audience makes `oauth` mode unusable and falls back to `none`. Leading path segments
+   *are* supported, so `https://fess.example.com/api/mcp` is correct for a context-path deployment.
+6. **`oauth` mode with an unset `mcp.oauth.issuer` or `mcp.oauth.jwks.uri` falls back to `none`.** RFC 9728
+   requires a metadata document's `authorization_servers` to be non-empty, and serving one with none would be
+   worse than not enabling authorization at all. An unset JWKS endpoint would otherwise let `oauth` mode be
+   selected but fail every request with a misleading "invalid token" 401, since the missing endpoint only
+   surfaces once a token-bearing request reaches JWKS resolution.
+7. **`get_index_stats` is gated by default**, so it is unavailable in the default `none` mode. It bypasses
+   Fess's role-based search filtering and exposes the index name, document count, and JVM heap —
+   administrative information, not a search result.
+8. **The rate limiter is per-principal fairness, not a flood defence.** It has no cross-key cap: the
+   10,000-key `MAX_TRACKED_KEYS` figure is a *sweep trigger* that prompts eviction of stale-window entries,
+   not a hard ceiling — a flood from more distinct keys than that within one window is not throttled by this
+   mechanism at all. For IP-level flood defence, enable Fess's own `rate.limit.*` filter alongside it.
 
-   The window is fixed rather than rolling, which is the same deliberate simplification: a caller can burst up to 2× `mcp.rate.limit.per.minute` across a window boundary, and a refused caller is always told to wait the full 60 seconds because the limiter tracks whole minutes and cannot report a shorter, exact remainder.
+   The window is fixed rather than rolling, which is the same deliberate simplification: a caller can burst up
+   to 2× `mcp.rate.limit.per.minute` across a window boundary, and a refused caller is always told to wait the
+   full 60 seconds because the limiter tracks whole minutes and cannot report a shorter remainder.
 
-   The unauthenticated key is the client IP as Fess's own `RateLimitHelper` resolves it, which is an honest trade rather than a clean win. Using `getRemoteAddr()` directly is not viable: behind nginx or Apache that is the proxy's address for *every* caller, and Fess ships no `RemoteIpValve`, so that collapse is the default deployment — one caller spending the budget would 429 every other client of the same instance. Delegating to `RateLimitHelper` means `X-Forwarded-For`/`X-Real-IP` are honoured, but **only** from a peer listed in Fess's `rate.limit.trusted.proxies` (default `127.0.0.1,::1`). The residual weakness: where a trusted proxy *is* configured, the first `X-Forwarded-For` element is used, and a client can forge it if that proxy appends to the header rather than replacing it — giving a determined attacker unlimited keys. Fess's own rate-limit filter accepts the same trade-off, and it is the better default: the alternative is a limiter that is not merely bypassable but actively harmful to innocent clients, who all share a bucket they cannot influence.
-9. **Boolean config keys accept only `true` (case-insensitive), not `1`/`yes`/etc.** `getSystemPropertyAsBoolean` is a case-insensitive `equalsIgnoreCase` check against the string `"true"`; every other value, including `"1"` or `"yes"`, is `false` — see the Configuration table's warning.
-10. **Large JWTs and Tomcat's `maxHttpHeaderSize`.** A `Bearer` JWT carrying many claims (especially a large `mcp.oauth.permission.claim` array) can exceed Tomcat's default `maxHttpHeaderSize` (8 KB). `oauth`-mode deployments issuing larger tokens should raise this Tomcat setting.
-11. **The protected-resource metadata URL is built under the application's prefix, not host-rooted as RFC 9728 §3.1 specifies.** Under a context path the audience `https://host/api/mcp` yields `https://host/api/.well-known/oauth-protected-resource/mcp`, not §3.1's `https://host/.well-known/oauth-protected-resource/api/mcp`. The deviation is forced — the §3.1 URL is above the servlet context and Fess cannot serve it at all — and the two forms coincide at the root, so only subpath deployments see any difference. Clients that follow the advertised `resource_metadata` URL are unaffected; one that constructs the §3.1 URL itself gets a 404. See [Deployments under a context path](#deployments-under-a-context-path).
-12. **Tool inputs are type-checked, not schema-validated.** `inputSchema` is advertised for clients to validate against; the server checks that required arguments are present and that each declared argument has the right top-level JSON type (`-32602` otherwise), but does not validate nested element types, formats, or ranges. There is no JSON Schema validator on the plugin's classpath, and the plugin ships as a single JAR that bundles no dependencies of its own, so adding one is a packaging decision rather than a code change. Container shape *is* checked — a value inside `fields`, `as`, or `ex_q` that is not an array, and a non-string element of `fields` or `ex_q`, are rejected with `-32602` naming the path — because those were the cases that reached a raw `ClassCastException` or `ArrayStoreException` inside the search and came back as a redacted correlation id. What remains unvalidated is everything a schema would express beyond shape: string formats, numeric ranges, enums, and whether a condition or field name is one the backend knows.
+   The unauthenticated key is the client IP as Fess's `RateLimitHelper` resolves it, which is an honest trade
+   rather than a clean win. Using `getRemoteAddr()` directly is not viable: behind nginx or Apache that is the
+   proxy's address for *every* caller, and Fess ships no `RemoteIpValve`, so that collapse is the default
+   deployment — one caller spending the budget would 429 every other client of the same instance. Delegating
+   to `RateLimitHelper` means `X-Forwarded-For`/`X-Real-IP` are honoured, but **only** from a peer listed in
+   Fess's `rate.limit.trusted.proxies` (default `127.0.0.1,::1`). The residual weakness: where a trusted proxy
+   *is* configured, the first `X-Forwarded-For` element is used, and a client can forge it if that proxy
+   appends to the header rather than replacing it. Fess's own rate-limit filter accepts the same trade-off,
+   and it is the better default — the alternative is a limiter that is not merely bypassable but actively
+   harmful to innocent clients, who all share a bucket they cannot influence.
+
+   A token with no (or a blank) `sub` claim is authenticated but has no subject to key on, so it falls back to
+   the client IP and shares one bucket with every other such caller behind the same peer.
+9. **Boolean config keys accept only `true` (case-insensitive)**, not `1` or `yes`. Fess's
+   `getSystemPropertyAsBoolean` is a case-insensitive comparison against the string `"true"`.
+10. **`resources/read` is rate-limited**, though the specification names only `tools/call` and
+    `completion/complete`. Reading `fess://document/<id>` makes the identical backend document fetch the
+    rate-limited `get_document` tool makes, so leaving it out left `Mcp-Method: resources/read` as an
+    unmetered channel that simply bypassed the limit on `tools/call`.
+11. **The protected-resource metadata URL is built under the application's prefix**, not host-rooted as
+    RFC 9728 §3.1 specifies. The deviation is forced — the §3.1 URL is above the servlet context and Fess
+    cannot serve it at all — and the two forms coincide at the root, so only subpath deployments see any
+    difference.
+12. **Tool inputs are type-checked, not schema-validated.** `inputSchema` is advertised for clients to
+    validate against; the server checks that required arguments are present and that each declared argument
+    has the right top-level JSON type, but does not validate nested element types, formats, or ranges. There
+    is no JSON Schema validator on the plugin's classpath, and the plugin ships as a single JAR bundling no
+    dependencies of its own, so adding one is a packaging decision rather than a code change. Container shape
+    *is* checked, because those were the cases that reached a raw `ClassCastException` or
+    `ArrayStoreException` inside the search and came back as a redacted correlation id.
+
+## Migrating from an earlier MCP revision
+
+A client built against `2024-11-05` or any revision before `2026-07-28` cannot connect to this endpoint at
+all. The changes that matter, in the order a client hits them:
+
+| Change | What it means for a client |
+|--------|----------------------------|
+| **`initialize` is gone** | Returns HTTP 404 with `-32601`; the message and `data.supportedVersions` name the one version this server speaks. Use [`server/discover`](#serverdiscover), which does not negotiate a version because there is only one. |
+| **`ping` is gone** | Returns HTTP 404 with `-32601`. There is no liveness-check method any more, and no `data.supportedVersions`, because there is no replacement to fall forward to. |
+| **JSON-RPC batching is gone** | A JSON array request body is rejected with HTTP 400. Batching was removed from the JSON-RPC layer in `2025-06-18`, and this server never re-added it as an extension. |
+| **Request-metadata headers and `params._meta` are mandatory** | See [Required headers and `params._meta`](#required-headers-and-params_meta). Missing or mismatched headers are HTTP 400 with `-32020`, before dispatch. |
+| **An inbound `cursor` is rejected** | The list methods answer a non-null `cursor` with `-32602`. This server returns every item in one page and never issues a `nextCursor`, so any inbound cursor is necessarily stale. An explicit `"cursor": null` is treated as absent, since several mainstream serializers emit one for an unset optional field. |
+| **`get_index_stats` is gated by default** | Unavailable to every caller under the default `mcp.auth.mode=none`. See [The `get_index_stats` gate](#the-get_index_stats-gate). |
+| **A per-caller rate limit is on by default** | 60 calls/minute on `tools/call`, `completion/complete`, and `resources/read`; HTTP 429 with `Retry-After` beyond that. |
+| **`mcp.allowed.origins` is now the complete allowlist** | With the default blank value, **every present `Origin` is rejected with HTTP 403**, including the server's own. Clients that send no `Origin` are unaffected. |
+
+Two retired methods are answered *before* header validation runs, deliberately: a client old enough to call
+`initialize` or `ping` cannot send `Mcp-Method` (the header did not exist before this revision) and would
+otherwise be told to add a header rather than that the method is gone.
+
+Behaviour changes for clients that already speak `2026-07-28` but ran against an earlier build of this plugin:
+
+- **`search` with `num` ≤ 0 returns the default page size, not the maximum.** `{"num": 0}` and `{"num": -1}`
+  used to yield `paging.search.page.max.size` (100 by default), the opposite of what a client computing a page
+  size and reaching zero intends. They now fall back to `mcp.default.page.size` (3), matching what an
+  unparseable `num` and the `suggest` tool already did. A `num` above the maximum is still clamped.
+- **`search`'s `offset` argument now works.** It was always advertised as an alias of `start`, but nothing
+  read it as one, so a client paginating with `offset` was served page 1 forever. It now sets the start
+  position when `start` is absent.
+- **`tools/call` no longer requires `params.arguments`.** The normative schema declares it optional, and
+  `get_index_stats` takes no arguments, so a conformant client could not reach that tool at all.
+- **`as` no longer discards `q`.** See the note under [`search`](#search).
+
+Notifications (a JSON-RPC request with no `id`) are unaffected by any of the above: they are still accepted
+with HTTP 202 and no body, and require neither the metadata headers nor `_meta`.
+
+---
+
+# Project
 
 ## Development
 
-### Building from Source
-
 ```bash
+# Build
 mvn clean package
-```
 
-### Running Tests
-
-```bash
+# Test
 mvn test
-```
 
-### Code Formatting
-
-```bash
+# Format (run before committing)
 mvn formatter:format && mvn license:format
 ```
 
+Architecture notes for contributors are in [CLAUDE.md](CLAUDE.md).
+
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Issues and pull requests are welcome at
+[github.com/codelibs/fess-webapp-mcp](https://github.com/codelibs/fess-webapp-mcp). For questions and bug
+reports, please use [GitHub Issues](https://github.com/codelibs/fess-webapp-mcp/issues).
 
 ## License
 
-Apache License 2.0
-
-## Support
-
-For issues and questions, please use the [GitHub Issues](https://github.com/codelibs/fess-webapp-mcp/issues).
+Apache License 2.0. See [LICENSE](LICENSE).
