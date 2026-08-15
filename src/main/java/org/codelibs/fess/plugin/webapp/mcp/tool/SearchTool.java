@@ -30,6 +30,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codelibs.fess.entity.FacetInfo;
+import org.codelibs.core.lang.StringUtil;
 import org.codelibs.fess.entity.GeoInfo;
 import org.codelibs.fess.entity.HighlightInfo;
 import org.codelibs.fess.entity.SearchRenderData;
@@ -399,13 +400,46 @@ public class SearchTool implements McpTool {
             @Override
             public Map<String, String[]> getConditions() {
                 final Map<String, Object> conditions = (Map<String, Object>) paramMap.get("as");
-                if (conditions != null) {
-                    return conditions.entrySet()
-                            .stream()
-                            .collect(Collectors.toMap(Map.Entry::getKey,
-                                    e -> ((List<?>) e.getValue()).stream().map(Object::toString).toArray(n -> new String[n])));
+                if (conditions == null) {
+                    return Collections.emptyMap();
                 }
-                return Collections.emptyMap();
+                final Map<String, String[]> resolved = new LinkedHashMap<>();
+                conditions.forEach(
+                        (key, value) -> resolved.put(key, ((List<?>) value).stream().map(Object::toString).toArray(n -> new String[n])));
+                // Fess builds the query from these conditions *instead of* getQuery(), not in
+                // addition to it: QueryStringBuilder#buildBaseQuery branches on
+                // SearchRequestParams#hasConditionQuery, which is true as soon as any of as.q,
+                // as.epq, as.oq, as.nq, as.timestamp, as.sitesearch or as.filetype is set. So
+                // passing 'as' straight through discarded q -- the tool's only *required*
+                // argument -- with no error and a full page of results: q="nonexistentxyz" with
+                // as={"filetype":["html"]} answered the whole corpus. A caller cannot tell that
+                // from a genuine match, which makes it the worst shape of wrong answer to hand
+                // an agent.
+                //
+                // Folding q into as.q is the fix rather than rejecting the combination, because
+                // q is required and so could never be legitimately absent. as.q is the same slot
+                // the advanced-search UI puts the user's words in, and appendConditions joins the
+                // conditions with spaces, so the result is the intersection a caller asking for
+                // "zebrafish, HTML only" already expects.
+                //
+                // Injected whenever 'as' is present rather than only when one of those seven keys
+                // is, so that a key added to hasConditionQuery later cannot quietly reintroduce
+                // this. The cost is that a q sent alongside an unrecognised condition now takes
+                // the conditions path too, which skips related-query expansion -- the behaviour
+                // every recognised condition already had.
+                final String query = getQuery();
+                if (StringUtil.isNotBlank(query)) {
+                    final String[] existing = resolved.get(SearchRequestParams.AS_Q);
+                    if (existing == null || existing.length == 0) {
+                        resolved.put(SearchRequestParams.AS_Q, new String[] { query });
+                    } else {
+                        final String[] merged = new String[existing.length + 1];
+                        merged[0] = query;
+                        System.arraycopy(existing, 0, merged, 1, existing.length);
+                        resolved.put(SearchRequestParams.AS_Q, merged);
+                    }
+                }
+                return resolved;
             }
 
             @Override

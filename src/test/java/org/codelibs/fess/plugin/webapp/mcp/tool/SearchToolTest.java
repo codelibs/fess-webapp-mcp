@@ -15,6 +15,7 @@
  */
 package org.codelibs.fess.plugin.webapp.mcp.tool;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -996,4 +997,58 @@ public class SearchToolTest {
             return false;
         }
     }
+
+    // ------------------------------------------------------------------
+    // 'as' must not swallow the required q
+
+    @Test
+    public void testAdvancedConditionsCarryTheRequiredQuery() {
+        // Fess builds the query from the conditions instead of getQuery() as soon as one of them
+        // is query-bearing, so q has to appear among them or it is silently discarded.
+        final SearchRequestParams params =
+                searchTool.buildRequestParams(Map.of("q", "zebrafish", "as", Map.of("filetype", List.of("html"))));
+        assertArrayEquals(new String[] { "zebrafish" }, params.getConditions().get(SearchRequestParams.AS_Q));
+        assertArrayEquals(new String[] { "html" }, params.getConditions().get(SearchRequestParams.AS_FILETYPE));
+    }
+
+    @Test
+    public void testAdvancedConditionsAreQueryBearingSoTheQueryIsBuiltFromThem() {
+        // The property that actually matters: whichever branch Fess takes, q is in it.
+        final SearchRequestParams params =
+                searchTool.buildRequestParams(Map.of("q", "zebrafish", "as", Map.of("filetype", List.of("html"))));
+        assertTrue(params.hasConditionQuery(), "the conditions branch is the one that will be taken");
+        assertEquals("zebrafish", params.getQuery(), "and q is still reported unchanged");
+    }
+
+    @Test
+    public void testAnExplicitAsQueryIsKeptAlongsideTheRequiredQuery() {
+        // Both are the caller's words; neither may be dropped in favour of the other.
+        final SearchRequestParams params = searchTool.buildRequestParams(Map.of("q", "zebrafish", "as", Map.of("q", List.of("quantum"))));
+        assertArrayEquals(new String[] { "zebrafish", "quantum" }, params.getConditions().get(SearchRequestParams.AS_Q));
+    }
+
+    @Test
+    public void testAnUnrecognisedConditionAlsoCarriesTheQuery() {
+        // Injected whenever 'as' is present, so a key added to hasConditionQuery later cannot
+        // quietly reintroduce the dropped-q bug.
+        final SearchRequestParams params =
+                searchTool.buildRequestParams(Map.of("q", "zebrafish", "as", Map.of("unknowncond", List.of("x"))));
+        assertArrayEquals(new String[] { "zebrafish" }, params.getConditions().get(SearchRequestParams.AS_Q));
+    }
+
+    @Test
+    public void testConditionsStayEmptyWithoutAs() {
+        // The ordinary path must be untouched: no 'as', no synthesised condition.
+        final SearchRequestParams params = searchTool.buildRequestParams(Map.of("q", "zebrafish"));
+        assertTrue(params.getConditions().isEmpty(), "a plain search must not take the conditions branch");
+        assertFalse(params.hasConditionQuery());
+    }
+
+    @Test
+    public void testABlankQueryIsNotInjectedAsACondition() {
+        // A blank q would append an empty term to the built query string.
+        final SearchRequestParams params = searchTool.buildRequestParams(Map.of("q", "   ", "as", Map.of("filetype", List.of("html"))));
+        assertFalse(params.getConditions().containsKey(SearchRequestParams.AS_Q));
+    }
+
 }
