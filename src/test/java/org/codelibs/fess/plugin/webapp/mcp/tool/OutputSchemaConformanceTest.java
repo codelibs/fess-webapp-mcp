@@ -326,11 +326,12 @@ public class OutputSchemaConformanceTest {
 
     @Test
     @SuppressWarnings("unchecked")
-    public void testGetDocumentOutputSchemaRequiresAllFourFields() {
+    public void testGetDocumentOutputSchemaRequiresEveryFieldItAlwaysProduces() {
         // Unlike search/suggest, every field get_document emits is unconditionally present
-        // (each falls back to "" rather than being omitted), so all four are required.
+        // (each falls back to "" rather than being omitted), so all of them are required --
+        // including truncated/content_length, which call() defaults rather than leaving null.
         final Map<String, Object> schema = new GetDocumentTool().getOutputSchema();
-        assertEquals(List.of("doc_id", "title", "url", "content"), schema.get("required"));
+        assertEquals(List.of("doc_id", "title", "url", "content", "truncated", "content_length"), schema.get("required"));
         assertEquals(Boolean.FALSE, schema.get("additionalProperties"));
     }
 

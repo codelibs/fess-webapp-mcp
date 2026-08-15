@@ -95,4 +95,71 @@ public class GetDocumentToolTest {
             assertTrue(e.getMessage().contains("container"), "Should fail due to container not initialized");
         }
     }
+
+    @Test
+    public void testGetDocumentSaysWhenItTruncatedTheContent() {
+        // get_document is the "give me the whole document" primitive, and it silently returned
+        // mcp.content.max.length characters plus an ellipsis. Measured against a live server: a
+        // 20,957-character document came back as 10,003 characters with nothing in the response
+        // to say so, and the trailing "..." is indistinguishable from a document that genuinely
+        // ends in one. A client asked to summarise such a document summarises half of it.
+        final GetDocumentTool tool = newToolWithContentMaxLength(10);
+
+        final Map<String, Object> fields = tool.buildContentFields("0123456789abcdef");
+
+        assertEquals("0123456789...", fields.get("content"), "content is still truncated at the configured length");
+        assertEquals(Boolean.TRUE, fields.get("truncated"), "the caller must be told the content is incomplete");
+        assertEquals(16, fields.get("content_length"), "the untruncated length lets a client report what it is missing");
+    }
+
+    @Test
+    public void testGetDocumentReportsUntruncatedContentAsComplete() {
+        final GetDocumentTool tool = newToolWithContentMaxLength(10);
+
+        final Map<String, Object> fields = tool.buildContentFields("short");
+
+        assertEquals("short", fields.get("content"));
+        assertEquals(Boolean.FALSE, fields.get("truncated"), "a complete document must not be flagged as truncated");
+        assertEquals(5, fields.get("content_length"));
+    }
+
+    @Test
+    public void testContentExactlyAtTheLimitIsNotTruncated() {
+        // Boundary: DocumentFormatter cuts only when length > max, so length == max is complete.
+        // Without this a >= mutant would survive and every full-length document would claim to
+        // be truncated.
+        final GetDocumentTool tool = newToolWithContentMaxLength(10);
+
+        final Map<String, Object> fields = tool.buildContentFields("0123456789");
+
+        assertEquals("0123456789", fields.get("content"));
+        assertEquals(Boolean.FALSE, fields.get("truncated"), "content exactly at the limit is complete");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testOutputSchemaDeclaresAndRequiresTruncated() {
+        final Map<String, Object> schema = getDocumentTool.getOutputSchema();
+        final Map<String, Object> properties = (Map<String, Object>) schema.get("properties");
+        final List<String> required = (List<String>) schema.get("required");
+
+        assertTrue(properties.containsKey("truncated"), "outputSchema must declare truncated");
+        assertTrue(properties.containsKey("content_length"), "outputSchema must declare content_length");
+        assertTrue(required.containsAll(List.of("truncated", "content_length")),
+                "both are computed for every found document, so both are required: " + required);
+    }
+
+    private static GetDocumentTool newToolWithContentMaxLength(final int maxLength) {
+        return new GetDocumentTool() {
+            @Override
+            protected DocumentFormatter getDocumentFormatter() {
+                return new DocumentFormatter() {
+                    @Override
+                    protected int getContentMaxLength() {
+                        return maxLength;
+                    }
+                };
+            }
+        };
+    }
 }

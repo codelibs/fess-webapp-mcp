@@ -347,9 +347,11 @@ curl -sS -X POST http://localhost:8080/mcp \
             "doc_id": { "type": "string" },
             "title": { "type": "string" },
             "url": { "type": "string" },
-            "content": { "type": "string" }
+            "content": { "type": "string" },
+            "truncated": { "type": "boolean", "description": "whether content was cut at mcp.content.max.length" },
+            "content_length": { "type": "integer", "description": "length of the document's content before truncation" }
           },
-          "required": ["doc_id", "title", "url", "content"],
+          "required": ["doc_id", "title", "url", "content", "truncated", "content_length"],
           "additionalProperties": false
         },
         "annotations": {
@@ -751,6 +753,16 @@ curl -sS -X POST http://localhost:8080/mcp \
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `doc_id` | string | Yes | Document ID to retrieve |
+
+A `doc_id` comes from a `search` hit — every hit carries one. It is also what the
+`fess://document/{doc_id}` resource template takes.
+
+**`content` is bounded by `mcp.content.max.length` (10000 by default), and the result says so.**
+`truncated` is `true` when the document was longer, and `content_length` is its untruncated
+length, so a client can report "showing 10000 of 20957 characters" rather than silently
+summarising part of a document. Do not read the trailing `...` as the signal: it is
+indistinguishable from a document that genuinely ends in one. To return whole documents, raise
+`mcp.content.max.length`; this tool does not offer a way to fetch the remainder.
 
 ## Get Index Stats and the Permission Gate
 
