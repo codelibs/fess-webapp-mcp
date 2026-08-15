@@ -781,4 +781,57 @@ public class SearchToolTest {
 
         assertTrue(fields.contains("doc_id"), "search must request doc_id so buildHit has one to copy: " + fields);
     }
+
+    @Test
+    public void testStructuredHitFallsBackToContentWhenTheHighlighterProducedNothing() {
+        // Fess returns an empty content_description whenever its highlighter finds no fragment
+        // -- a phrase query does this routinely. createDocumentContent already falls back to the
+        // raw content for exactly that case; buildHit did not, so the same hit carried the full
+        // digest in the text block and an empty string in structuredContent. A client that reads
+        // structuredContent (which is what declaring an outputSchema invites) got no text at all.
+        final Map<String, Object> doc = Map.of("title", "T", "url", "https://example.com/", "content_description", "", "content",
+                "the raw content Fess did return");
+
+        final Map<String, Object> hit = newSearchToolWithMaxContentLength(10_000).buildHit(doc);
+
+        assertEquals("the raw content Fess did return", hit.get("content_description"),
+                "structuredContent must carry the same digest the text block falls back to");
+    }
+
+    @Test
+    public void testStructuredHitStripsHighlightMarkupLikeTheTextBlockDoes() {
+        // The other half of the same divergence: the text block ran content_description through
+        // stripHighlightTags, structuredContent did not, so the machine-readable channel was the
+        // one carrying presentation markup.
+        final Map<String, Object> doc =
+                Map.of("title", "T", "url", "https://example.com/", "content_description", "a <strong>hit</strong> and an <em>other</em>");
+
+        final Map<String, Object> hit = newSearchToolWithMaxContentLength(10_000).buildHit(doc);
+
+        assertEquals("a hit and an other", hit.get("content_description"), "structuredContent must not carry highlight markup");
+    }
+
+    @Test
+    public void testStructuredHitOmitsTheDigestWhenThereIsNothingToShow() {
+        // Still never fabricated: with neither a digest nor content, the key is absent rather
+        // than present-and-empty, so a client can tell "Fess had nothing" from "Fess had a blank".
+        final Map<String, Object> hit = newSearchToolWithMaxContentLength(10_000).buildHit(Map.of("title", "T"));
+
+        assertFalse(hit.containsKey("content_description"), "an empty digest must be omitted, not fabricated");
+    }
+
+    @Test
+    public void testTextBlockAndStructuredHitAgreeOnTheDigest() {
+        // The property that was actually broken: the two views of one hit must not disagree.
+        final Map<String, Object> doc = Map.of("title", "T", "url", "https://example.com/", "content_description", "", "content",
+                "the raw content Fess did return");
+        final SearchTool tool = newSearchToolWithMaxContentLength(10_000);
+
+        final String text = (String) tool.createDocumentContent(doc, 1).get("text");
+        final Object structured = tool.buildHit(doc).get("content_description");
+
+        assertNotNull(structured, "structuredContent must report a digest when the text block has one");
+        assertFalse(((String) structured).isEmpty(), "an empty digest would make the containment assertion below vacuous");
+        assertTrue(text.contains((String) structured), "the text block must contain the digest structuredContent reports");
+    }
 }
