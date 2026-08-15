@@ -17,9 +17,9 @@ This plugin implements **MCP protocol revision `2026-07-28`** exclusively.
 Older MCP clients built against `2024-11-05` (or any earlier revision) will not work against this endpoint at all — there is no legacy handshake and no version negotiation. Specifically:
 
 - **`initialize` is gone.** Calling it returns HTTP 404 with JSON-RPC `-32601` (`Method not found`); the error message and `data.supportedVersions` name the one version this server speaks. Use [`server/discover`](#1-serverdiscover) instead — it does not negotiate a protocol version, since there is only one.
-- **`ping` is gone.** There is no liveness-check method any more.
+- **`ping` is gone.** There is no liveness-check method any more. Calling it returns HTTP 404 with `-32601` and a message saying it was removed; unlike `initialize` it carries no `data.supportedVersions`, because there is no replacement to fall forward to.
 - **JSON-RPC batching is gone.** A JSON array request body is rejected outright with HTTP 400 — batching was removed from the JSON-RPC layer in `2025-06-18`, and this server never re-added it as an extension.
-- **Every non-notification request now needs request-metadata headers and a `params._meta` object.** `MCP-Protocol-Version` and `Mcp-Method` are always required, plus `Mcp-Name` for `tools/call`, `prompts/get`, and `resources/read`. Every header must exactly match the corresponding body value. See [Required Headers and `_meta`](#required-headers-and-_meta). A request that omits one of these, or where a header disagrees with the body, is rejected with HTTP 400 and JSON-RPC `-32020` before the method is even dispatched. The two retired methods above are the deliberate exception: they are answered with `-32601` *before* header validation runs, because a client old enough to call them cannot send `Mcp-Method` (the header did not exist before this revision) and would otherwise be told to add a header instead of that the method is gone.
+- **Every non-notification request now needs request-metadata headers and a `params._meta` object.** `MCP-Protocol-Version` and `Mcp-Method` are always required, plus `Mcp-Name` for `tools/call`, `prompts/get`, and `resources/read`. Every header must exactly match the corresponding body value. See [Required Headers and `_meta`](#required-headers-and-_meta). A request that omits a required *header*, or where a header disagrees with the body, is rejected with HTTP 400 and JSON-RPC `-32020` before the method is even dispatched; a missing or incomplete `params._meta` is also HTTP 400 but carries `-32602`, since the specification reserves `-32020` for the header layer (`HEADER_MISMATCH` is defined as "the HTTP headers ... or required headers are missing or malformed"). The two retired methods above are the deliberate exception: they are answered with `-32601` *before* header validation runs, because a client old enough to call them cannot send `Mcp-Method` (the header did not exist before this revision) and would otherwise be told to add a header instead of that the method is gone.
 - **`get_index_stats` is gated by a permission by default** (`mcp.tools.index_stats.permissions=Radmin-api`). Because the default `mcp.auth.mode=none` never grants any permission to any caller, **this tool and the `fess://index/stats` resource are effectively unavailable out of the box** for every caller — hidden from `tools/list`/`resources/list`, and refused (indistinguishably from "does not exist") by `tools/call`/`resources/read`. See [Get Index Stats and the permission gate](#get-index-stats-and-the-permission-gate).
 - **A per-caller rate limit is enabled by default** (`mcp.rate.limit.per.minute=60`) on `tools/call`, `completion/complete`, and `resources/read`. A caller that exceeds it gets HTTP 429 with a `Retry-After` header. `resources/read` is included even though the spec names only the first two: reading `fess://document/<id>` makes the identical backend document fetch the rate-limited `get_document` tool makes, so leaving it out left `Mcp-Method: resources/read` as an unmetered channel that simply bypassed the limit on `tools/call`.
 - **An inbound `cursor` is now rejected.** The previous implementation accepted a `cursor` on the list methods and silently ignored it, returning page 1 to a client that believed it was paging forward. `tools/list`, `resources/list`, `resources/templates/list`, and `prompts/list` now answer a non-null `cursor` with `-32602` (HTTP 200) — this server returns every item in a single page and never issues a `nextCursor`, so any inbound cursor is necessarily stale. An explicit JSON `"cursor": null` is treated as absent and accepted, since several mainstream serializers emit one for an unset optional field.
@@ -50,7 +50,7 @@ For detailed instructions, see the [Plugin Administration Guide](https://fess.co
 ## Features
 
 - **MCP Protocol Support**: Implements MCP protocol revision `2026-07-28` (Streamable HTTP transport, single JSON request/response per call — no batching, no SSE-only stateful session)
-- **Search Tools**: Execute full-text search queries with advanced filtering
+- **Search Tools**: Execute full-text search queries with advanced filtering. Each hit carries the `doc_id` that `get_document` and `fess://document/{doc_id}` take, and the result reports `total` and `has_more` so a client knows how much it has not seen
 - **Suggest Tool**: Autocomplete/suggestion queries via Fess suggest engine
 - **Get Document Tool**: Retrieve individual documents by ID
 - **Index Statistics**: Retrieve index and system information, gated behind a permission by default
@@ -223,6 +223,7 @@ curl -sS -X POST http://localhost:8080/mcp \
               "items": {
                 "type": "object",
                 "properties": {
+                  "doc_id": { "type": "string" },
                   "title": { "type": "string" },
                   "url": { "type": "string" },
                   "score": { "type": "number" },
@@ -231,9 +232,12 @@ curl -sS -X POST http://localhost:8080/mcp \
                 "required": [],
                 "additionalProperties": false
               }
-            }
+            },
+            "total": { "type": "integer", "description": "total number of matching documents" },
+            "total_relation": { "type": "string", "description": "EQUAL_TO when total is exact, GREATER_THAN_OR_EQUAL_TO when the search engine stopped counting" },
+            "has_more": { "type": "boolean", "description": "whether a page exists after this one" }
           },
-          "required": ["hits"],
+          "required": ["hits", "total", "has_more"],
           "additionalProperties": false
         },
         "annotations": {
@@ -399,13 +403,16 @@ curl -sS -X POST http://localhost:8080/mcp \
     "content": [
       {
         "type": "text",
-        "text": "**Title**: Introduction to Elasticsearch\n**URL**: https://example.com/elasticsearch-intro\n**Score**: 1.234\n\nElasticsearch is a distributed, RESTful search and analytics engine..."
+        "text": "**Title**: Introduction to Elasticsearch\n**URL**: https://example.com/elasticsearch-intro\n**Doc ID**: d82177b8ab2749909afbfd6f3a54dc57\n**Score**: 1.234\n\nElasticsearch is a distributed, RESTful search and analytics engine..."
       }
     ],
     "structuredContent": {
       "hits": [
-        { "title": "Introduction to Elasticsearch", "url": "https://example.com/elasticsearch-intro", "score": 1.234, "content_description": "Elasticsearch is a distributed, RESTful search and analytics engine..." }
-      ]
+        { "doc_id": "d82177b8ab2749909afbfd6f3a54dc57", "title": "Introduction to Elasticsearch", "url": "https://example.com/elasticsearch-intro", "score": 1.234, "content_description": "Elasticsearch is a distributed, RESTful search and analytics engine..." }
+      ],
+      "total": 128,
+      "total_relation": "EQUAL_TO",
+      "has_more": true
     }
   }
 }
@@ -413,7 +420,7 @@ curl -sS -X POST http://localhost:8080/mcp \
 
 `content` stays Markdown-style text even though `structuredContent` is also present — see [Deviations From the Specification](#deviations-from-the-specification) item 2. `tools/call` is **not** a `CacheableResult`: it never carries `ttlMs` or `cacheScope`.
 
-**How an absent field is reported differs by tool, and `search` is the strict one.** For `search`, `structuredContent` only ever carries the fields Fess actually populated (see that tool's `outputSchema` above): a `title`, `url`, `score`, or `content_description` that is genuinely absent from the underlying document is omitted from the `hits[]` entry, not filled in with an empty string or `null` — which is why that schema's `items.required` is empty. `get_document` does the opposite, and its `outputSchema` says so by marking all four fields required: it resolves `title`, `url`, and `content` with a `""` fallback, so an absent field arrives as an empty string rather than being omitted. (A field present in the document but mapped to a null value becomes the literal string `"null"` there, since the fallback is applied before the value is stringified.) `get_index_stats` strips nulls from its stats map before serializing it.
+**How an absent field is reported differs by tool, and `search` is the strict one.** For `search`, `structuredContent` only ever carries the fields Fess actually populated (see that tool's `outputSchema` above): a `doc_id`, `title`, `url`, `score`, or `content_description` that is genuinely absent from the underlying document is omitted from the `hits[]` entry, not filled in with an empty string or `null` — which is why that schema's `items.required` is empty. `content_description` carries the same digest the text block shows: highlight markup stripped, falling back to the truncated raw content when Fess's highlighter produced no fragment (a phrase query does this routinely), and omitted entirely when there was neither. `get_document` does the opposite, and its `outputSchema` says so by marking all four fields required: it resolves `title`, `url`, and `content` with a `""` fallback, so an absent field arrives as an empty string rather than being omitted. (A field present in the document but mapped to a null value becomes the literal string `"null"` there, since the fallback is applied before the value is stringified.) `get_index_stats` strips nulls from its stats map before serializing it.
 
 **Request (Suggest):**
 ```json
@@ -757,6 +764,8 @@ mcp.tools.index_stats.permissions=
 
 (a blank value disables the gate entirely). To keep it gated but usable, switch to `mcp.auth.mode=fess_token` or `mcp.auth.mode=oauth` and grant the configured permission to the credential/token/scope in question.
 
+**Grant a searchable role alongside it.** A principal's permissions *are* its role filter, and the guest roles are added only for a principal that has no permissions of its own (`role.search.default.permissions` is blank by default). A token or `mcp.oauth.permission.claim` carrying only `Radmin-api` therefore unlocks `get_index_stats` and gets **zero hits from `search`**, because no document carries `Radmin-api` as a role. Grant the searchable role too (e.g. `Radmin-api,Rguest`), or set `role.search.default.permissions`.
+
 An unauthorized caller cannot distinguish "this tool doesn't exist" from "you may not use this tool": both `tools/call` and `resources/read` answer with the identical `-32602` error a genuinely-unknown tool or resource would get.
 
 ### Query Syntax
@@ -858,16 +867,29 @@ print(json.dumps(result, indent=2))
 
 ### Using with an MCP Client
 
+Client support for `2026-07-28` is not universal yet, and a client that does not speak it cannot
+connect at all — there is no legacy handshake to fall back to. Check your client's SDK before
+configuring it:
+
+| Client / SDK | Newest protocol revision | Connects directly |
+|---|---|---|
+| MCP **Python** SDK 2.0 | `2026-07-28` | Yes — use `ClientSession.discover()`; there is no `initialize` to call |
+| MCP **TypeScript** SDK 1.30 | `2025-11-25` | No |
+| `mcp-remote` | (TypeScript SDK) | No |
+| Clients built on the TypeScript SDK | (TypeScript SDK) | No |
+
+A TypeScript-SDK client fails on its opening `initialize` with this server's own diagnostic:
+
 ```json
-{
-  "mcpServers": {
-    "fess": {
-      "command": "npx",
-      "args": ["-y", "mcp-remote", "http://localhost:8080/mcp"]
-    }
-  }
-}
+{"jsonrpc":"2.0","id":0,"error":{"code":-32601,
+ "message":"initialize was removed in MCP 2026-07-28; this server speaks 2026-07-28",
+ "data":{"supportedVersions":["2026-07-28"]}}}
 ```
+
+Until those SDKs catch up, such a client needs a bridge that speaks an older revision to the
+client and `2026-07-28` to this endpoint — translating `initialize` into
+[`server/discover`](#1-serverdiscover) and adding the request-metadata headers and `params._meta`
+described above. Once the client's SDK supports `2026-07-28`, point it at the endpoint directly.
 
 **`mcp-remote` does not currently speak `2026-07-28`.** As of this writing, `mcp-remote` (the most common local-to-remote MCP bridge for desktop clients) is built against the `1.x` generation of the TypeScript SDK, which still performs the legacy `initialize` handshake — it will fail against this endpoint, since `initialize` now returns `-32601`. The MCP SDKs that add `2026-07-28` support (TypeScript/Python SDK v2, in beta as of this writing) ship under new, separate package names rather than as a drop-in upgrade to `mcp-remote`'s dependency. Until a `2026-07-28`-aware bridge is available, drive this endpoint directly with `curl`/`requests` as shown above, or with an MCP client whose own HTTP transport has been updated for `2026-07-28`.
 
@@ -899,7 +921,7 @@ An error raised by a tool is a special case: only caller-directed codes carry th
 | -32601 | Method not found | The method does not exist, including the retired `initialize` and `ping` |
 | -32602 | Invalid params | Invalid method parameter(s), including a tool argument whose JSON type disagrees with the tool's `inputSchema`; also covers an unknown, gated, or otherwise unusable tool/prompt/resource, and a non-null inbound `cursor` (this server never issues one; an explicit `null` is treated as absent) |
 | -32603 | Internal error | Internal JSON-RPC error; also used for a rate-limit refusal (HTTP 429, with a `retryAfterSeconds` in `error.data` and an HTTP `Retry-After` header), and for a tool reporting a server-side failure, whose message is always the fixed `Tool execution failed (error_code:<uuid>)` |
-| -32020 | HeaderMismatch | A required MCP request-metadata header (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`) is missing, or disagrees with the request body |
+| -32020 | HeaderMismatch | A required MCP request-metadata header (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`) is missing, is sent more than once, or disagrees with the request body. A missing or incomplete `params._meta` is `-32602` instead — the specification scopes this code to the header layer |
 | -32021 | MissingRequiredClientCapability | The request needs a client capability the client did not declare. **Defined by this server but never emitted** — nothing in this plugin currently requires an optional client capability. |
 | -32022 | UnsupportedProtocolVersion | The client's declared protocol version is not `2026-07-28`; `error.data` carries both `supported` and `requested` |
 

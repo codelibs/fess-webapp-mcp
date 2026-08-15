@@ -173,4 +173,30 @@ public class McpDispatcherTest {
         assertEquals(ErrorCode.MethodNotFound, ping.getErrorCode());
         assertNull(ping.getData());
     }
+
+    @Test
+    public void testPingSaysItWasRemovedRatherThanMerelyUnknown() {
+        // The whole point of answering the retired methods before header validation is that the
+        // caller is told the method is gone instead of being sent off to add a header. ping got
+        // the generic "Unknown method" text, which delivers neither. The supportedVersions
+        // payload stays initialize's alone -- that decision is unchanged; only the wording is.
+        final McpDispatcher dispatcher = new McpDispatcher(List.of());
+
+        final McpError error = assertThrows(McpError.class, () -> dispatcher.dispatch(contextFor("ping")));
+
+        assertTrue(error.getMessage().contains("removed in MCP 2026-07-28"),
+                "ping's diagnostic must say the method is gone, was: " + error.getMessage());
+        assertNull(error.getData(), "the supportedVersions payload is still initialize's alone");
+    }
+
+    @Test
+    public void testAGenuinelyUnknownMethodStillGetsTheGenericText() {
+        // Guards the fix from over-reaching: only the two retired methods get the removal
+        // wording. A typo'd method name must not be described as removed in this revision.
+        final McpDispatcher dispatcher = new McpDispatcher(List.of());
+
+        final McpError error = assertThrows(McpError.class, () -> dispatcher.dispatch(contextFor("tools/lst")));
+
+        assertEquals("Unknown method: tools/lst", error.getMessage(), "an unrecognised method is unknown, not retired");
+    }
 }
