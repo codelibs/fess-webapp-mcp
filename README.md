@@ -741,7 +741,7 @@ curl -sS -X POST http://localhost:8080/mcp \
 | `start` | integer | No | Start position for pagination (default: 0) |
 | `offset` | integer | No | Alias for `start`. Used only when `start` is absent; if both are sent, `start` wins (even when `start` is itself unparseable or negative). |
 | `num` | integer | No | Number of results to return (default: `mcp.default.page.size`, 3). Greater than `paging.search.page.max.size` is clamped to that maximum; **zero or negative falls back to the default**, not the maximum. |
-| `sort` | string | No | Sort order (e.g., "score.desc", "last_modified.desc") |
+| `sort` | string | No | Sort order, as `<field>.asc` / `<field>.desc` (e.g. `score.desc`, `last_modified.desc`). The advertised `inputSchema` description lists the fields this deployment accepts, so a client does not have to guess: Fess ships `score`, `filename`, `created`, `content_length`, `last_modified`, `timestamp`, `click_count`, `favorite_count`, and `query.additional.sort.fields` extends it. An unaccepted field is rejected with `-32602` naming it |
 | `fields` | object | No | Field filters keyed by field name, e.g. `{"label": ["label1"]}` |
 | `lang` | string | No | Language filter |
 | `as` | object | No | Advanced search conditions, keyed by condition name (`q`, `epq`, `oq`, `nq`, `filetype`, `sitesearch`, `timestamp`, `occt`). Each value is an array of strings. Combined with `q`, never instead of it — see the note below |

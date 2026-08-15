@@ -88,7 +88,7 @@ public class SearchTool implements McpTool {
         properties.put("start", Map.of("type", "integer", "description", "start position"));
         properties.put("offset", Map.of("type", "integer", "description", "offset (alias of start)"));
         properties.put("num", Map.of("type", "integer", "description", "number of results"));
-        properties.put("sort", Map.of("type", "string", "description", "sort order"));
+        properties.put("sort", Map.of("type", "string", "description", buildSortDescription()));
         properties.put("fields", fields);
         properties.put("lang", Map.of("type", "string", "description", "language"));
         properties.put("as", Map.of("type", "object", "description",
@@ -244,6 +244,53 @@ public class SearchTool implements McpTool {
         requireArrayValues(arguments, "fields", true);
         requireArrayValues(arguments, "as", false);
         requireStringElements(arguments, "ex_q");
+    }
+
+    /**
+     * Builds the {@code sort} description, naming the fields this deployment will actually accept.
+     * <p>
+     * {@code inputSchema} is the only documentation an LLM caller has. "sort order" told it
+     * neither the {@code <field>.<order>} shape nor which fields exist, so the only way to use
+     * the parameter was to guess a field name and read the rejection -- measured with a real
+     * agent, which reached the right answer but reported that the error "is enough to localize
+     * the fault but not to fix it", because nothing enumerates the accepted fields.
+     * </p>
+     * <p>
+     * The list is per-deployment: Fess seeds it with score, filename, created, content_length,
+     * last_modified, timestamp, click_count and favorite_count, and
+     * {@code query.additional.sort.fields} extends it. Reading it here keeps the advertised
+     * schema and the validation that rejects a bad value fed from one source.
+     * </p>
+     *
+     * @return the description to advertise for the {@code sort} argument
+     */
+    protected String buildSortDescription() {
+        final String fields = String.join(", ", getSortableFields());
+        if (fields.isEmpty()) {
+            return "sort order, as <field>.asc or <field>.desc";
+        }
+        return "sort order, as <field>.asc or <field>.desc; accepted fields: " + fields;
+    }
+
+    /**
+     * Returns the fields this deployment accepts in {@code sort}.
+     * <p>
+     * Isolated behind this seam because it reads {@link ComponentUtil}, which the container-free
+     * tool tests do not have -- and because {@code QueryFieldConfig} populates the array lazily,
+     * so it can legitimately be null before the first query is built. Either way the caller
+     * falls back to describing the shape alone rather than failing to advertise the tool at all.
+     * </p>
+     *
+     * @return the accepted sort fields, never null, possibly empty
+     */
+    protected String[] getSortableFields() {
+        try {
+            final String[] fields = ComponentUtil.getQueryFieldConfig().getSortFields();
+            return fields == null ? new String[0] : fields;
+        } catch (final RuntimeException e) {
+            logger.debug("Could not resolve the sortable field list", e);
+            return new String[0];
+        }
     }
 
     /**

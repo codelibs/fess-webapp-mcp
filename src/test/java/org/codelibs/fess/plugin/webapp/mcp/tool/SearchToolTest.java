@@ -1098,4 +1098,51 @@ public class SearchToolTest {
                 .validateArguments(new HashMap<>(Map.of("q", "test", "fields", Map.of(), "as", Map.of(), "ex_q", List.of()))));
     }
 
+    // ------------------------------------------------------------------
+    // sort is discoverable
+
+    @Test
+    public void testSortDescriptionNamesTheAcceptedFields() {
+        final SearchTool tool = new SearchTool() {
+            @Override
+            protected String[] getSortableFields() {
+                return new String[] { "score", "content_length", "last_modified" };
+            }
+        };
+        final String description = tool.buildSortDescription();
+        assertTrue(description.contains("content_length"), "the caller must be able to read the field list: " + description);
+        assertTrue(description.contains(".asc"), "the caller must be able to read the shape: " + description);
+        assertTrue(description.contains(".desc"), "the caller must be able to read the shape: " + description);
+    }
+
+    @Test
+    public void testSortDescriptionStillDescribesTheShapeWithoutAContainer() {
+        // QueryFieldConfig fills the array lazily and ComponentUtil is absent here, so the
+        // tool must still advertise something usable rather than failing to build its schema.
+        final SearchTool tool = new SearchTool() {
+            @Override
+            protected String[] getSortableFields() {
+                return new String[0];
+            }
+        };
+        final String description = tool.buildSortDescription();
+        assertTrue(description.contains(".asc"), description);
+        assertFalse(description.contains("accepted fields"), "an empty list must not be advertised as the accepted set");
+    }
+
+    @Test
+    public void testSortableFieldsSurvivesAMissingContainer() {
+        // The real body, with no container behind ComponentUtil.
+        assertDoesNotThrow(() -> assertEquals(0, searchTool.getSortableFields().length));
+    }
+
+    @Test
+    public void testTheAdvertisedSchemaCarriesTheSortDescription() {
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> properties = (Map<String, Object>) searchTool.getInputSchema().get("properties");
+        @SuppressWarnings("unchecked")
+        final Map<String, Object> sort = (Map<String, Object>) properties.get("sort");
+        assertTrue(((String) sort.get("description")).contains(".asc"), "the schema itself must carry the shape");
+    }
+
 }
