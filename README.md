@@ -235,9 +235,10 @@ curl -sS -X POST http://localhost:8080/mcp \
             },
             "total": { "type": "integer", "description": "total number of matching documents" },
             "total_relation": { "type": "string", "description": "EQUAL_TO when total is exact, GREATER_THAN_OR_EQUAL_TO when the search engine stopped counting" },
-            "has_more": { "type": "boolean", "description": "whether a page exists after this one" }
+            "has_more": { "type": "boolean", "description": "whether a page exists after this one" },
+            "collapsed": { "type": "boolean", "description": "whether near-duplicate results were folded, so fewer than total items are obtainable" }
           },
-          "required": ["hits", "total", "has_more"],
+          "required": ["hits", "total", "has_more", "collapsed"],
           "additionalProperties": false
         },
         "annotations": {
@@ -414,7 +415,8 @@ curl -sS -X POST http://localhost:8080/mcp \
       ],
       "total": 128,
       "total_relation": "EQUAL_TO",
-      "has_more": true
+      "has_more": true,
+      "collapsed": false
     }
   }
 }
@@ -747,6 +749,20 @@ curl -sS -X POST http://localhost:8080/mcp \
 | `num` | integer | No | Number of suggestions (default: 10) |
 
 > Note: `num` is capped by Fess's `paging.search.page.max.size` configuration. Requests exceeding this upper bound are clamped to the configured maximum.
+
+### `total` counts matches; `collapsed` says whether you can reach them all
+
+`total` is the number of documents that matched, exactly as Fess computes it. Fess's
+`result.collapsed` setting — **`true` in the shipped `system.properties`** — folds near-duplicate
+results *after* that count, so with it on fewer than `total` items are obtainable however far a
+client pages. `collapsed` reports it, because otherwise `total` reads as a promise the caller
+cannot fulfil.
+
+Measured on a corpus of 30 near-identical documents with collapsing on: `total` is 30 with
+`total_relation` `EQUAL_TO`, 29 items are returned, and `start=29` yields an empty array. Fess's
+own `/api/v2/search` reports the same 30/29 split — the count is not wrong, it simply answers a
+different question from "how many can I fetch". Set `result.collapsed=false` if you need the two
+to agree.
 
 ## Get Document Tool Parameters
 

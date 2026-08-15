@@ -102,7 +102,7 @@ public class OutputSchemaConformanceTest {
      * {@code content_description}, exactly like {@code SearchToolTest} already does.
      */
     private static SearchTool searchToolReturning(final List<Map<String, Object>> docs) {
-        return new SearchTool() {
+        return new ContainerFreeSearchTool() {
             @Override
             protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments, final SearchRenderData data) {
                 return docs;
@@ -201,7 +201,7 @@ public class OutputSchemaConformanceTest {
     @Test
     @SuppressWarnings("unchecked")
     public void testSearchResultConformsToItsOwnSchema_EveryOptionalFieldPresent() {
-        final Map<String, Object> result = new SearchTool() {
+        final Map<String, Object> result = new ContainerFreeSearchTool() {
             @Override
             protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments, final SearchRenderData data) {
                 final Map<String, Object> doc = new HashMap<>();
@@ -247,7 +247,7 @@ public class OutputSchemaConformanceTest {
     @Test
     @SuppressWarnings("unchecked")
     public void testSearchResultConformsToItsOwnSchema_ZeroHits() {
-        final Map<String, Object> result = new SearchTool() {
+        final Map<String, Object> result = new ContainerFreeSearchTool() {
             @Override
             protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments, final SearchRenderData data) {
                 return List.of();
@@ -517,6 +517,22 @@ public class OutputSchemaConformanceTest {
         final Map<String, Object> placeholder = Map.of("type", "object");
         for (final McpTool tool : List.<McpTool> of(new SearchTool(), new SuggestTool(), new GetDocumentTool(), new IndexStatsTool())) {
             assertFalse(placeholder.equals(tool.getOutputSchema()), tool.getName() + " must declare a real schema, not the placeholder");
+        }
+    }
+
+    /**
+     * A {@link SearchTool} that can run without a DI container.
+     * <p>
+     * {@code call()} asks Fess whether result collapsing is on, which goes through
+     * {@code ComponentUtil.getFessConfig()}. Tests that only care about the shape of a result
+     * extend this instead of {@link SearchTool} directly, so that one container dependency does
+     * not have to be restated at every call site.
+     * </p>
+     */
+    private abstract static class ContainerFreeSearchTool extends SearchTool {
+        @Override
+        protected boolean isResultCollapsed() {
+            return false;
         }
     }
 }

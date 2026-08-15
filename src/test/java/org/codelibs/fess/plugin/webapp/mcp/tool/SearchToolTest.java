@@ -63,7 +63,7 @@ public class SearchToolTest {
     private final SearchTool searchTool = newSearchToolWithMaxContentLength(10000);
 
     private static SearchTool newSearchToolWithMaxContentLength(final int maxLength) {
-        return new SearchTool() {
+        return new ContainerFreeSearchTool() {
             @Override
             protected DocumentFormatter getDocumentFormatter() {
                 return new DocumentFormatter() {
@@ -413,7 +413,7 @@ public class SearchToolTest {
         // Positive control for the whole block above: proves validation rejects wrong types
         // rather than simply rejecting every argument. executeSearch is stubbed out so this
         // stays container-free; reaching it at all means validation let the call through.
-        final SearchTool tool = new SearchTool() {
+        final SearchTool tool = new ContainerFreeSearchTool() {
             @Override
             protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments, final SearchRenderData data) {
                 return List.of();
@@ -478,7 +478,7 @@ public class SearchToolTest {
      * @return a container-free {@code search} tool with fixed paging configuration
      */
     private static SearchTool newSearchToolWithFixedPaging() {
-        return new SearchTool() {
+        return new ContainerFreeSearchTool() {
             @Override
             protected FessConfig getFessConfig() {
                 return new FessConfig.SimpleImpl() {
@@ -743,7 +743,7 @@ public class SearchToolTest {
         // buildHit copying doc_id is a silent no-op unless the search actually asks Fess for the
         // field: getResponseFields() is the _source include list, and a field left out of it is
         // simply absent from every item. This is the half of the change that has runtime effect.
-        final SearchTool tool = new SearchTool() {
+        final SearchTool tool = new ContainerFreeSearchTool() {
             @Override
             protected FessConfig getFessConfig() {
                 return new FessConfig.SimpleImpl() {
@@ -843,7 +843,7 @@ public class SearchToolTest {
         // so a client had no way to learn it was looking at 3 of 30 -- the only way to answer
         // "how many match" was to page until an empty array came back. Fess already computes all
         // of this; the tool simply discarded the SearchRenderData after taking the items.
-        final SearchTool tool = new SearchTool() {
+        final SearchTool tool = new ContainerFreeSearchTool() {
             @Override
             protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments, final SearchRenderData data) {
                 data.setAllRecordCount(30L);
@@ -866,7 +866,7 @@ public class SearchToolTest {
         // OpenSearch stops counting past its track_total_hits limit, and Fess passes that through
         // as the relation. Reporting the capped number as if it were exact would be a lie, so the
         // relation travels with it.
-        final SearchTool tool = new SearchTool() {
+        final SearchTool tool = new ContainerFreeSearchTool() {
             @Override
             protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments, final SearchRenderData data) {
                 data.setAllRecordCount(10000L);
@@ -904,7 +904,7 @@ public class SearchToolTest {
     @Test
     @SuppressWarnings("unchecked")
     public void testSearchOmitsTheTotalRelationWhenFessDidNotSupplyOne() {
-        final SearchTool tool = new SearchTool() {
+        final SearchTool tool = new ContainerFreeSearchTool() {
             @Override
             protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments, final SearchRenderData data) {
                 data.setAllRecordCount(30L);
@@ -917,5 +917,83 @@ public class SearchToolTest {
 
         assertEquals(30L, structured.get("total"), "the count is still reported");
         assertFalse(structured.containsKey("total_relation"), "an unknown relation must be omitted, never emitted as null");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testSearchSaysWhenNearDuplicateResultsWereCollapsed() {
+        // result.collapsed is true in Fess's shipped system.properties, and it folds near
+        // duplicates *after* the match count is computed. Measured against a running server with
+        // a 30-document corpus of near-identical documents: total reported 30 with relation
+        // EQUAL_TO, but only 29 items were ever obtainable and start=29 returned an empty array.
+        // Fess's own /api/v2/search reports the same 30/29 split, so the count is not wrong --
+        // what was missing is any way for a client to know that fewer than total items exist,
+        // which since total exists at all is now actively misleading.
+        final SearchTool tool = new ContainerFreeSearchTool() {
+            @Override
+            protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments, final SearchRenderData data) {
+                data.setAllRecordCount(30L);
+                return List.of(Map.of("title", "t", "url", "https://example.com/"));
+            }
+
+            @Override
+            protected boolean isResultCollapsed() {
+                return true; // overrides ContainerFreeSearchTool's default for this case
+            }
+        };
+
+        final Map<String, Object> structured =
+                (Map<String, Object>) tool.call(Map.of("q", "x"), new McpCallContext()).get("structuredContent");
+
+        assertEquals(Boolean.TRUE, structured.get("collapsed"), "the client must be told duplicates were folded");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testSearchReportsNotCollapsedWhenTheFeatureIsOff() {
+        final SearchTool tool = new ContainerFreeSearchTool() {
+            @Override
+            protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments, final SearchRenderData data) {
+                data.setAllRecordCount(30L);
+                return List.of(Map.of("title", "t", "url", "https://example.com/"));
+            }
+
+            @Override
+            protected boolean isResultCollapsed() {
+                return false;
+            }
+        };
+
+        final Map<String, Object> structured =
+                (Map<String, Object>) tool.call(Map.of("q", "x"), new McpCallContext()).get("structuredContent");
+
+        assertEquals(Boolean.FALSE, structured.get("collapsed"), "without collapsing, total and the obtainable count agree");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testOutputSchemaDeclaresAndRequiresCollapsed() {
+        final Map<String, Object> schema = new SearchTool().getOutputSchema();
+        final Map<String, Object> properties = (Map<String, Object>) schema.get("properties");
+        final List<String> required = (List<String>) schema.get("required");
+
+        assertTrue(properties.containsKey("collapsed"), "outputSchema must declare collapsed");
+        assertTrue(required.contains("collapsed"), "it is computed for every response, so it is required: " + required);
+    }
+
+    /**
+     * A {@link SearchTool} that can run without a DI container.
+     * <p>
+     * {@code call()} asks Fess whether result collapsing is on, which goes through
+     * {@code ComponentUtil.getFessConfig()}. Tests that only care about the shape of a result
+     * extend this instead of {@link SearchTool} directly, so that one container dependency does
+     * not have to be restated at every call site.
+     * </p>
+     */
+    private abstract static class ContainerFreeSearchTool extends SearchTool {
+        @Override
+        protected boolean isResultCollapsed() {
+            return false;
+        }
     }
 }
