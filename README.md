@@ -744,9 +744,11 @@ curl -sS -X POST http://localhost:8080/mcp \
 | `sort` | string | No | Sort order (e.g., "score.desc", "last_modified.desc") |
 | `fields` | object | No | Field filters keyed by field name, e.g. `{"label": ["label1"]}` |
 | `lang` | string | No | Language filter |
-| `as` | object | No | Advanced search conditions, keyed by condition name |
+| `as` | object | No | Advanced search conditions, keyed by condition name (`q`, `epq`, `oq`, `nq`, `filetype`, `sitesearch`, `timestamp`, `occt`). Each value is an array of strings. Combined with `q`, never instead of it — see the note below |
 | `ex_q` | array of string | No | Extra queries |
 | `sdh` | string | No | Similar document hash |
+
+> Note: `as` narrows `q`, it does not replace it. Fess builds the query from the advanced conditions *instead of* the plain query string as soon as one of them is query-bearing, so `q` is folded into `as.q` before the search runs. `q=zebrafish` with `as={"filetype":["html"]}` returns HTML documents matching *zebrafish*; before 15.8 it returned every HTML document, discarding `q` with no error. If you send `as.q` as well, both are kept.
 
 > Note: an argument's **top-level** JSON type is enforced — `q`, `sort`, and `sdh` must be strings, `fields` and `as` objects, `ex_q` an array — and a mismatch is rejected with `-32602` naming the argument and the expected type, e.g. `Invalid type for parameter: q (expected a string)`. The same holds for `q` on `suggest` and `doc_id` on `get_document`. `start`, `offset`, `num`, and `lang` are deliberate exceptions: their accessors accept a numeric string (or, for `lang`, any value) by design, so rejecting one would be a behaviour change rather than a fix. What is *inside* `fields`, `as`, and `ex_q` — including `fields.label` — is not validated; see [Deviations From the Specification](#deviations-from-the-specification) item 12.
 
