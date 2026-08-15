@@ -54,14 +54,22 @@ public class ErrorCodeTest {
     }
 
     @Test
-    public void testResourceNotFoundCode() {
-        assertEquals(-32002, ErrorCode.ResourceNotFound.getCode());
+    public void testResourceNotFoundIsRemoved() {
+        for (final ErrorCode code : ErrorCode.values()) {
+            assertTrue(code.getCode() != -32002, "-32002 is retired in MCP 2026-07-28 and must not be emitted");
+        }
     }
 
     @Test
-    public void testEnumValues() {
-        final ErrorCode[] values = ErrorCode.values();
-        assertEquals(6, values.length, "Should have 6 error codes");
+    public void testNewProtocolErrorCodes() {
+        assertEquals(-32020, ErrorCode.HeaderMismatch.getCode());
+        assertEquals(-32021, ErrorCode.MissingRequiredClientCapability.getCode());
+        assertEquals(-32022, ErrorCode.UnsupportedProtocolVersion.getCode());
+    }
+
+    @Test
+    public void testErrorCodeCount() {
+        assertEquals(8, ErrorCode.values().length, "5 JSON-RPC + 3 MCP-specific codes");
     }
 
     @Test
@@ -72,7 +80,11 @@ public class ErrorCodeTest {
         assertEquals(ErrorCode.MethodNotFound, ErrorCode.valueOf("MethodNotFound"), "valueOf MethodNotFound should work");
         assertEquals(ErrorCode.InvalidParams, ErrorCode.valueOf("InvalidParams"), "valueOf InvalidParams should work");
         assertEquals(ErrorCode.InternalError, ErrorCode.valueOf("InternalError"), "valueOf InternalError should work");
-        assertEquals(ErrorCode.ResourceNotFound, ErrorCode.valueOf("ResourceNotFound"), "valueOf ResourceNotFound should work");
+        assertEquals(ErrorCode.HeaderMismatch, ErrorCode.valueOf("HeaderMismatch"), "valueOf HeaderMismatch should work");
+        assertEquals(ErrorCode.MissingRequiredClientCapability, ErrorCode.valueOf("MissingRequiredClientCapability"),
+                "valueOf MissingRequiredClientCapability should work");
+        assertEquals(ErrorCode.UnsupportedProtocolVersion, ErrorCode.valueOf("UnsupportedProtocolVersion"),
+                "valueOf UnsupportedProtocolVersion should work");
     }
 
     @Test
@@ -118,7 +130,9 @@ public class ErrorCodeTest {
         expectedCodes.put(ErrorCode.MethodNotFound, -32601);
         expectedCodes.put(ErrorCode.InvalidParams, -32602);
         expectedCodes.put(ErrorCode.InternalError, -32603);
-        expectedCodes.put(ErrorCode.ResourceNotFound, -32002);
+        expectedCodes.put(ErrorCode.HeaderMismatch, -32020);
+        expectedCodes.put(ErrorCode.MissingRequiredClientCapability, -32021);
+        expectedCodes.put(ErrorCode.UnsupportedProtocolVersion, -32022);
 
         for (final java.util.Map.Entry<ErrorCode, Integer> entry : expectedCodes.entrySet()) {
             assertEquals(entry.getValue().intValue(), entry.getKey().getCode(),

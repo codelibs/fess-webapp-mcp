@@ -16,33 +16,51 @@
 package org.codelibs.fess.plugin.webapp.api.mcp;
 
 import java.io.IOException;
-import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codelibs.core.lang.StringUtil;
+import org.codelibs.core.misc.Pair;
 import org.codelibs.fess.Constants;
 import org.codelibs.fess.api.BaseApiManager;
-import org.codelibs.fess.entity.FacetInfo;
-import org.codelibs.fess.entity.GeoInfo;
-import org.codelibs.fess.entity.HighlightInfo;
-import org.codelibs.fess.entity.SearchRenderData;
-import org.codelibs.fess.entity.SearchRequestParams;
-import org.codelibs.fess.mylasta.direction.FessConfig;
-import org.codelibs.fess.plugin.webapp.exception.McpApiException;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
+import org.codelibs.fess.plugin.webapp.mcp.McpConstants;
+import org.codelibs.fess.plugin.webapp.mcp.OriginValidator;
+import org.codelibs.fess.plugin.webapp.mcp.RateLimiter;
+import org.codelibs.fess.plugin.webapp.mcp.auth.FessTokenAuthenticator;
+import org.codelibs.fess.plugin.webapp.mcp.auth.McpAuthenticator;
+import org.codelibs.fess.plugin.webapp.mcp.auth.McpPrincipal;
+import org.codelibs.fess.plugin.webapp.mcp.auth.NoneAuthenticator;
+import org.codelibs.fess.plugin.webapp.mcp.auth.OAuthResourceServerAuthenticator;
+import org.codelibs.fess.plugin.webapp.mcp.handler.CompletionHandler;
+import org.codelibs.fess.plugin.webapp.mcp.handler.DiscoverHandler;
+import org.codelibs.fess.plugin.webapp.mcp.handler.PromptsGetHandler;
+import org.codelibs.fess.plugin.webapp.mcp.handler.PromptsListHandler;
+import org.codelibs.fess.plugin.webapp.mcp.handler.ResourceTemplatesListHandler;
+import org.codelibs.fess.plugin.webapp.mcp.handler.ResourcesListHandler;
+import org.codelibs.fess.plugin.webapp.mcp.handler.ResourcesReadHandler;
+import org.codelibs.fess.plugin.webapp.mcp.handler.ToolsCallHandler;
+import org.codelibs.fess.plugin.webapp.mcp.handler.ToolsListHandler;
+import org.codelibs.fess.plugin.webapp.mcp.json.Json;
+import org.codelibs.fess.plugin.webapp.mcp.protocol.HeaderValidator;
+import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
+import org.codelibs.fess.plugin.webapp.mcp.protocol.McpDispatcher;
+import org.codelibs.fess.plugin.webapp.mcp.protocol.McpError;
+import org.codelibs.fess.plugin.webapp.mcp.protocol.McpRequest;
+import org.codelibs.fess.plugin.webapp.mcp.protocol.McpRequestMeta;
+import org.codelibs.fess.plugin.webapp.mcp.protocol.McpResponseWriter;
+import org.codelibs.fess.plugin.webapp.mcp.McpSystemProperties;
 import org.codelibs.fess.util.ComponentUtil;
-import org.dbflute.optional.OptionalThing;
-import org.opensearch.common.xcontent.LoggingDeprecationHandler;
-import org.opensearch.common.xcontent.json.JsonXContent;
-import org.opensearch.core.xcontent.NamedXContentRegistry;
 
 import jakarta.annotation.PostConstruct;
 import jakarta.servlet.FilterChain;
@@ -51,30 +69,204 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 
 /**
- * The {@code McpApiManager} class is responsible for handling JSON-RPC 2.0 API requests
- * for the MCP (Management Control Protocol) API. It extends the {@code BaseApiManager}
- * and provides methods to process incoming HTTP requests, validate JSON-RPC requests,
- * and dispatch them to the appropriate handlers.
- *
+ * The {@code McpApiManager} class is the HTTP boundary for the MCP (Model Context Protocol)
+ * API, revision 2026-07-28. It extends {@code BaseApiManager} and owns exactly the transport
+ * concerns -- method/enablement checks, body-size enforcement, JSON-RPC envelope parsing,
+ * request-metadata header validation, and protocol-version negotiation -- before handing a
+ * validated {@link McpCallContext} to {@link McpDispatcher}, which routes it to the
+ * per-method handler that actually produces a result.
  */
 public class McpApiManager extends BaseApiManager {
 
     private static final Logger logger = LogManager.getLogger(McpApiManager.class);
 
-    private static final int DEFAULT_CONTENT_MAX_LENGTH = 10000;
+    /** The server name reported in {@code _meta.serverInfo} on every result. */
+    protected static final String SERVER_NAME = "fess-mcp-server";
 
-    /** The latest MCP protocol version supported by this server. */
-    protected static final String LATEST_PROTOCOL_VERSION = "2024-11-05";
+    /**
+     * HTTP 429, Too Many Requests. Not one of the named constants on {@link HttpServletResponse}
+     * -- that interface predates RFC 6585, which defined this status -- so it is named here
+     * instead of spelled out as a bare literal at the throw site.
+     */
+    private static final int HTTP_TOO_MANY_REQUESTS = 429;
 
-    /** The set of MCP protocol versions supported by this server. */
-    protected static final java.util.Set<String> SUPPORTED_PROTOCOL_VERSIONS = java.util.Set.of("2024-11-05");
+    /**
+     * The JSON-RPC methods {@link #enforceRateLimit} charges a token for: every method that
+     * reaches a Fess backend. See that method's Javadoc for why {@code resources/read} belongs
+     * here alongside the two the spec names, and why the list methods do not.
+     */
+    private static final Set<String> RATE_LIMITED_METHODS = Set.of("tools/call", "completion/complete", "resources/read");
 
-    /** Static sort candidate values for advanced_search.sort completion. */
-    protected static final List<String> SORT_VALUES =
-            List.of("score.desc", "score.asc", "last_modified.desc", "last_modified.asc", "create_timestamp.desc", "create_timestamp.asc");
+    /**
+     * {@code mcp.auth.mode}'s default value: authenticate nobody, reject nobody. Named (not a
+     * bare literal inside {@link #getAuthMode()}) so a test can assert the actual production
+     * default directly -- {@code getAuthMode()} itself is always overridden in container-free
+     * tests (it reads {@code ComponentUtil}), so nothing else exercises that literal. {@code
+     * public}, not {@code protected}: a test asserting against it lives in a different package
+     * and is not a subclass, so {@code protected} visibility would not reach it.
+     */
+    public static final String AUTH_MODE_NONE = "none";
 
-    /** The MIME type for JSON responses. */
-    protected String mimeType = "application/json";
+    /** {@code mcp.auth.mode} value selecting {@link FessTokenAuthenticator}. Same visibility rationale as {@link #AUTH_MODE_NONE}. */
+    public static final String AUTH_MODE_FESS_TOKEN = "fess_token";
+
+    /**
+     * {@code mcp.auth.mode} value selecting {@link OAuthResourceServerAuthenticator}, subject to
+     * that class's own {@link OAuthResourceServerAuthenticator#isUsable()} check. Same
+     * visibility rationale as {@link #AUTH_MODE_NONE}.
+     */
+    public static final String AUTH_MODE_OAUTH = "oauth";
+
+    /**
+     * The shared rate limiter together with the {@code mcp.rate.limit.per.minute} value it was
+     * built from, or {@code null} until {@link #getRateLimiter()} builds it on first use.
+     * <p>
+     * Not {@code final}: building it eagerly in a field initializer would call
+     * {@link #getRateLimitPerMinute()}'s {@code ComponentUtil} read for every {@code
+     * McpApiManager} construction, including every container-free test. {@code volatile} and
+     * paired with its configuration in a single record for the same reason
+     * {@link OAuthResourceServerAuthenticator}'s cached processor is -- see
+     * {@link #getRateLimiter()}.
+     * </p>
+     */
+    private volatile CachedRateLimiter cachedRateLimiter;
+
+    /**
+     * A {@link RateLimiter} together with the configured limit it was built from.
+     *
+     * @param perMinute the {@code mcp.rate.limit.per.minute} value {@code limiter} was built from
+     * @param limiter the limiter built from {@code perMinute}
+     */
+    private record CachedRateLimiter(int perMinute, RateLimiter limiter) {
+
+        /**
+         * Returns whether this entry was built from {@code candidate}.
+         *
+         * @param candidate the currently configured limit
+         * @return {@code true} when this entry is still current
+         */
+        boolean matches(final int candidate) {
+            return perMinute == candidate;
+        }
+    }
+
+    /**
+     * Also one of the nine handlers in {@link #dispatcher}; held separately because
+     * {@link DiscoverHandler#resolveServerVersion()} is the single seam that resolves this
+     * plugin's version for {@link #responseWriter}, so both need the same instance.
+     */
+    private final DiscoverHandler discoverHandler = new DiscoverHandler();
+
+    /**
+     * Routes calls to their per-method handler. The nine handlers are stateless, so one
+     * dispatcher instance is safe to share across every request this manager processes.
+     */
+    private final McpDispatcher dispatcher = new McpDispatcher(
+            List.of(discoverHandler, new ToolsListHandler(), new ToolsCallHandler(), new ResourcesListHandler(), new ResourcesReadHandler(),
+                    new ResourceTemplatesListHandler(), new PromptsListHandler(), new PromptsGetHandler(), new CompletionHandler()));
+
+    /**
+     * Writes every response and stamps this server's identity onto successful results. Built
+     * from a plain field-to-field call on the already-constructed {@link #discoverHandler}, not
+     * from an overridable instance method of {@code this}, so it carries none of the
+     * call-an-overridable-method-from-a-field-initializer hazard a subclass constructor could
+     * otherwise trip over.
+     */
+    private final McpResponseWriter responseWriter = new McpResponseWriter(SERVER_NAME, discoverHandler.resolveServerVersion());
+
+    /**
+     * The {@code mcp.auth.mode=none} authenticator. Stateless and free of any {@code
+     * ComponentUtil} dependency of its own, so building it here at construction time -- like
+     * {@link #dispatcher}, {@link #discoverHandler}, and {@link #responseWriter} above -- costs
+     * every container-free test nothing.
+     */
+    private final McpAuthenticator noneAuthenticator = new NoneAuthenticator();
+
+    /**
+     * The {@code mcp.auth.mode=fess_token} authenticator. Stateless at construction time -- it
+     * only reaches {@code ComponentUtil} from inside {@link McpAuthenticator#authenticate}, and
+     * only once a bearer token has actually been found on the request -- so building it here
+     * costs every container-free test nothing either.
+     */
+    private final McpAuthenticator fessTokenAuthenticator = new FessTokenAuthenticator();
+
+    /**
+     * The {@code mcp.auth.mode=oauth} authenticator. Stateless at construction time -- like
+     * {@link #fessTokenAuthenticator}, it only reaches {@code ComponentUtil} from inside its own
+     * methods -- so building it here costs every container-free test nothing, provided the test
+     * does not call {@link #getAuthenticator()}'s real (non-overridden) body with
+     * {@code mcp.auth.mode=oauth}. See {@link #getOAuthAuthenticator()}.
+     */
+    private final OAuthResourceServerAuthenticator oauthAuthenticator = new OAuthResourceServerAuthenticator();
+
+    /**
+     * The last {@link AuthState} {@link #getAuthenticator()} resolved, so a change can be told
+     * apart from a repeat.
+     * <p>
+     * {@code null} until either {@link #register()} seeds it at startup or the first request
+     * resolves one. An {@link AtomicReference} rather than a plain {@code volatile} field
+     * because two concurrent requests must not both report the same transition: whichever one
+     * wins {@link AtomicReference#getAndSet} owns the log line. The steady-state cost is a
+     * single volatile read (see {@link #noteAuthState}) -- no write, no allocation, no lock --
+     * which matters because this is consulted on every single request.
+     * </p>
+     */
+    private final AtomicReference<AuthState> lastAuthState = new AtomicReference<>();
+
+    /**
+     * The effective authentication posture {@code mcp.auth.mode} resolves to, as opposed to the
+     * raw configured string.
+     * <p>
+     * Exists because "is this endpoint authenticated?" is not a property of the mode string
+     * alone: {@code oauth} means two entirely different things depending on whether
+     * {@link OAuthResourceServerAuthenticator#isUsable()} agrees, and one of them is
+     * indistinguishable in behaviour from {@code none}. Collapsing the raw string onto these
+     * four states is what lets {@link #noteAuthState} report a genuine change in posture and
+     * stay silent on a cosmetic one -- a typo'd mode string and the literal {@code none} are the
+     * same state, so flipping between them is correctly not worth a log line, while
+     * {@code oauth} becoming unusable is.
+     * </p>
+     */
+    protected enum AuthState {
+
+        /** {@link NoneAuthenticator}: the default, and every unrecognised mode string. */
+        NONE(false),
+
+        /** {@link FessTokenAuthenticator}: a Fess access token is required. */
+        FESS_TOKEN(true),
+
+        /** {@link OAuthResourceServerAuthenticator}, with a configuration it accepts. */
+        OAUTH(true),
+
+        /**
+         * {@code mcp.auth.mode=oauth} with a configuration {@link
+         * OAuthResourceServerAuthenticator#isUsable()} rejects: behaves exactly like
+         * {@link #NONE}, but is a distinct state so that falling into it is reported rather
+         * than mistaken for an operator deliberately choosing {@code none}.
+         */
+        OAUTH_UNUSABLE(false);
+
+        /** Whether this state requires a credential of the caller. */
+        private final boolean authenticated;
+
+        /**
+         * Creates a state.
+         *
+         * @param authenticated whether this state requires a credential
+         */
+        AuthState(final boolean authenticated) {
+            this.authenticated = authenticated;
+        }
+
+        /**
+         * Returns whether this state requires a credential of the caller.
+         *
+         * @return true when callers must authenticate; false when every caller is anonymous
+         */
+        public boolean isAuthenticated() {
+            return authenticated;
+        }
+    }
 
     /**
      * Creates a new MCP API manager with the default path prefix "/mcp".
@@ -86,6 +278,13 @@ public class McpApiManager extends BaseApiManager {
 
     /**
      * Registers this API manager with the WebApiManagerFactory.
+     * <p>
+     * Also the natural "server startup" moment for the one-time {@code mcp.auth.mode=none} WARN
+     * ({@link #warnIfAuthenticationIsDisabled}): this {@code @PostConstruct} callback runs
+     * exactly once, when the DI container wires this singleton component in, strictly before
+     * the endpoint can accept its first request -- unlike {@link #process}, which runs on every
+     * request and would repeat the warning needlessly.
+     * </p>
      */
     @PostConstruct
     public void register() {
@@ -93,1450 +292,894 @@ public class McpApiManager extends BaseApiManager {
             logger.info("Load {}", this.getClass().getSimpleName());
         }
 
+        warnIfAuthenticationIsDisabled();
         ComponentUtil.getWebApiManagerFactory().add(this);
+    }
+
+    /**
+     * Reports the startup authentication posture: a WARN when {@code mcp.auth.mode} resolves to
+     * the default, unauthenticated {@code none} behaviour -- and, when {@code mcp.auth.mode=oauth}
+     * but {@link OAuthResourceServerAuthenticator#isUsable()} is {@code false}, a more severe
+     * ERROR explaining why.
+     * <p>
+     * The MCP Streamable HTTP transport's Security Considerations say a server SHOULD
+     * authenticate every connection. Shipping {@code none} as the default is a deliberate,
+     * documented deviation from that SHOULD -- made so every existing Fess deployment keeps
+     * working without a config change after upgrading this plugin -- and the WARN is that
+     * deviation's runtime acknowledgement. It fires for any value {@link #getAuthenticator()}
+     * resolves to {@code none} behaviour for, including an unrecognised mode string and a
+     * {@code oauth} mode that is not yet usable -- for that last case specifically, the more
+     * severe ERROR fires first: a protected-resource metadata document with no authorization
+     * server would be worse than not enabling authorization at all (RFC 9728 requires
+     * {@code authorization_servers} to be non-empty), so an operator who intended to turn OAuth
+     * on needs to know their configuration was rejected, not just that authentication is off.
+     * </p>
+     * <p>
+     * This also <em>seeds</em> {@link #lastAuthState}, which is the reason it shares
+     * {@link #logAuthState} with the per-request path rather than logging inline: without the
+     * seed, the first request after startup would resolve the same state from a {@code null}
+     * baseline and report it a second time.
+     * </p>
+     */
+    protected void warnIfAuthenticationIsDisabled() {
+        final String authMode = getAuthMode();
+        final AuthState state = resolveAuthState(authMode);
+        logAuthState(state, authMode, lastAuthState.getAndSet(state));
+    }
+
+    /**
+     * Collapses {@code authMode} (plus, for {@code oauth}, the authenticator's own verdict on
+     * its configuration) onto the effective posture it selects.
+     * <p>
+     * The single resolution both {@link #getAuthenticator()} and
+     * {@link #warnIfAuthenticationIsDisabled()} go through. They used to derive it separately --
+     * one picking an authenticator, the other re-deriving "is this authenticated?" from the mode
+     * string and a second {@code isUsable()} call -- which is exactly the shape that lets a
+     * future mode be wired into one and forgotten in the other, so that the endpoint silently
+     * stops warning about (or starts wrongly warning about) a posture it actually has.
+     * </p>
+     *
+     * @param authMode the normalised {@code mcp.auth.mode} value, as {@link #getAuthMode()} returns it
+     * @return the effective posture; never null
+     */
+    protected AuthState resolveAuthState(final String authMode) {
+        if (AUTH_MODE_FESS_TOKEN.equals(authMode)) {
+            return AuthState.FESS_TOKEN;
+        }
+        if (AUTH_MODE_OAUTH.equals(authMode)) {
+            return getOAuthAuthenticator().isUsable() ? AuthState.OAUTH : AuthState.OAUTH_UNUSABLE;
+        }
+        return AuthState.NONE;
+    }
+
+    /**
+     * Records the posture this request resolved, and reports it when -- and only when -- it
+     * differs from the last one.
+     * <p>
+     * {@link #getAuthenticator()} re-reads {@code mcp.auth.mode} and the {@code mcp.oauth.*}
+     * keys on every request, and Fess's {@code DynamicProperties} re-reads its backing file
+     * within seconds of an mtime change. A config edit can therefore flip {@code /mcp} from
+     * "401 for everyone" to "200 for anyone" with no restart -- which, before this method
+     * existed, produced no log line at all, because the only caller of
+     * {@link #warnIfAuthenticationIsDisabled()} is the {@code @PostConstruct} that ran hours
+     * earlier. That is precisely the change an operator most needs to see in the log.
+     * </p>
+     * <p>
+     * Reporting it on every request instead would be worse than silence: the WARN is several
+     * hundred bytes and this is an unauthenticated endpoint in the very mode being warned about,
+     * so a caller could turn it into a disk-filling amplifier. Hence the transition check, and
+     * hence its shape -- one volatile read on the steady-state path, with the
+     * {@link AtomicReference#getAndSet} write reached only when the state has actually changed.
+     * Two requests racing through the same transition are resolved by that {@code getAndSet}:
+     * the loser observes the state already recorded and stays quiet.
+     * </p>
+     *
+     * @param state the posture this request resolved
+     * @param authMode the normalised {@code mcp.auth.mode} value behind it, for the message
+     */
+    protected void noteAuthState(final AuthState state, final String authMode) {
+        if (lastAuthState.get() == state) {
+            return;
+        }
+        final AuthState previous = lastAuthState.getAndSet(state);
+        if (previous == state) {
+            return;
+        }
+        logAuthState(state, authMode, previous);
+    }
+
+    /**
+     * Emits the log line(s) for an authentication posture, shared by the startup path
+     * ({@link #warnIfAuthenticationIsDisabled()}) and the runtime-transition path
+     * ({@link #noteAuthState}).
+     * <p>
+     * Isolated behind this seam for the same container-free-testing reason as
+     * {@link #getOAuthAuthenticator()}: a test can override it to observe <em>that</em> a
+     * transition was reported, and how many times, which is the property
+     * {@link #noteAuthState}'s guard exists to provide and which no assertion against a live
+     * log appender could establish without wiring one up.
+     * </p>
+     *
+     * @param state the posture now in effect
+     * @param authMode the normalised {@code mcp.auth.mode} value behind it
+     * @param previous the posture previously in effect, or {@code null} when this is the first
+     *            resolution (startup, or a first request on a manager whose {@code @PostConstruct}
+     *            never ran)
+     */
+    protected void logAuthState(final AuthState state, final String authMode, final AuthState previous) {
+        if (state == AuthState.OAUTH_UNUSABLE && logger.isErrorEnabled()) {
+            logger.error("[MCP] mcp.auth.mode=oauth but the configuration is not usable - falling back to none. "
+                    + "mcp.oauth.issuer must be set to the authorization server's issuer URL; mcp.oauth.audience must be "
+                    + "set (it is REQUIRED for oauth mode -- it is never derived from the request's Host header) and must "
+                    + "end in /mcp (the only resource path this server's metadata endpoint serves); and mcp.oauth.jwks.uri "
+                    + "must be set to the authorization server's JWKS endpoint.");
+        }
+        if (!state.isAuthenticated()) {
+            if (logger.isWarnEnabled()) {
+                logger.warn(
+                        "[MCP] mcp.auth.mode={} - every /mcp caller is treated as anonymous{}. "
+                                + "Set mcp.auth.mode=fess_token, or mcp.auth.mode=oauth with mcp.oauth.issuer, "
+                                + "mcp.oauth.audience, and mcp.oauth.jwks.uri all set, to require a credential.",
+                        authMode, previous == null ? StringUtil.EMPTY : " as of now (it was " + previous + " until this request)");
+            }
+        } else if (previous != null && logger.isInfoEnabled()) {
+            logger.info(
+                    "[MCP] mcp.auth.mode={} - /mcp now requires a credential (it was {} until this request). "
+                            + "Fess re-reads its properties without a restart, so this took effect on a live endpoint.",
+                    authMode, previous);
+        }
     }
 
     @Override
     public boolean matches(final HttpServletRequest request) {
-        return request.getServletPath().startsWith(pathPrefix);
+        final String path = request.getServletPath();
+        // Exact or sub-path only: startsWith would also match "/mcpfoo".
+        // mcp.enabled is deliberately NOT consulted here. Returning false lets the filter
+        // chain continue, and the container's 404 goes through redirect.jsp, which
+        // sendRedirect()s to an HTML page an MCP client cannot interpret.
+        return pathPrefix.equals(path) || path.startsWith(pathPrefix + "/");
     }
 
     @Override
     public void process(final HttpServletRequest request, final HttpServletResponse response, final FilterChain chain)
             throws IOException, ServletException {
-        writeHeaders(response);
+        final McpResponseWriter writer = getResponseWriter();
+        Object id = null;
+        boolean hasId = false;
         try {
-            if (logger.isDebugEnabled()) {
-                logger.debug("[MCP] Incoming request: {} {} Content-Type={} RemoteAddr={}", request.getMethod(), request.getRequestURI(),
-                        request.getContentType(), request.getRemoteAddr());
+            // First, ahead of every exit: api.json.response.headers is a property of this
+            // endpoint's RESPONSES, so every response it can produce -- the 405 below, the 503
+            // below that, and each error the catch blocks answer with -- has to carry them. It
+            // used to sit after both early exits, which emitted none on either.
+            writeHeaders(response);
+            if (!isEnabled()) {
+                throw new McpError(HttpServletResponse.SC_SERVICE_UNAVAILABLE, ErrorCode.InternalError,
+                        "The MCP endpoint is disabled (mcp.enabled=false)");
+            }
+            if (!"POST".equalsIgnoreCase(request.getMethod())) {
+                // The transport is POST-only; GET and DELETE are legacy Streamable HTTP.
+                response.setStatus(HttpServletResponse.SC_METHOD_NOT_ALLOWED);
+                response.setHeader("Allow", "POST");
+                return;
+            }
+            validateOrigin(request); // Task 10
+            final McpPrincipal principal = authenticate(request, response); // Task 13-14
+
+            final String body = readRequestBody(request);
+            final McpRequest mcpRequest = McpRequest.parse(Json.parseObject(body));
+            hasId = mcpRequest.hasId();
+            id = mcpRequest.getId();
+
+            // Notifications carry no _meta and no metadata headers. This check MUST precede
+            // both, or every conformant notification would be rejected with a 400.
+            if (mcpRequest.isNotification()) {
+                writer.writeAccepted(response);
+                return;
             }
 
-            final String requestBody = readRequestBody(request);
-            if (logger.isDebugEnabled()) {
-                logger.debug("[MCP] Raw request body: {}", requestBody);
+            // A method MCP 2026-07-28 retired must be answered here, BEFORE header validation:
+            // a client old enough to still call initialize or ping sends neither
+            // MCP-Protocol-Version nor Mcp-Method (Mcp-Method did not exist before this
+            // revision), so leaving it to McpDispatcher would answer every such caller with
+            // -32020 "MCP-Protocol-Version is required" and make the retired-method diagnostic
+            // -- which exists for exactly those clients -- unreachable by them. Deliberately
+            // after the notification check above: that ordering is spec-relevant (a conformant
+            // notification carries no _meta and no headers) and must not regress. The dispatcher
+            // keeps the same branch for a modern client that calls a retired method with valid
+            // headers, and owns the error's definition so the two sites cannot drift.
+            if (getDispatcher().isRetired(mcpRequest.getMethod())) {
+                throw McpDispatcher.methodNotFound(mcpRequest.getMethod());
             }
 
-            final String trimmed = requestBody.trim();
-            if (trimmed.startsWith("[")) {
-                processBatchRequest(trimmed, response);
-            } else {
-                processSingleRequest(trimmed, response);
-            }
-        } catch (final Exception e) {
-            logger.warn("[MCP] Unexpected error reading request body: error={}", e.getMessage(), e);
-            writeError(null, ErrorCode.ParseError, e.getMessage(), response);
+            HeaderValidator.requirePresent(request, mcpRequest);
+            final McpRequestMeta meta = McpRequestMeta.parse(mcpRequest.getParams());
+            HeaderValidator.requireMatches(request, mcpRequest, meta);
+            requireSupportedVersion(meta.getProtocolVersion());
+
+            final McpCallContext context = new McpCallContext(mcpRequest, meta, mcpRequest.getParams(), principal);
+            enforceRateLimit(request, context); // Task 11
+            writer.writeResult(response, id, getDispatcher().dispatch(context));
+        } catch (final McpError e) {
+            writer.writeError(response, id, hasId, e);
+        } catch (final Throwable t) {
+            // An escaping throwable becomes a container 500, which redirect.jsp turns into
+            // a 302 to an HTML page. Everything must be converted here.
+            logger.warn("[MCP] Unhandled error: error={}", t.getMessage(), t);
+            writer.writeError(response, id, hasId, new McpError(HttpServletResponse.SC_OK, ErrorCode.InternalError, "internal error"));
         }
     }
 
     /**
-     * Reads the raw request body from the HTTP request.
+     * Reads the request body, refusing anything over {@link #getRequestMaxBytes()} -- without
+     * ever buffering more than that.
+     * <p>
+     * The read and the limit are deliberately the same operation. Reading the body in full and
+     * <em>then</em> comparing its size against the limit is not a limit at all: it lets an
+     * attacker-chosen body size decide the allocation, and on this endpoint that is reachable
+     * unauthenticated in the default {@code mcp.auth.mode=none}, ahead of
+     * {@link #enforceRateLimit}. Splitting the check back out into a separate "bounded" wrapper
+     * around an unbounded read would silently reintroduce that; if this method ever needs to
+     * grow a seam, the bound must move with the read, not stay behind.
+     * </p>
+     * <p>
+     * {@code readNBytes(max + 1)} is the whole mechanism: one byte past the limit is enough to
+     * prove a body is over it, and is therefore the largest allocation an oversized body can
+     * provoke. {@code request.getContentLength()} is deliberately <em>not</em> consulted as a
+     * shortcut -- it is a caller-supplied header, absent entirely for a chunked body, so
+     * trusting it would either reject honest chunked callers or be trivially understated by a
+     * dishonest one. The stream itself is the only trustworthy source of the real size.
+     * </p>
+     * <p>
+     * The comparison is on bytes, not characters: a multi-byte UTF-8 body has more bytes than
+     * {@code String.length()} would report, so decoding first and measuring the {@code String}
+     * would let a body of up to three times the limit through. Nothing is decoded until the
+     * byte count is known to be within the limit, so the {@code String} is always built from a
+     * complete body and can never be a mid-character truncation.
+     * </p>
      *
      * @param request the HTTP servlet request
      * @return the request body as a string
      * @throws IOException if an I/O error occurs while reading the request
+     * @throws McpError with HTTP 413 when the body exceeds {@code mcp.request.max.bytes}
      */
     protected String readRequestBody(final HttpServletRequest request) throws IOException {
-        return new String(request.getInputStream().readAllBytes(), Constants.UTF_8);
+        final int max = getRequestMaxBytes();
+        final byte[] bytes = request.getInputStream().readNBytes(probeSize(max));
+        if (bytes.length > max) {
+            throw new McpError(HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE, ErrorCode.InvalidRequest,
+                    "request body exceeds mcp.request.max.bytes (" + max + ")");
+        }
+        return new String(bytes, Constants.UTF_8);
     }
 
     /**
-     * Processes a single JSON-RPC request.
+     * Returns how many bytes {@link #readRequestBody} may read to decide whether {@code max} has
+     * been exceeded: one more than the limit, clamped at both ends.
+     * <p>
+     * Exists only to keep {@code max + 1} from being wrong for the two misconfigured extremes,
+     * both of which {@code readNBytes} would answer with an {@code IllegalArgumentException} or
+     * an overflowed negative count rather than an HTTP 413. A negative {@code max} probes one
+     * byte (any body at all then exceeds it, which is what the old read-everything-first code
+     * did too); {@code Integer.MAX_VALUE} probes {@code Integer.MAX_VALUE}, since no
+     * {@code byte[]} can exceed that and the limit is therefore unreachable either way.
+     * </p>
      *
-     * @param requestBody the raw JSON-RPC request body
-     * @param response    the HTTP servlet response to write the result to
-     * @throws IOException if writing the response fails
+     * @param max the configured limit in bytes
+     * @return the number of bytes to read, always at least 1 and never negative
      */
-    protected void processSingleRequest(final String requestBody, final HttpServletResponse response) throws IOException {
-        Object rpcId = null;
-        String method = null;
-        Map<String, Object> params = Collections.emptyMap();
-        try {
-            final Map<String, Object> reqMap = parseJsonObject(requestBody);
-            if (logger.isDebugEnabled()) {
-                logger.debug("[MCP] Parsed request body: {}", reqMap);
-            }
+    private static int probeSize(final int max) {
+        if (max >= Integer.MAX_VALUE) {
+            return Integer.MAX_VALUE;
+        }
+        return Math.max(max, 0) + 1;
+    }
 
-            // Retrieve JSON-RPC fields
-            final String jsonrpc = (String) reqMap.get("jsonrpc");
-            method = (String) reqMap.get("method");
-            rpcId = reqMap.get("id");
-            @SuppressWarnings("unchecked")
-            final Map<String, Object> paramsMap =
-                    Optional.ofNullable((Map<String, Object>) reqMap.get("params")).orElse(Collections.emptyMap());
-            params = paramsMap;
-            if (logger.isDebugEnabled()) {
-                logger.debug("[MCP] JSON-RPC fields: jsonrpc={}, method={}, id={}, params={}", jsonrpc, method, rpcId, params);
-            }
-
-            // Validate the request
-            if (!"2.0".equals(jsonrpc) || method == null) {
-                if (logger.isDebugEnabled()) {
-                    logger.debug("[MCP] Validation failed: jsonrpc='{}' (expected '2.0'), method={}", jsonrpc, method);
-                }
-                throw new McpApiException(ErrorCode.InvalidRequest, "Invalid JSON-RPC request: jsonrpc=" + jsonrpc + ", method=" + method);
-            }
-
-            // JSON-RPC 2.0: requests without "id" are notifications and MUST NOT receive a response
-            if (rpcId == null) {
-                dispatchNotification(method, params);
-                if (logger.isDebugEnabled()) {
-                    logger.debug("[MCP] Notification '{}' processed (no response sent)", method);
-                }
-                return;
-            }
-
-            // Execute the method
-            final Object result = dispatchRpcMethod(method, params);
-            if (logger.isDebugEnabled()) {
-                logger.debug("[MCP] Method '{}' completed successfully", method);
-            }
-
-            final Map<String, Object> resMap = new LinkedHashMap<>();
-            resMap.put("jsonrpc", "2.0");
-            resMap.put("id", rpcId);
-            resMap.put("result", result);
-            write(JsonXContent.contentBuilder().map(resMap).toString(), mimeType, Constants.UTF_8);
-        } catch (final McpApiException mae) {
-            // Client error - log at debug level
-            if (logger.isDebugEnabled()) {
-                logger.debug("[MCP] Client error: code={}, message='{}', id={}, method={}, params={}", mae.getCode(), mae.getMessage(),
-                        rpcId, method, params);
-            }
-            if (rpcId != null) {
-                writeError(rpcId, mae.getCode(), mae.getMessage(), response);
-            }
-        } catch (final Exception e) {
-            // Unexpected error - log at warn level (potential system issue)
-            logger.warn("[MCP] Unexpected error processing request: id={}, method={}, params={}, error={}", rpcId, method, params,
-                    e.getMessage(), e);
-            if (rpcId != null) {
-                writeError(rpcId, ErrorCode.InternalError, e.getMessage(), response);
-            }
+    /**
+     * Rejects a protocol version this server does not implement.
+     *
+     * @param requested the version the client declared
+     * @throws McpError with HTTP 400 and -32022 carrying both supported and requested
+     */
+    protected void requireSupportedVersion(final String requested) {
+        if (!McpConstants.SUPPORTED_PROTOCOL_VERSIONS.contains(requested)) {
+            final Map<String, Object> data = new LinkedHashMap<>();
+            data.put("supported", List.copyOf(McpConstants.SUPPORTED_PROTOCOL_VERSIONS));
+            data.put("requested", requested);
+            throw new McpError(HttpServletResponse.SC_BAD_REQUEST, ErrorCode.UnsupportedProtocolVersion, "Unsupported protocol version",
+                    data);
         }
     }
 
     /**
-     * Processes a batch JSON-RPC request (JSON array of requests).
-     * Per JSON-RPC 2.0 specification, batch requests MUST be supported.
+     * Rejects a request whose Origin header is present but not allowed.
+     * <p>
+     * The presence check happens here, before {@link #getAllowedOrigins()} runs, so a request
+     * with no {@code Origin} header -- every CLI bridge, stdio proxy, and non-browser client --
+     * never touches the DI container to build a {@link Set} it would not have consulted anyway.
+     * {@link OriginValidator#validate} carries its own {@code null} check too, as defence in
+     * depth, but that one alone would still pay for {@link #getAllowedOrigins()} on every
+     * request since Java evaluates a method argument before the call.
+     * </p>
      *
-     * @param requestBody the raw JSON-RPC batch request body (a JSON array)
-     * @param response    the HTTP servlet response to write the batch result to
-     * @throws IOException if writing the response fails
+     * @param request the servlet request
+     * @throws McpError with HTTP 403 when the Origin is present and invalid
      */
-    @SuppressWarnings("unchecked")
-    protected void processBatchRequest(final String requestBody, final HttpServletResponse response) throws IOException {
-        final List<Object> rawList;
-        try {
-            rawList = JsonXContent.jsonXContent.createParser(NamedXContentRegistry.EMPTY, LoggingDeprecationHandler.INSTANCE, requestBody)
-                    .list();
-        } catch (final Exception e) {
-            if (logger.isDebugEnabled()) {
-                logger.debug("[MCP] Failed to parse batch request body as JSON array: error='{}'", e.getMessage());
-            }
-            writeError(null, ErrorCode.ParseError, "Failed to parse batch request: " + e.getMessage(), response);
+    protected void validateOrigin(final HttpServletRequest request) {
+        if (request.getHeader("Origin") == null) {
             return;
         }
-
-        if (rawList.isEmpty()) {
-            writeError(null, ErrorCode.InvalidRequest, "Batch request must not be empty", response);
-            return;
-        }
-
-        final List<Map<String, Object>> requests = new ArrayList<>();
-        final List<Map<String, Object>> responses = new ArrayList<>();
-        for (final Object item : rawList) {
-            if (item instanceof Map) {
-                requests.add((Map<String, Object>) item);
-            } else {
-                // Non-object items in batch should produce InvalidRequest error per JSON-RPC 2.0
-                final Map<String, Object> errorResponse = new LinkedHashMap<>();
-                errorResponse.put("jsonrpc", "2.0");
-                errorResponse.put("id", null);
-                errorResponse.put("error",
-                        Map.of("code", ErrorCode.InvalidRequest.getCode(), "message", "Invalid request object in batch"));
-                responses.add(errorResponse);
-            }
-        }
-
-        responses.addAll(processBatchRequests(requests));
-
-        if (responses.isEmpty()) {
-            // All were notifications - no response per JSON-RPC 2.0 spec
-            return;
-        }
-
-        final StringBuilder batchJson = new StringBuilder("[");
-        for (int i = 0; i < responses.size(); i++) {
-            if (i > 0) {
-                batchJson.append(",");
-            }
-            batchJson.append(JsonXContent.contentBuilder().map(responses.get(i)).toString());
-        }
-        batchJson.append("]");
-        write(batchJson.toString(), mimeType, Constants.UTF_8);
+        OriginValidator.validate(request, getAllowedOrigins());
     }
 
     /**
-     * Processes a list of JSON-RPC requests and returns a list of responses.
-     * Notifications (requests without id) do not produce responses.
+     * Returns the configured additional allowed origins.
      *
-     * @param requests the list of parsed JSON-RPC request maps
-     * @return the list of response maps
+     * @return the allowed origins; empty means no browser origin is allowed at all -- including
+     *         the server's own, since {@link OriginValidator} deliberately has no self-origin
+     *         branch (it could only be derived from the caller-controlled {@code Host} header)
      */
-    @SuppressWarnings("unchecked")
-    protected List<Map<String, Object>> processBatchRequests(final List<Map<String, Object>> requests) {
-        final List<Map<String, Object>> responses = new ArrayList<>();
-        for (final Map<String, Object> reqMap : requests) {
-            final String jsonrpc = (String) reqMap.get("jsonrpc");
-            final String method = (String) reqMap.get("method");
-            final Object rpcId = reqMap.get("id");
-            final Map<String, Object> params =
-                    Optional.ofNullable((Map<String, Object>) reqMap.get("params")).orElse(Collections.emptyMap());
+    protected Set<String> getAllowedOrigins() {
+        final String value = getSystemProperty("mcp.allowed.origins", StringUtil.EMPTY);
+        if (StringUtil.isBlank(value)) {
+            return Collections.emptySet();
+        }
+        return Arrays.stream(value.split(",")).map(String::trim).filter(s -> !s.isEmpty()).collect(Collectors.toSet());
+    }
 
-            if (!"2.0".equals(jsonrpc) || method == null) {
-                if (rpcId != null) {
-                    responses.add(createErrorResponse(rpcId, ErrorCode.InvalidRequest,
-                            "Invalid JSON-RPC request: jsonrpc=" + jsonrpc + ", method=" + method));
+    /**
+     * Consumes a rate-limit token for methods that do real work.
+     * <p>
+     * There is no seam for this at pipeline step 4 (ahead of body parsing, alongside
+     * {@link #validateOrigin}): the JSON-RPC method name -- which methods this limit applies to
+     * and which it does not -- is only known once the body has been parsed and dispatched to,
+     * so token consumption has to happen here, immediately before
+     * {@link McpDispatcher#dispatch}, not earlier in {@link #process}.
+     * </p>
+     * <p>
+     * {@link #RATE_LIMITED_METHODS} is the exact set. {@code tools/call} and
+     * {@code completion/complete} are there per the spec's server MUST. {@code resources/read}
+     * is there because it is the same backend work under a different method name, not because
+     * the spec names it: reading {@code fess://document/<id>} makes the identical
+     * {@code SearchHelper#getDocumentByDocId} call the rate-limited {@code get_document} tool
+     * makes, and reading {@code fess://index/stats} runs a live cluster/JVM stats collection.
+     * Leaving it out made {@code Mcp-Method: resources/read} an unlimited, unauthenticated
+     * document-fetch channel that simply bypassed the limit on {@code tools/call} -- so any
+     * future method that reaches a backend belongs in that set too, whether or not the spec
+     * mentions it.
+     * </p>
+     * <p>
+     * {@code server/discover} and the {@code *&#47;list} methods stay excluded: those really are
+     * metadata reads, answered from this plugin's own static descriptions and (for the list
+     * methods) cached. {@code resources/read} was never in that category and was only ever
+     * grouped with them by proximity of name.
+     * </p>
+     * <p>
+     * {@link #getRateLimiter()} -- and therefore {@link #getRateLimitPerMinute()}'s
+     * {@code ComponentUtil} read -- is only reached once the method check above has passed, so a
+     * {@code server/discover} or list-method call never touches the DI container here, matching
+     * the same early-return discipline {@link #validateOrigin} uses for {@code getAllowedOrigins()}.
+     * </p>
+     *
+     * @param request the servlet request, consulted for the caller's IP when there is no
+     *            authenticated subject
+     * @param context the call context, supplying the resolved JSON-RPC method
+     * @throws McpError with HTTP 429 and a {@code retryAfterSeconds} data entry when the caller
+     *             identified by {@link #resolveRateLimitKey} is over the limit
+     */
+    protected void enforceRateLimit(final HttpServletRequest request, final McpCallContext context) {
+        final String method = context.getRequest().getMethod();
+        if (!RATE_LIMITED_METHODS.contains(method)) {
+            return;
+        }
+        final RateLimiter limiter = getRateLimiter();
+        final String key = resolveRateLimitKey(request, context);
+        if (!limiter.tryAcquire(key)) {
+            final Map<String, Object> data = new LinkedHashMap<>();
+            data.put("retryAfterSeconds", limiter.getRetryAfterSeconds());
+            throw new McpError(HTTP_TOO_MANY_REQUESTS, ErrorCode.InternalError, "rate limit exceeded (mcp.rate.limit.per.minute)", data);
+        }
+    }
+
+    /**
+     * Resolves the identity {@link #enforceRateLimit} counts calls against.
+     * <p>
+     * Keys on the authenticated subject when {@link #resolvePrincipalSubject} resolves one, the
+     * caller's IP otherwise. A {@code null} IP -- not expected from a real container, but
+     * possible from a test double -- falls back to the literal {@code "unknown"} rather than a
+     * {@code null} key, since {@code ConcurrentHashMap} (which {@link RateLimiter} is built on)
+     * rejects {@code null} keys outright.
+     * </p>
+     * <p>
+     * The IP comes from {@link #resolveClientIp}, not from {@code request.getRemoteAddr()}
+     * directly. In the default {@code mcp.auth.mode=none} every caller is anonymous, so the
+     * subject is always {@code null} and the IP is the <em>only</em> thing separating callers --
+     * and behind nginx or Apache {@code getRemoteAddr()} is the proxy's address for every one of
+     * them. Fess ships no {@code RemoteIpValve}, so that collapse is the default deployment,
+     * not an edge case: one caller spending the per-minute budget would 429 every other client
+     * of the same Fess instance.
+     * </p>
+     *
+     * @param request the servlet request
+     * @param context the call context
+     * @return the non-null key to rate-limit on
+     */
+    protected String resolveRateLimitKey(final HttpServletRequest request, final McpCallContext context) {
+        final String subject = resolvePrincipalSubject(context);
+        if (StringUtil.isNotBlank(subject)) {
+            return subject;
+        }
+        // Blank, not just null. The claims verifier requires only exp, so a token can carry
+        // "sub": "" -- and keying on that string would put every such caller, from every peer,
+        // into one shared bucket, where they would 429 each other. Absent and blank are the same
+        // thing here: no subject to key on, so fall back to the peer.
+        final String clientIp = resolveClientIp(request);
+        return clientIp != null ? clientIp : "unknown";
+    }
+
+    /**
+     * Resolves the caller's IP, honouring proxy headers only from a trusted proxy.
+     * <p>
+     * Delegates to Fess's own {@code RateLimitHelper#getClientIp}, which consults
+     * {@code X-Forwarded-For} / {@code X-Real-IP} <em>only</em> when {@code getRemoteAddr()} is
+     * listed in {@code rate.limit.trusted.proxies} (default {@code 127.0.0.1,::1}), and returns
+     * {@code getRemoteAddr()} otherwise. Reusing it rather than reading the headers here is the
+     * whole point: a plugin that trusted {@code X-Forwarded-For} unconditionally would let any
+     * caller mint an unlimited number of rate-limit keys just by varying a header, which is
+     * strictly worse than the shared-bucket problem being fixed.
+     * </p>
+     * <p>
+     * The residual trade-off is deliberate and worth stating. Where a trusted proxy <em>is</em>
+     * configured, this takes the first {@code X-Forwarded-For} element, which a client can forge
+     * if that proxy appends to the header instead of replacing it -- turning one shared bucket
+     * into unlimited per-key buckets for a determined attacker. Fess's own {@code rate.limit.*}
+     * filter accepts the same trade-off, and it is the better default: without it, the limiter
+     * is not merely bypassable by an attacker but actively harmful to innocent clients, who all
+     * share a single bucket they cannot influence.
+     * </p>
+     * <p>
+     * Isolated behind this seam because it reads {@code ComponentUtil}, and the HTTP-boundary
+     * test suite is container-free -- the same discipline {@link #getAuthMode()} and
+     * {@link #getRateLimitPerMinute()} use.
+     * </p>
+     *
+     * @param request the servlet request
+     * @return the caller's IP, or {@code null} when it cannot be determined
+     */
+    protected String resolveClientIp(final HttpServletRequest request) {
+        return ComponentUtil.getRateLimitHelper().getClientIp(request);
+    }
+
+    /**
+     * Resolves the authenticated subject for {@code context}, if any.
+     * <p>
+     * Reads it off {@link McpCallContext#getPrincipal()} -- {@code none} mode resolves the
+     * shared {@link McpPrincipal#anonymous()}, whose subject is {@code null}, so
+     * {@link #resolveRateLimitKey} falls back to the caller's IP exactly as before this method
+     * had anything to return; {@code fess_token} mode resolves a real, collision-safe, non-secret
+     * subject (see {@code FessTokenAuthenticator#subjectFor}), so an authenticated caller is now
+     * rate-limited per-token rather than per-IP -- multiple callers behind one NAT no longer
+     * share a bucket, and one token used from several source IPs gets exactly one.
+     * </p>
+     *
+     * @param context the call context
+     * @return the authenticated subject, or {@code null} when the caller is unauthenticated
+     */
+    protected String resolvePrincipalSubject(final McpCallContext context) {
+        final McpPrincipal principal = context.getPrincipal();
+        return principal != null ? principal.getSubject() : null;
+    }
+
+    /**
+     * Returns the shared rate limiter, building it from {@link #getRateLimitPerMinute()} on
+     * first use and rebuilding it whenever that value changes.
+     * <p>
+     * Built lazily rather than eagerly in the constructor so that constructing a
+     * {@code McpApiManager} -- something the container-free test suite does for every test --
+     * never touches {@code ComponentUtil}; the {@code ComponentUtil} read only happens the first
+     * time a {@code tools/call} or {@code completion/complete} request actually needs it. The
+     * built instance is cached so its per-key windows persist across requests instead of
+     * resetting on every call.
+     * </p>
+     * <p>
+     * <b>Do not simplify this back to a null check.</b> {@code RateLimiter.perMinute} is
+     * {@code final}, so a build-once cache pins {@code mcp.rate.limit.per.minute} for the life of
+     * the JVM: an operator who raises the limit under load, or sets it to {@code 0} to disable
+     * the limiter while debugging a client, sees nothing happen and gets no log line explaining
+     * why. Restarting Fess would be the only cure. That is the same trap
+     * {@link OAuthResourceServerAuthenticator#getProcessor()} documents for the JWKS source, and
+     * every other {@code mcp.*} setting is already re-read per request, so freezing this one
+     * alone is a surprise. Keying the cache on the configured value keeps the common case to one
+     * volatile read and one {@code int} comparison while letting an edit take effect.
+     * </p>
+     * <p>
+     * A rebuild necessarily discards the in-flight windows, so callers get a fresh allowance at
+     * the moment the limit changes. That is the desired reading of a deliberate config edit, and
+     * it cannot be exploited: reaching it requires write access to
+     * {@code WEB-INF/conf/system.properties}.
+     * </p>
+     *
+     * @return the rate limiter, shared across every request this manager processes
+     */
+    protected RateLimiter getRateLimiter() {
+        final int perMinute = getRateLimitPerMinute();
+        CachedRateLimiter cached = cachedRateLimiter;
+        if (cached == null || !cached.matches(perMinute)) {
+            synchronized (this) {
+                cached = cachedRateLimiter;
+                if (cached == null || !cached.matches(perMinute)) {
+                    cached = new CachedRateLimiter(perMinute, new RateLimiter(perMinute));
+                    cachedRateLimiter = cached;
                 }
-                continue;
-            }
-
-            // Notifications (no id) do not produce responses
-            if (rpcId == null) {
-                dispatchNotification(method, params);
-                continue;
-            }
-
-            try {
-                final Object result = dispatchRpcMethod(method, params);
-                final Map<String, Object> resMap = new LinkedHashMap<>();
-                resMap.put("jsonrpc", "2.0");
-                resMap.put("id", rpcId);
-                resMap.put("result", result);
-                responses.add(resMap);
-            } catch (final McpApiException mae) {
-                responses.add(createErrorResponse(rpcId, mae.getCode(), mae.getMessage()));
-            } catch (final Exception e) {
-                logger.warn("[MCP] Batch request error: id={}, method={}, error={}", rpcId, method, e.getMessage(), e);
-                responses.add(createErrorResponse(rpcId, ErrorCode.InternalError, e.getMessage()));
             }
         }
-        return responses;
+        return cached.limiter();
     }
 
     /**
-     * Creates a JSON-RPC 2.0 error response map.
+     * Returns the configured per-key request limit.
      *
-     * @param id the request id
-     * @param code the error code
-     * @param message the error message
-     * @return the error response map
+     * @return the number of {@code tools/call}/{@code completion/complete} calls a single key
+     *         may make per minute; {@code 0} disables the limiter
      */
-    protected Map<String, Object> createErrorResponse(final Object id, final ErrorCode code, final String message) {
-        final Map<String, Object> error = Map.of("code", code.getCode(), "message", message != null ? message : "Unknown error");
-        final Map<String, Object> errorResponse = new LinkedHashMap<>();
-        errorResponse.put("jsonrpc", "2.0");
-        errorResponse.put("id", id);
-        errorResponse.put("error", error);
-        return errorResponse;
+    protected int getRateLimitPerMinute() {
+        return getSystemPropertyAsInt("mcp.rate.limit.per.minute", 60);
     }
 
     /**
-     * Parses a JSON string as a map (JSON object).
+     * Authenticates the caller according to {@code mcp.auth.mode}, and -- only for a mode that
+     * owns role resolution -- seeds the {@code userRoles} request attribute Fess's
+     * {@code RoleQueryHelper} consults.
+     * <p>
+     * The {@code none} mode (the default) deliberately does <em>not</em> seed that attribute.
+     * {@code /mcp} already honours an {@code Authorization: Bearer <fess-token>} caller
+     * implicitly today, because this endpoint's search calls use {@code SearchRequestType.JSON},
+     * which makes {@code RoleQueryHelper} treat the call as an API request and consult its own
+     * access-token resolution. Seeding {@code userRoles} unconditionally would short-circuit
+     * that resolution via {@code RoleQueryHelper}'s own early return -- {@code userRoles} present
+     * means "trust this set, do not look any further" -- silently dropping every such existing
+     * deployment to guest permissions. See {@link McpAuthenticator#ownsRoleResolution()} for the
+     * mode-by-mode contract that keeps this correct as new modes are added.
+     * </p>
      *
-     * @param requestBody the JSON string to parse
-     * @return a map containing the parsed JSON
-     * @throws IOException if parsing fails
+     * @param request the servlet request
+     * @param response the servlet response, used to attach a {@code WWW-Authenticate} challenge
+     *            when authentication fails
+     * @return the caller; never {@code null}, may be {@link McpPrincipal#anonymous()}
+     * @throws McpError with HTTP 401 or 403 when authentication or authorization fails
      */
-    protected Map<String, Object> parseJsonObject(final String requestBody) throws IOException {
-        if (requestBody == null || requestBody.isEmpty()) {
-            if (logger.isDebugEnabled()) {
-                logger.debug("[MCP] Request body is empty");
-            }
-            throw new McpApiException(ErrorCode.ParseError, "Empty request body");
+    protected McpPrincipal authenticate(final HttpServletRequest request, final HttpServletResponse response) {
+        final McpAuthenticator authenticator = getAuthenticator();
+        final McpPrincipal principal = authenticator.authenticate(request, response);
+        if (authenticator.ownsRoleResolution()) {
+            request.setAttribute(McpConstants.USER_ROLES_ATTRIBUTE, resolveRoles(principal));
         }
-        try {
-            return JsonXContent.jsonXContent.createParser(NamedXContentRegistry.EMPTY, LoggingDeprecationHandler.INSTANCE, requestBody)
-                    .map();
-        } catch (final Exception e) {
-            if (logger.isDebugEnabled()) {
-                logger.debug("[MCP] Failed to parse request body as JSON: body='{}', error='{}'", requestBody, e.getMessage());
-            }
-            throw e;
-        }
+        return principal;
     }
 
     /**
-     * Dispatches a JSON-RPC method call to the appropriate handler.
+     * Selects the {@link McpAuthenticator} for the configured {@code mcp.auth.mode}.
+     * <p>
+     * {@code fess_token} always resolves to {@link FessTokenAuthenticator}. {@code oauth}
+     * resolves to {@link OAuthResourceServerAuthenticator} only when
+     * {@link OAuthResourceServerAuthenticator#isUsable()} agrees (i.e. {@code mcp.oauth.issuer},
+     * {@code mcp.oauth.audience}, and {@code mcp.oauth.jwks.uri} are all set, and the audience is
+     * compatible); an unusable {@code oauth} configuration falls back to {@code none} rather than
+     * serving a broken protected-resource document with an empty {@code authorization_servers}.
+     * Every other value -- the default {@code none}, and any empty or unrecognised string --
+     * resolves to {@link NoneAuthenticator}. Falling back rather than failing closed or raising
+     * an error keeps this call site stable as future modes are added: adding one means adding a
+     * branch here, not reshaping {@link #authenticate}.
+     * </p>
+     * <p>
+     * Every one of those reads happens per request, not once at startup, so the answer can and
+     * does change while the server is running. {@link #noteAuthState} is what makes such a
+     * change visible; see its Javadoc for why it belongs on this hot path and why it does not
+     * simply log every time.
+     * </p>
      *
-     * @param method the JSON-RPC method name
-     * @param params the method parameters
-     * @return the result of the method invocation
-     * @throws McpApiException if the method is not found
+     * @return the authenticator to use for this request
      */
-    protected Object dispatchRpcMethod(final String method, final Map<String, Object> params) {
-        if (logger.isDebugEnabled()) {
-            logger.debug("[MCP] Dispatching method: {}", method);
-        }
-        return switch (method) {
-        case "initialize" -> handleInitialize(params != null ? params : Collections.emptyMap());
-        case "ping" -> handlePing();
-        case "tools/list" -> handleListTools(params);
-        case "tools/call" -> handleInvoke(params);
-        case "resources/list" -> handleListResources(params);
-        case "resources/read" -> handleReadResource(params);
-        case "resources/templates/list" -> handleListResourceTemplates(params);
-        case "prompts/list" -> handleListPrompts(params);
-        case "prompts/get" -> handleGetPrompt(params);
-        case "completion/complete" -> handleComplete(params);
-        default -> {
-            if (logger.isDebugEnabled()) {
-                logger.debug("[MCP] Unknown method requested: {}", method);
-            }
-            throw new McpApiException(ErrorCode.MethodNotFound, "Unknown method: " + method);
-        }
-        };
-    }
-
-    /**
-     * Dispatches a JSON-RPC notification (request without id).
-     * Notifications MUST NOT produce a response per JSON-RPC 2.0 specification.
-     *
-     * @param method the notification method name
-     * @param params the notification parameters
-     */
-    protected void dispatchNotification(final String method, final Map<String, Object> params) {
-        if (logger.isDebugEnabled()) {
-            logger.debug("[MCP] Dispatching notification: {}", method);
-        }
-        switch (method) {
-        case "notifications/initialized":
-            if (logger.isDebugEnabled()) {
-                logger.debug("[MCP] Client initialized notification received");
-            }
-            break;
-        case "notifications/cancelled":
-            if (logger.isDebugEnabled()) {
-                logger.debug("[MCP] Cancellation notification received: {}", params);
-            }
-            break;
+    protected McpAuthenticator getAuthenticator() {
+        final String authMode = getAuthMode();
+        final AuthState state = resolveAuthState(authMode);
+        noteAuthState(state, authMode);
+        switch (state) {
+        case FESS_TOKEN:
+            return fessTokenAuthenticator;
+        case OAUTH:
+            return getOAuthAuthenticator();
         default:
-            if (logger.isDebugEnabled()) {
-                logger.debug("[MCP] Unknown notification received: {}", method);
-            }
-            break;
+            return noneAuthenticator;
         }
+    }
+
+    /**
+     * Returns the {@code mcp.auth.mode=oauth} authenticator.
+     * <p>
+     * Isolated behind this seam -- rather than reading the {@link #oauthAuthenticator} field
+     * directly from {@link #getAuthenticator()} and {@link #warnIfAuthenticationIsDisabled()} --
+     * so a container-free test can substitute an {@link OAuthResourceServerAuthenticator}
+     * subclass whose {@code isUsable()} is overridden directly, exercising both branches of
+     * {@link #getAuthenticator()}'s {@code oauth} handling without needing a live DI container
+     * (the real, non-overridden {@code isUsable()} reads {@code mcp.oauth.issuer} via
+     * {@code ComponentUtil}).
+     * </p>
+     *
+     * @return the oauth-mode authenticator, shared across every request this manager processes
+     */
+    protected OAuthResourceServerAuthenticator getOAuthAuthenticator() {
+        return oauthAuthenticator;
+    }
+
+    /**
+     * Returns the configured authentication mode.
+     * <p>
+     * Delegates to {@link #getSystemProperty(String, String)} rather than calling
+     * {@code ComponentUtil.getFessConfig().getSystemProperty(...)} directly, so a container-free
+     * test can stub that one primitive and drive this method's real body -- including its
+     * literal {@code "mcp.auth.mode"} key and {@link #AUTH_MODE_NONE} default argument -- without
+     * needing a live DI container. Every test double in this suite otherwise overrides
+     * {@code getAuthMode()} itself, which would leave this method's own body permanently
+     * unexercised.
+     * </p>
+     *
+     * @return {@code mcp.auth.mode}'s normalised value; {@link #AUTH_MODE_NONE} when unset
+     */
+    protected String getAuthMode() {
+        return normalizeAuthMode(getSystemProperty("mcp.auth.mode", AUTH_MODE_NONE));
+    }
+
+    /**
+     * Folds surrounding whitespace and letter case out of a raw {@code mcp.auth.mode} value, so
+     * that every comparison against {@link #AUTH_MODE_NONE}, {@link #AUTH_MODE_FESS_TOKEN} and
+     * {@link #AUTH_MODE_OAUTH} is made against a canonical form.
+     * <p>
+     * <b>Why this is not merely cosmetic.</b> {@code mcp.auth.mode} is the one MCP property whose
+     * misreading fails <em>open</em>: an unrecognised value resolves to {@link NoneAuthenticator}
+     * -- every {@code /mcp} caller anonymous -- so {@code mcp.auth.mode=oauth } with one trailing
+     * space used to leave the endpoint wide open while the operator believed they had turned
+     * authorization on. (The sibling {@code mcp.oauth.*} values are untrimmed too, but each of
+     * those fails <em>closed</em>: a stray space in {@code mcp.oauth.issuer} makes
+     * {@code isUsable()} reject the configuration, or makes token validation fail, both of which
+     * are self-announcing.)
+     * </p>
+     * <p>
+     * <b>Neither configuration channel normalises it for us.</b> {@code java.util.Properties#load}
+     * -- which backs {@code fess_config.properties} through corelib's {@code DynamicProperties} --
+     * strips only the whitespace <em>leading</em> a value and preserves a trailing run verbatim,
+     * including across a store/load round-trip; {@code -Dfess.system.mcp.auth.mode="oauth "} keeps
+     * it verbatim as well. And {@code FessProp#getSystemProperty} trims nothing on either channel.
+     * The trailing-whitespace form is also the variant an operator is least likely to catch in the
+     * WARN {@link #logAuthState} emits, since it renders there as an unremarkable double space.
+     * </p>
+     * <p>
+     * <b>This can only widen the set of strings that select an authenticating mode, never narrow
+     * it</b> -- {@code trim()} plus lower-casing maps each already-recognised value onto itself --
+     * so it cannot reintroduce the failure shape where a mode is selected and then falls back to
+     * anonymous behaviour: {@code oauth} still has to satisfy
+     * {@link OAuthResourceServerAuthenticator#isUsable()}, and that check is unchanged. Case
+     * folding follows Fess's own convention for mode-shaped system properties
+     * ({@code FessProp#getSystemPropertyAsBoolean} tests {@code Constants.TRUE.equalsIgnoreCase}),
+     * and uses {@link Locale#ROOT} because all three mode literals are ASCII and a locale-sensitive
+     * fold (Turkish {@code I}) would otherwise be able to change the answer with the server's
+     * default locale.
+     * </p>
+     *
+     * @param rawValue the raw property value; never null in practice, since the only caller passes
+     *            a non-null default
+     * @return the canonical form to compare, or {@code rawValue} unchanged when it is null
+     */
+    protected static String normalizeAuthMode(final String rawValue) {
+        return rawValue == null ? rawValue : rawValue.trim().toLowerCase(Locale.ROOT);
+    }
+
+    /**
+     * Reads a String-valued Fess system property.
+     * <p>
+     * Isolated so {@link #getAuthMode()} itself can be exercised container-free: this is the
+     * only place in that call chain that touches {@code ComponentUtil}
+     * ({@link #getSystemPropertyAsBoolean(String, boolean)} and
+     * {@link #getSystemPropertyAsInt(String, int)} cover the differently-typed reads -- see those
+     * seams' own Javadoc).
+     * </p>
+     * <p>
+     * {@link #getAllowedOrigins()} routes through this seam too. It used to call
+     * {@code ComponentUtil.getFessConfig().getSystemProperty(...)} directly, on the argument that
+     * it "already has its own container-free test double, so routing it through here would not
+     * exercise anything its own test does not already cover" -- and that argument was wrong,
+     * demonstrably: the double in question overrode {@code getAllowedOrigins()} <em>wholesale</em>,
+     * so the production body never ran in any test. A mutation that changed the key to
+     * {@code mcp.origins.allowed}, split on {@code ';'} instead of {@code ','}, and dropped the
+     * {@code trim()} left the whole suite green. Overriding this one primitive instead lets the
+     * real key, the real split and the real trim actually execute.
+     * </p>
+     *
+     * @param key the system property key
+     * @param defaultValue the value to return when the property is unset
+     * @return the property's value, or {@code defaultValue} when unset
+     */
+    protected String getSystemProperty(final String key, final String defaultValue) {
+        return ComponentUtil.getFessConfig().getSystemProperty(key, defaultValue);
+    }
+
+    /**
+     * Reads a boolean-valued Fess system property.
+     * <p>
+     * Isolated the same way {@link #getSystemProperty(String, String)} is for {@link
+     * #getAuthMode()}: {@link #isEnabled()}'s real (non-overridden) body is otherwise never
+     * exercised by this suite (every test double overrides {@code isEnabled()} wholesale), so
+     * neither its literal {@code "mcp.enabled"} key nor its {@code true} default is ever actually
+     * executed -- a typo in the key, or a flipped default, would silently disable the endpoint
+     * everywhere and pass every test.
+     * </p>
+     *
+     * @param key the system property key
+     * @param defaultValue the value to return when the property is unset
+     * @return the property's value, or {@code defaultValue} when unset
+     */
+    protected boolean getSystemPropertyAsBoolean(final String key, final boolean defaultValue) {
+        return ComponentUtil.getFessConfig().getSystemPropertyAsBoolean(key, defaultValue);
+    }
+
+    /**
+     * Reads an int-valued Fess system property.
+     * <p>
+     * Isolated the same way {@link #getSystemProperty(String, String)} is for {@link
+     * #getAuthMode()}, closing the same gap for {@link #getRequestMaxBytes()} and {@link
+     * #getRateLimitPerMinute()}: each test double in this suite otherwise overrides the
+     * higher-level method directly, so this is the only seam that lets either method's real body
+     * -- including its literal key and default-value argument -- actually run container-free.
+     * </p>
+     *
+     * @param key the system property key
+     * @param defaultValue the value to return when the property is unset
+     * @return the property's value, or {@code defaultValue} when unset
+     */
+    protected int getSystemPropertyAsInt(final String key, final int defaultValue) {
+        return McpSystemProperties.getAsInt(ComponentUtil.getFessConfig(), key, defaultValue);
+    }
+
+    /**
+     * Maps a principal to the encoded Fess permissions used for search filtering.
+     * <p>
+     * Only called for an authenticator that {@linkplain McpAuthenticator#ownsRoleResolution()
+     * owns role resolution} -- {@link #authenticate} skips it entirely for {@code none} mode, so
+     * neither {@link #getSearchGuestRoleList()} nor {@link #getSearchDefaultPermissionList()}
+     * (both backed by {@code ComponentUtil}) is ever consulted on that path.
+     * </p>
+     * <p>
+     * Seeding {@code userRoles} makes {@code RoleQueryHelper.build} return via its early return,
+     * which skips <em>every</em> other role source it would otherwise consult: the request
+     * parameter/header/cookie role channels, and the permissions of a logged-in
+     * {@code FessUserBean}. None of those apply to an MCP caller -- this endpoint has no session
+     * and configures none of those channels -- so skipping them is a correct no-op, not a gap.
+     * The two effects this method exists to reproduce are the ones that are <em>not</em> no-ops
+     * for MCP: the unconditional {@code role.search.default.permissions} addition, and the
+     * guest-role fallback for a caller with no resolved permissions of their own.
+     * </p>
+     *
+     * @param principal the caller
+     * @return the permission set, falling back to the configured guest roles when
+     *         {@code principal} carries none of its own
+     */
+    protected Set<String> resolveRoles(final McpPrincipal principal) {
+        final Set<String> roles = new HashSet<>(principal.getPermissions());
+        if (roles.isEmpty()) {
+            // getSearchGuestRoleList also appends the "1guest" user form; splitting the
+            // property by hand would lose it.
+            roles.addAll(getSearchGuestRoleList());
+        }
+        // RoleQueryHelper's early return skips role.search.default.permissions, so add it here.
+        roles.addAll(getSearchDefaultPermissionList());
+        return roles;
+    }
+
+    /**
+     * Returns the configured guest role list, including the {@code "1guest"} user form.
+     *
+     * @return {@code FessConfig#getSearchGuestRoleList()}'s result
+     */
+    protected List<String> getSearchGuestRoleList() {
+        return ComponentUtil.getFessConfig().getSearchGuestRoleList();
+    }
+
+    /**
+     * Returns the encoded {@code role.search.default.permissions} list.
+     *
+     * @return {@code FessConfig#getSearchDefaultPermissionsAsArray()}'s result, as a list
+     */
+    protected List<String> getSearchDefaultPermissionList() {
+        return Arrays.asList(ComponentUtil.getFessConfig().getSearchDefaultPermissionsAsArray());
+    }
+
+    /**
+     * Returns whether the MCP endpoint is enabled.
+     *
+     * @return true when mcp.enabled is "true"
+     */
+    protected boolean isEnabled() {
+        // getSystemPropertyAsBoolean treats anything other than "true" as false.
+        return getSystemPropertyAsBoolean("mcp.enabled", true);
+    }
+
+    /**
+     * Returns the maximum accepted request body size in bytes.
+     *
+     * @return the limit in bytes
+     */
+    protected int getRequestMaxBytes() {
+        return getSystemPropertyAsInt("mcp.request.max.bytes", 1048576);
+    }
+
+    /**
+     * Returns the dispatcher that routes calls to their per-method handler.
+     *
+     * @return the dispatcher
+     */
+    protected McpDispatcher getDispatcher() {
+        return dispatcher;
+    }
+
+    /**
+     * Returns the writer that stamps this server's identity onto every response.
+     *
+     * @return the response writer
+     */
+    protected McpResponseWriter getResponseWriter() {
+        return responseWriter;
     }
 
     @Override
     protected void writeHeaders(final HttpServletResponse response) {
-        ComponentUtil.getFessConfig().getApiJsonResponseHeaderList().forEach(e -> response.setHeader(e.getFirst(), e.getSecond()));
+        applyApiJsonResponseHeaders(response, getApiJsonResponseHeaderList());
     }
 
     /**
-     * Handles the ping request per MCP specification.
-     * Returns an empty result to indicate the server is alive.
-     *
-     * @return an empty map
-     */
-    protected Map<String, Object> handlePing() {
-        return Collections.emptyMap();
-    }
-
-    /**
-     * Handles the initialization process and returns a map containing
-     * the capabilities of the MCP API.
-     *
-     * @return a map with the following keys:
-     *         - "protocolVersion": the MCP protocol version (e.g., "2024-11-05").
-     *         - "capabilities": object containing server capabilities including tools, resources, and prompts support.
-     *         - "serverInfo": object containing server name and version information.
-     */
-    protected Map<String, Object> handleInitialize() {
-        return handleInitialize(Collections.emptyMap());
-    }
-
-    /**
-     * Handles the initialization process with protocol version negotiation.
-     *
-     * @param params the request parameters (may contain "protocolVersion" and "clientInfo")
-     * @return a map with protocolVersion, capabilities, serverInfo, and instructions
-     */
-    protected Map<String, Object> handleInitialize(final Map<String, Object> params) {
-        final Map<String, Object> caps = new HashMap<>();
-        caps.put("tools", new HashMap<>());
-        caps.put("resources", new HashMap<>());
-        caps.put("prompts", new HashMap<>());
-        caps.put("completions", new HashMap<>());
-
-        final Map<String, Object> serverInfo = new HashMap<>();
-        serverInfo.put("name", "fess-mcp-server");
-        serverInfo.put("version", "1.0.0");
-
-        // Protocol version negotiation.
-        // If the client requests a version we support, echo it back.
-        // Otherwise (including null), respond with the latest version we support.
-        String negotiatedVersion = LATEST_PROTOCOL_VERSION;
-        if (params != null) {
-            final Object requested = params.get("protocolVersion");
-            if (requested instanceof final String requestedStr && SUPPORTED_PROTOCOL_VERSIONS.contains(requestedStr)) {
-                negotiatedVersion = requestedStr;
-            } else if (logger.isDebugEnabled() && requested != null) {
-                logger.debug("[MCP] Client requested unsupported protocolVersion={}, falling back to {}", requested,
-                        LATEST_PROTOCOL_VERSION);
-            }
-            if (logger.isDebugEnabled()) {
-                final Object clientInfo = params.get("clientInfo");
-                if (clientInfo != null) {
-                    logger.debug("[MCP] Initialize clientInfo={}", clientInfo);
-                }
-            }
-        }
-
-        final Map<String, Object> result = new LinkedHashMap<>();
-        result.put("protocolVersion", negotiatedVersion);
-        result.put("capabilities", caps);
-        result.put("serverInfo", serverInfo);
-        result.put("instructions",
-                "Fess Enterprise Search Server. Use the 'search' tool to perform full-text search with Lucene-like query syntax "
-                        + "(AND default, OR explicit, quotes for phrase, - for exclusion). "
-                        + "Use 'get_index_stats' to check index health. Use 'suggest' for query autocomplete.");
-        return result;
-    }
-
-    /**
-     * Handles the creation of a list of tools with their metadata.
-     *
-     * @return A map with "tools" key containing a list of available tools. Each tool includes:
-     *         - "name": The name of the tool (e.g., "search").
-     *         - "description": A brief description of the tool (e.g., "Search documents via Fess").
-     *         - "inputSchema": A JSON Schema object defining the tool's input parameters.
-     */
-    protected Map<String, Object> handleListTools() {
-        return handleListTools(Collections.emptyMap());
-    }
-
-    /**
-     * Handles the creation of a list of tools with their metadata.
-     * The cursor param is accepted gracefully but ignored since item counts are small.
-     *
-     * @param params the request parameters (cursor param accepted but not required)
-     * @return A map with "tools" key containing a list of available tools. Each tool includes:
-     *         - "name": The name of the tool (e.g., "search").
-     *         - "description": A brief description of the tool (e.g., "Search documents via Fess").
-     *         - "inputSchema": A JSON Schema object defining the tool's input parameters.
-     */
-    protected Map<String, Object> handleListTools(final Map<String, Object> params) {
-        // Search tool
-        final Map<String, Object> searchProperties = new HashMap<>();
-        searchProperties.put("q", Map.of("type", "string", "description", "query string"));
-        searchProperties.put("start", Map.of("type", "integer", "description", "start position"));
-        searchProperties.put("offset", Map.of("type", "integer", "description", "offset (alias of start)"));
-        searchProperties.put("num", Map.of("type", "integer", "description", "number of results", "default", 3));
-        searchProperties.put("sort", Map.of("type", "string", "description", "sort order"));
-        searchProperties.put("fields.label", Map.of("type", "array", "description", "labels to return"));
-        searchProperties.put("lang", Map.of("type", "string", "description", "language"));
-        searchProperties.put("preference", Map.of("type", "string", "description", "preference"));
-
-        final Map<String, Object> searchInputSchema = new HashMap<>();
-        searchInputSchema.put("type", "object");
-        searchInputSchema.put("properties", searchProperties);
-        searchInputSchema.put("required", List.of("q"));
-
-        final Map<String, Object> toolSearch = new HashMap<>();
-        toolSearch.put("name", "search");
-        toolSearch.put("description",
-                "Search documents via Fess. Query syntax is similar to Lucene: " + "multiple terms are combined with AND by default, "
-                        + "use OR explicitly for OR search (e.g., \"term1 OR term2\"), "
-                        + "use quotes for phrase search, use - for exclusion.");
-        toolSearch.put("inputSchema", searchInputSchema);
-        toolSearch.put("annotations",
-                Map.of("title", "Search Documents", "readOnlyHint", true, "destructiveHint", false, "openWorldHint", false));
-
-        // Index stats tool
-        final Map<String, Object> statsInputSchema = new HashMap<>();
-        statsInputSchema.put("type", "object");
-        statsInputSchema.put("properties", new HashMap<>());
-
-        final Map<String, Object> toolStats = new HashMap<>();
-        toolStats.put("name", "get_index_stats");
-        toolStats.put("description", "Get index statistics and information");
-        toolStats.put("inputSchema", statsInputSchema);
-        toolStats.put("annotations",
-                Map.of("title", "Get Index Statistics", "readOnlyHint", true, "destructiveHint", false, "openWorldHint", false));
-
-        // Suggest tool
-        final Map<String, Object> suggestProperties = new HashMap<>();
-        suggestProperties.put("q", Map.of("type", "string", "description", "query prefix for autocomplete"));
-        suggestProperties.put("num", Map.of("type", "integer", "description", "number of suggestions", "default", 10));
-
-        final Map<String, Object> suggestInputSchema = new HashMap<>();
-        suggestInputSchema.put("type", "object");
-        suggestInputSchema.put("properties", suggestProperties);
-        suggestInputSchema.put("required", List.of("q"));
-
-        final Map<String, Object> toolSuggest = new HashMap<>();
-        toolSuggest.put("name", "suggest");
-        toolSuggest.put("description", "Get autocomplete suggestions for a search query prefix");
-        toolSuggest.put("inputSchema", suggestInputSchema);
-        toolSuggest.put("annotations", Map.of("title", "Suggest", "readOnlyHint", true, "destructiveHint", false, "openWorldHint", false));
-
-        // Get document tool
-        final Map<String, Object> getDocProperties = new HashMap<>();
-        getDocProperties.put("doc_id", Map.of("type", "string", "description", "document ID to retrieve"));
-
-        final Map<String, Object> getDocInputSchema = new HashMap<>();
-        getDocInputSchema.put("type", "object");
-        getDocInputSchema.put("properties", getDocProperties);
-        getDocInputSchema.put("required", List.of("doc_id"));
-
-        final Map<String, Object> toolGetDoc = new HashMap<>();
-        toolGetDoc.put("name", "get_document");
-        toolGetDoc.put("description", "Retrieve a document by its document ID");
-        toolGetDoc.put("inputSchema", getDocInputSchema);
-        toolGetDoc.put("annotations",
-                Map.of("title", "Get Document", "readOnlyHint", true, "destructiveHint", false, "openWorldHint", false));
-
-        return Map.of("tools", List.of(toolSearch, toolStats, toolSuggest, toolGetDoc));
-    }
-
-    /**
-     * Handles the invocation of tools via the MCP API by processing the input parameters,
-     * executing the requested tool, and returning the results in MCP-compliant format.
-     *
-     * @param params A map containing the input parameters for the tool call.
-     *               It must include "name" (tool name) and "arguments" (tool parameters).
-     * @return A map containing the tool execution results in MCP format with "content" array.
-     *         Each content item has "type" and "text" fields.
-     * @throws McpApiException If required parameters are missing or invalid.
-     */
-    @SuppressWarnings("unchecked")
-    protected Map<String, Object> handleInvoke(final Map<String, Object> params) {
-        final String tool = (String) params.get("name");
-        if (tool == null || tool.isEmpty()) {
-            throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: name");
-        }
-
-        final Map<String, Object> toolParams = (Map<String, Object>) params.get("arguments");
-        if (toolParams == null) {
-            throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: arguments");
-        }
-
-        if (logger.isDebugEnabled()) {
-            logger.debug("[MCP] Invoking tool: name={}, arguments={}", tool, toolParams);
-        }
-
-        try {
-            return switch (tool) {
-            case "search" -> invokeSearch(toolParams);
-            case "get_index_stats" -> invokeGetIndexStats();
-            case "suggest" -> invokeSuggest(toolParams);
-            case "get_document" -> invokeGetDocument(toolParams);
-            // TODO Add more administrative tools here...
-            default -> {
-                if (logger.isDebugEnabled()) {
-                    logger.debug("[MCP] Unknown tool requested: {}", tool);
-                }
-                throw new McpApiException(ErrorCode.InvalidParams, "Unknown tool: " + tool);
-            }
-            };
-        } catch (final McpApiException e) {
-            throw e;
-        } catch (final Exception e) {
-            logger.warn("[MCP] Tool '{}' execution failed: {}", tool, e.getMessage(), e);
-            final String errorMessage = e.getMessage() != null ? e.getMessage() : "Unknown error";
-            final Map<String, Object> result = new LinkedHashMap<>();
-            result.put("content", List.of(Map.of("type", "text", "text", "Error: " + errorMessage)));
-            result.put("isError", true);
-            return result;
-        }
-    }
-
-    /**
-     * Invokes the search tool with the specified parameters.
-     *
-     * @param params the search parameters including query string (q), pagination (start, num), and other options
-     * @return a map containing the search results in MCP-compliant format
-     */
-    @SuppressWarnings("unchecked")
-    protected Map<String, Object> invokeSearch(final Map<String, Object> params) {
-        // Create and populate SearchRequestParams
-        final FessConfig fessConfig = ComponentUtil.getFessConfig();
-        final SearchRequestParams reqParams = new SearchRequestParams() {
-            private final Map<String, Object> paramMap = params;
-
-            @Override
-            public String getQuery() {
-                return (String) paramMap.get("q");
-            }
-
-            @Override
-            public Map<String, String[]> getFields() {
-                final Map<String, Object> fields = (Map<String, Object>) paramMap.get("fields");
-                if (fields != null) {
-                    return fields.entrySet()
-                            .stream()
-                            .collect(Collectors.toMap(Map.Entry::getKey, e -> ((List<String>) e.getValue()).toArray(n -> new String[n])));
-                }
-                return Collections.emptyMap();
-            }
-
-            @Override
-            public Map<String, String[]> getConditions() {
-                final Map<String, Object> conditions = (Map<String, Object>) paramMap.get("as");
-                if (conditions != null) {
-                    return conditions.entrySet()
-                            .stream()
-                            .collect(Collectors.toMap(Map.Entry::getKey,
-                                    e -> ((List<?>) e.getValue()).stream().map(Object::toString).toArray(n -> new String[n])));
-                }
-                return Collections.emptyMap();
-            }
-
-            @Override
-            public String[] getLanguages() {
-                final Object lang = paramMap.get("lang");
-                if (lang instanceof final String[] languages) {
-                    return languages;
-                }
-                if (lang != null) {
-                    return new String[] { lang.toString() };
-                }
-
-                return new String[0];
-            }
-
-            @Override
-            public GeoInfo getGeoInfo() {
-                return null; // Not implemented
-            }
-
-            @Override
-            public FacetInfo getFacetInfo() {
-                return null; // Not implemented
-            }
-
-            @Override
-            public HighlightInfo getHighlightInfo() {
-                final int fragmentSize = fessConfig.getSystemPropertyAsInt("mcp.highlight.fragment.size", 500);
-                final int numOfFragments = fessConfig.getSystemPropertyAsInt("mcp.highlight.num.of.fragments", 3);
-                return new HighlightInfo().fragmentSize(fragmentSize).numOfFragments(numOfFragments);
-            }
-
-            @Override
-            public String getSort() {
-                return (String) paramMap.get("sort");
-            }
-
-            @Override
-            public int getStartPosition() {
-                final Object value = paramMap.get("start");
-                try {
-                    if (value != null) {
-                        final int start = value instanceof final Number n ? n.intValue() : Integer.parseInt(value.toString());
-                        if (start > -1) {
-                            return start;
-                        }
-                    }
-                } catch (final NumberFormatException e) {
-                    logger.debug("Failed to parse {}", value, e);
-                }
-                return ComponentUtil.getFessConfig().getPagingSearchPageStartAsInteger();
-            }
-
-            @Override
-            public int getPageSize() {
-                final Object value = paramMap.get("num");
-                try {
-                    if (value != null) {
-                        final int num = value instanceof final Number n ? n.intValue() : Integer.parseInt(value.toString());
-                        if (num > fessConfig.getPagingSearchPageMaxSizeAsInteger().intValue() || num <= 0) {
-                            return fessConfig.getPagingSearchPageMaxSizeAsInteger();
-                        }
-                        return num;
-                    }
-                } catch (final NumberFormatException e) {
-                    logger.debug("Failed to parse {}", value, e);
-                }
-                return fessConfig.getSystemPropertyAsInt("mcp.default.page.size", 3);
-            }
-
-            @Override
-            public int getOffset() {
-                final Object value = paramMap.get("offset");
-                try {
-                    if (value != null) {
-                        return value instanceof final Number n ? n.intValue() : Integer.parseInt(value.toString());
-
-                    }
-                } catch (final NumberFormatException e) {
-                    logger.debug("Failed to parse {}", value, e);
-                }
-                return 0;
-            }
-
-            @Override
-            public String[] getExtraQueries() {
-                final List<String> exQs = (List<String>) paramMap.get("ex_q");
-                return exQs != null ? exQs.toArray(new String[0]) : null;
-            }
-
-            @Override
-            public Object getAttribute(final String name) {
-                return null; // Not implemented
-            }
-
-            @Override
-            public Locale getLocale() {
-                return Locale.ROOT;
-            }
-
-            @Override
-            public SearchRequestType getType() {
-                return SearchRequestType.JSON;
-            }
-
-            @Override
-            public String getSimilarDocHash() {
-                return (String) paramMap.get("sdh");
-            }
-
-            @Override
-            public String[] getResponseFields() {
-                return new String[] { fessConfig.getIndexFieldTitle(), fessConfig.getIndexFieldContent(), fessConfig.getIndexFieldUrl(),
-                        fessConfig.getResponseFieldContentDescription() };
-            }
-        };
-
-        // Execute search
-        if (logger.isDebugEnabled()) {
-            logger.debug("[MCP] Executing search: query='{}', start={}, num={}, sort={}", reqParams.getQuery(),
-                    reqParams.getStartPosition(), reqParams.getPageSize(), reqParams.getSort());
-        }
-        final SearchRenderData data = new SearchRenderData();
-        ComponentUtil.getSearchHelper().search(reqParams, data, OptionalThing.empty());
-        if (logger.isDebugEnabled()) {
-            logger.debug("[MCP] Search completed: resultCount={}", data.getDocumentItems() != null ? data.getDocumentItems().size() : 0);
-        }
-
-        // Build MCP-compliant response with multiple content entries
-        final List<Map<String, Object>> contents = new java.util.ArrayList<>();
-        final List<Map<String, Object>> documentItems = processDocumentItems(data.getDocumentItems());
-
-        int index = 1;
-        for (final Map<String, Object> doc : documentItems) {
-            contents.add(createDocumentContent(doc, index++));
-        }
-
-        return Map.of("content", contents);
-    }
-
-    /**
-     * Retrieves index statistics and system information.
-     *
-     * @return A map containing index statistics in MCP-compliant format with "content" array.
-     */
-    protected Map<String, Object> invokeGetIndexStats() {
-        if (logger.isDebugEnabled()) {
-            logger.debug("[MCP] Retrieving index statistics");
-        }
-        try {
-            final Map<String, Object> stats = collectIndexStats();
-            if (logger.isDebugEnabled()) {
-                logger.debug("[MCP] Index statistics collected: {}", stats);
-            }
-
-            // Return MCP-compliant response with content array
-            final String jsonResult = JsonXContent.contentBuilder().map(stats).toString();
-            final Map<String, Object> content = new HashMap<>();
-            content.put("type", "text");
-            content.put("text", jsonResult);
-            return Map.of("content", List.of(content));
-        } catch (final IOException e) {
-            throw new McpApiException(ErrorCode.InternalError, "Failed to serialize index stats: " + e.getMessage());
-        }
-    }
-
-    /**
-     * Invokes the suggest tool to provide query autocomplete suggestions.
-     *
-     * @param params the parameters including query prefix (q) and number of suggestions (num)
-     * @return a map containing the suggestions in MCP-compliant format
-     */
-    protected Map<String, Object> invokeSuggest(final Map<String, Object> params) {
-        final String query = (String) params.get("q");
-        if (query == null || query.isEmpty()) {
-            throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: q");
-        }
-
-        final FessConfig fessConfig = ComponentUtil.getFessConfig();
-        final int maxPageSize = fessConfig.getPagingSearchPageMaxSizeAsInteger().intValue();
-        final int num = resolveSuggestSize(params.get("num"), maxPageSize);
-
-        if (logger.isDebugEnabled()) {
-            logger.debug("[MCP] Executing suggest: query='{}', num={}", query, num);
-        }
-
-        final org.codelibs.fess.suggest.request.suggest.SuggestRequestBuilder builder =
-                ComponentUtil.getSuggestHelper().suggester().suggest();
-        builder.setQuery(query);
-        builder.setSize(num);
-        builder.addKind(org.codelibs.fess.suggest.entity.SuggestItem.Kind.QUERY.toString());
-        builder.addKind(org.codelibs.fess.suggest.entity.SuggestItem.Kind.DOCUMENT.toString());
-
-        final org.codelibs.fess.suggest.request.suggest.SuggestResponse suggestResponse = builder.execute().getResponse();
-
-        final List<Map<String, Object>> contents = new java.util.ArrayList<>();
-        if (suggestResponse.getItems() != null) {
-            for (final org.codelibs.fess.suggest.entity.SuggestItem item : suggestResponse.getItems()) {
-                contents.add(Map.of("type", "text", "text", item.getText()));
-            }
-        }
-
-        if (contents.isEmpty()) {
-            contents.add(Map.of("type", "text", "text", "No suggestions found for: " + query));
-        }
-
-        return Map.of("content", contents);
-    }
-
-    /**
-     * Resolves the requested suggest size, applying defaults and the configured page-size cap.
+     * Reads the configured {@code api.json.response.headers} pairs.
      * <p>
-     * Parsing rules:
-     * <ul>
-     *   <li>{@code null} or unparseable input -&gt; default 10</li>
-     *   <li>{@code Number} -&gt; intValue</li>
-     *   <li>other -&gt; {@link Integer#parseInt}(toString())</li>
-     *   <li>result &lt;= 0 -&gt; default 10</li>
-     *   <li>result &gt; {@code maxPageSize} -&gt; capped at {@code maxPageSize}</li>
-     * </ul>
+     * Isolated for the same reason as {@link #getSystemProperty(String, String)} and the two
+     * typed seams beside it, and it is the seam that closes a proven hole: every test double in
+     * this suite used to override {@link #writeHeaders} <em>itself</em> as a no-op, so its whole
+     * body -- the {@code Vary} distinction included -- ran in no test at all. Deleting the
+     * {@code writeHeaders(response)} call from {@link #process}, or collapsing the {@code Vary}
+     * branch onto a plain {@code setHeader}, left the entire suite green. Overriding only this
+     * read leaves the production body to run.
+     * </p>
      *
-     * @param numObj the raw {@code num} argument value
-     * @param maxPageSize the configured maximum page size (cap)
-     * @return the effective suggest size within [1, maxPageSize]
+     * @return the configured header pairs; never null
      */
-    protected int resolveSuggestSize(final Object numObj, final int maxPageSize) {
-        int num = 10;
-        if (numObj instanceof final Number n) {
-            num = n.intValue();
-        } else if (numObj != null) {
-            try {
-                num = Integer.parseInt(numObj.toString());
-            } catch (final NumberFormatException e) {
-                num = 10;
-            }
-        }
-        // Fall back to default for non-positive values; cap at configured max.
-        if (num <= 0) {
-            num = 10;
-        }
-        if (num > maxPageSize) {
-            num = maxPageSize;
-        }
-        return num;
+    protected List<Pair<String, String>> getApiJsonResponseHeaderList() {
+        return ComponentUtil.getFessConfig().getApiJsonResponseHeaderList();
     }
 
     /**
-     * Invokes the get_document tool to retrieve a single document by its doc_id.
+     * Emits {@code api.json.response.headers} onto {@code response}, appending rather than
+     * replacing for {@code Vary}.
+     * <p>
+     * The {@code Vary} distinction is a real behavioural one, not defensive style: Fess's own
+     * {@code CorsFilter} appends {@code Vary: Origin} for every origin-bearing request, and this
+     * runs after it, so a {@code setHeader} here would <em>delete</em> that value and let a shared
+     * cache serve one origin's response to another. Every other header is set, so that a second
+     * pass over the same response cannot accumulate duplicates.
+     * </p>
+     * <p>
+     * {@code static}, and shared with {@link McpMetadataApiManager}: that class implements
+     * {@code WebApiManager} directly (it has no {@code BaseApiManager#writeHeaders} to override)
+     * yet must emit the same operator-configured headers, and re-implementing the {@code Vary}
+     * rule there is exactly the kind of duplication that drifts.
+     * </p>
      *
-     * @param params the parameters including doc_id
-     * @return a map containing the document content in MCP-compliant format
+     * @param response the response to write onto
+     * @param headers the configured header pairs
      */
-    protected Map<String, Object> invokeGetDocument(final Map<String, Object> params) {
-        final String docId = (String) params.get("doc_id");
-        if (docId == null || docId.isEmpty()) {
-            throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: doc_id");
-        }
-
-        if (logger.isDebugEnabled()) {
-            logger.debug("[MCP] Retrieving document: doc_id={}", docId);
-        }
-
-        final FessConfig fessConfig = ComponentUtil.getFessConfig();
-        final String[] fields = new String[] { fessConfig.getIndexFieldTitle(), fessConfig.getIndexFieldContent(),
-                fessConfig.getIndexFieldUrl(), fessConfig.getIndexFieldDocId(), fessConfig.getIndexFieldLastModified() };
-
-        return ComponentUtil.getSearchHelper().getDocumentByDocId(docId, fields, OptionalThing.empty()).map(doc -> {
-            final String title = String.valueOf(doc.getOrDefault(fessConfig.getIndexFieldTitle(), ""));
-            final String url = String.valueOf(doc.getOrDefault(fessConfig.getIndexFieldUrl(), ""));
-            final String content = String.valueOf(doc.getOrDefault(fessConfig.getIndexFieldContent(), ""));
-            final String displayContent = truncateContent(content, getContentMaxLength());
-
-            final StringBuilder sb = new StringBuilder();
-            sb.append("**Title**: ").append(title).append("\n");
-            sb.append("**URL**: ").append(url).append("\n");
-            sb.append("**Doc ID**: ").append(docId).append("\n\n");
-            sb.append(displayContent);
-
-            return Map.<String, Object> of("content", List.of(Map.of("type", "text", "text", sb.toString())));
-        }).orElseGet(() -> {
-            final Map<String, Object> result = new LinkedHashMap<>();
-            result.put("content", List.of(Map.of("type", "text", "text", "Document not found: " + docId)));
-            result.put("isError", true);
-            return result;
+    static void applyApiJsonResponseHeaders(final HttpServletResponse response, final List<Pair<String, String>> headers) {
+        headers.forEach(e -> {
+            // CorsFilter already emitted Vary: Origin; setHeader would replace it.
+            if ("Vary".equalsIgnoreCase(e.getFirst())) {
+                response.addHeader(e.getFirst(), e.getSecond());
+            } else {
+                response.setHeader(e.getFirst(), e.getSecond());
+            }
         });
-    }
-
-    /**
-     * Collects index statistics including document count, configuration, and system information.
-     *
-     * @return A map containing organized statistics data
-     */
-    protected Map<String, Object> collectIndexStats() {
-        final Map<String, Object> stats = new LinkedHashMap<>();
-        final FessConfig fessConfig = ComponentUtil.getFessConfig();
-
-        // 1. Index information
-        final Map<String, Object> indexInfo = new LinkedHashMap<>();
-        try {
-            final String indexName = fessConfig.getIndexDocumentSearchIndex();
-            indexInfo.put("index_name", indexName);
-
-            final org.opensearch.action.search.SearchResponse response =
-                    ComponentUtil.getSearchEngineClient().prepareSearch(indexName).setTrackTotalHits(true).setSize(0).execute().actionGet();
-            final org.opensearch.search.SearchHits hits = response.getHits();
-            final org.apache.lucene.search.TotalHits totalHits = hits.getTotalHits();
-            final long documentCount = totalHits != null ? totalHits.value() : 0;
-            indexInfo.put("document_count", documentCount);
-        } catch (final Exception e) {
-            logger.warn("Failed to get index stats: {}", e.getMessage());
-            indexInfo.put("document_count", -1);
-            indexInfo.put("error", e.getMessage());
-        }
-        stats.put("index", indexInfo);
-
-        // 2. Configuration information
-        final Map<String, Object> configInfo = new LinkedHashMap<>();
-        configInfo.put("max_page_size", fessConfig.getPagingSearchPageMaxSizeAsInteger());
-        stats.put("config", configInfo);
-
-        // 3. System information
-        final Map<String, Object> systemInfo = new LinkedHashMap<>();
-        final Runtime runtime = Runtime.getRuntime();
-        final Map<String, Object> memoryInfo = new LinkedHashMap<>();
-        memoryInfo.put("total_bytes", runtime.totalMemory());
-        memoryInfo.put("free_bytes", runtime.freeMemory());
-        memoryInfo.put("used_bytes", runtime.totalMemory() - runtime.freeMemory());
-        memoryInfo.put("max_bytes", runtime.maxMemory());
-        systemInfo.put("memory", memoryInfo);
-        stats.put("system", systemInfo);
-
-        return stats;
-    }
-
-    /**
-     * Handles the resources/list request and returns available resources.
-     *
-     * @return A map with "resources" key containing a list of available resources.
-     */
-    protected Map<String, Object> handleListResources() {
-        return handleListResources(Collections.emptyMap());
-    }
-
-    /**
-     * Handles the resources/list request and returns available resources.
-     * The cursor param is accepted gracefully but ignored since item counts are small.
-     *
-     * @param params the request parameters (cursor param accepted but not required)
-     * @return A map with "resources" key containing a list of available resources.
-     */
-    protected Map<String, Object> handleListResources(final Map<String, Object> params) {
-        final Map<String, Object> indexResource = new HashMap<>();
-        indexResource.put("uri", "fess://index/stats");
-        indexResource.put("name", "Index Statistics");
-        indexResource.put("description", "Fess index statistics and configuration information");
-        indexResource.put("mimeType", "application/json");
-
-        return Map.of("resources", List.of(indexResource));
-    }
-
-    /**
-     * Handles the resources/read request and returns the resource content.
-     *
-     * @param params the request parameters containing "uri"
-     * @return A map with "contents" key containing the resource content
-     * @throws McpApiException if the URI is missing or unknown
-     */
-    protected Map<String, Object> handleReadResource(final Map<String, Object> params) {
-        final String uri = (String) params.get("uri");
-        if (uri == null || uri.isBlank()) {
-            throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: uri");
-        }
-
-        if (logger.isDebugEnabled()) {
-            logger.debug("[MCP] Reading resource: uri={}", uri);
-        }
-
-        if (uri.startsWith("fess://document/")) {
-            final String docId = uri.substring("fess://document/".length());
-            return buildDocumentResource(docId);
-        }
-
-        return switch (uri) {
-        case "fess://index/stats" -> buildIndexStatsResource();
-        default -> {
-            if (logger.isDebugEnabled()) {
-                logger.debug("[MCP] Unknown resource requested: {}", uri);
-            }
-            throw new McpApiException(ErrorCode.ResourceNotFound, "Unknown resource: " + uri);
-        }
-        };
-    }
-
-    /**
-     * Handles the resources/templates/list request and returns available resource templates.
-     *
-     * @param params the request parameters
-     * @return A map with "resourceTemplates" key containing a list of resource templates.
-     */
-    protected Map<String, Object> handleListResourceTemplates(final Map<String, Object> params) {
-        final Map<String, Object> docTemplate = new HashMap<>();
-        docTemplate.put("uriTemplate", "fess://document/{doc_id}");
-        docTemplate.put("name", "Document by ID");
-        docTemplate.put("description", "Retrieve a Fess document by its document ID");
-        docTemplate.put("mimeType", "application/json");
-
-        return Map.of("resourceTemplates", List.of(docTemplate));
-    }
-
-    /**
-     * Builds a document resource by fetching the document with the given ID.
-     *
-     * @param docId the document ID
-     * @return A map with "contents" key containing the document content
-     * @throws McpApiException if the document ID is empty or document is not found
-     */
-    protected Map<String, Object> buildDocumentResource(final String docId) {
-        if (docId.isEmpty()) {
-            throw new McpApiException(ErrorCode.InvalidParams, "Document ID is empty");
-        }
-
-        final FessConfig fessConfig = ComponentUtil.getFessConfig();
-        final String[] fields = new String[] { fessConfig.getIndexFieldTitle(), fessConfig.getIndexFieldContent(),
-                fessConfig.getIndexFieldUrl(), fessConfig.getIndexFieldDocId() };
-
-        return ComponentUtil.getSearchHelper().getDocumentByDocId(docId, fields, OptionalThing.empty()).map(doc -> {
-            try {
-                final String jsonResult = JsonXContent.contentBuilder().map(doc).toString();
-                final Map<String, Object> content = new HashMap<>();
-                content.put("uri", "fess://document/" + docId);
-                content.put("mimeType", "application/json");
-                content.put("text", jsonResult);
-                return Map.<String, Object> of("contents", List.of(content));
-            } catch (final IOException e) {
-                throw new McpApiException(ErrorCode.InternalError, "Failed to serialize document: " + e.getMessage());
-            }
-        }).orElseThrow(() -> new McpApiException(ErrorCode.ResourceNotFound, "Document not found: " + docId));
-    }
-
-    /**
-     * Builds the index stats resource content.
-     *
-     * @return A map with "contents" key containing the index stats
-     */
-    protected Map<String, Object> buildIndexStatsResource() {
-        try {
-            final Map<String, Object> stats = collectIndexStats();
-            final String jsonResult = JsonXContent.contentBuilder().map(stats).toString();
-
-            final Map<String, Object> content = new HashMap<>();
-            content.put("uri", "fess://index/stats");
-            content.put("mimeType", "application/json");
-            content.put("text", jsonResult);
-
-            return Map.of("contents", List.of(content));
-        } catch (final IOException e) {
-            throw new McpApiException(ErrorCode.InternalError, "Failed to serialize index stats: " + e.getMessage());
-        }
-    }
-
-    /**
-     * Handles the prompts/list request and returns available prompts.
-     *
-     * @return A map with "prompts" key containing a list of available prompts.
-     */
-    protected Map<String, Object> handleListPrompts() {
-        return handleListPrompts(Collections.emptyMap());
-    }
-
-    /**
-     * Handles the prompts/list request and returns available prompts.
-     * The cursor param is accepted gracefully but ignored since item counts are small.
-     *
-     * @param params the request parameters (cursor param accepted but not required)
-     * @return A map with "prompts" key containing a list of available prompts.
-     */
-    protected Map<String, Object> handleListPrompts(final Map<String, Object> params) {
-        // Basic search prompt
-        final Map<String, Object> basicSearchPrompt = new HashMap<>();
-        basicSearchPrompt.put("name", "basic_search");
-        basicSearchPrompt.put("description", "Perform a basic search with a query string");
-
-        final Map<String, Object> basicSearchArg = new HashMap<>();
-        basicSearchArg.put("name", "query");
-        basicSearchArg.put("description", "The search query");
-        basicSearchArg.put("required", true);
-
-        basicSearchPrompt.put("arguments", List.of(basicSearchArg));
-
-        // Advanced search prompt
-        final Map<String, Object> advancedSearchPrompt = new HashMap<>();
-        advancedSearchPrompt.put("name", "advanced_search");
-        advancedSearchPrompt.put("description", "Perform an advanced search with filters and sorting");
-
-        final Map<String, Object> advQueryArg = new HashMap<>();
-        advQueryArg.put("name", "query");
-        advQueryArg.put("description", "The search query");
-        advQueryArg.put("required", true);
-
-        final Map<String, Object> advSortArg = new HashMap<>();
-        advSortArg.put("name", "sort");
-        advSortArg.put("description", "Sort order (e.g., 'score.desc', 'last_modified.desc')");
-        advSortArg.put("required", false);
-
-        final Map<String, Object> advNumArg = new HashMap<>();
-        advNumArg.put("name", "num");
-        advNumArg.put("description", "Number of results to return");
-        advNumArg.put("required", false);
-
-        advancedSearchPrompt.put("arguments", List.of(advQueryArg, advSortArg, advNumArg));
-
-        return Map.of("prompts", List.of(basicSearchPrompt, advancedSearchPrompt));
-    }
-
-    /**
-     * Handles the prompts/get request and returns the prompt messages with arguments substituted.
-     *
-     * @param params the request parameters containing "name" and optional "arguments"
-     * @return A map with "messages" key containing the prompt messages
-     * @throws McpApiException if the prompt name is missing or unknown
-     */
-    @SuppressWarnings("unchecked")
-    protected Map<String, Object> handleGetPrompt(final Map<String, Object> params) {
-        final String name = (String) params.get("name");
-        if (name == null || name.isEmpty()) {
-            throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: name");
-        }
-
-        final Map<String, Object> arguments = params.get("arguments") != null ? (Map<String, Object>) params.get("arguments") : Map.of();
-
-        if (logger.isDebugEnabled()) {
-            logger.debug("[MCP] Getting prompt: name={}, arguments={}", name, arguments);
-        }
-
-        return switch (name) {
-        case "basic_search" -> buildBasicSearchPrompt(arguments);
-        case "advanced_search" -> buildAdvancedSearchPrompt(arguments);
-        default -> {
-            if (logger.isDebugEnabled()) {
-                logger.debug("[MCP] Unknown prompt requested: {}", name);
-            }
-            throw new McpApiException(ErrorCode.InvalidParams, "Unknown prompt: " + name);
-        }
-        };
-    }
-
-    /**
-     * Builds the basic_search prompt messages.
-     *
-     * @param arguments the prompt arguments
-     * @return A map with "messages" key containing the prompt messages
-     */
-    protected Map<String, Object> buildBasicSearchPrompt(final Map<String, Object> arguments) {
-        final String query = (String) arguments.get("query");
-        if (query == null || query.isEmpty()) {
-            throw new McpApiException(ErrorCode.InvalidParams, "Missing required argument: query");
-        }
-
-        final Map<String, Object> content = new HashMap<>();
-        content.put("type", "text");
-        content.put("text", "Please search for: " + query);
-
-        final Map<String, Object> message = new HashMap<>();
-        message.put("role", "user");
-        message.put("content", content);
-
-        return Map.of("messages", List.of(message));
-    }
-
-    /**
-     * Builds the advanced_search prompt messages.
-     *
-     * @param arguments the prompt arguments
-     * @return A map with "messages" key containing the prompt messages
-     */
-    protected Map<String, Object> buildAdvancedSearchPrompt(final Map<String, Object> arguments) {
-        final String query = (String) arguments.get("query");
-        if (query == null || query.isEmpty()) {
-            throw new McpApiException(ErrorCode.InvalidParams, "Missing required argument: query");
-        }
-
-        final StringBuilder text = new StringBuilder();
-        text.append("Please perform an advanced search with the following parameters:\n");
-        text.append("Query: ").append(query);
-
-        final Object sort = arguments.get("sort");
-        if (sort != null && !sort.toString().isEmpty()) {
-            text.append("\nSort: ").append(sort);
-        }
-
-        final Object num = arguments.get("num");
-        if (num != null && !num.toString().isEmpty()) {
-            text.append("\nNumber of results: ").append(num);
-        }
-
-        final Map<String, Object> content = new HashMap<>();
-        content.put("type", "text");
-        content.put("text", text.toString());
-
-        final Map<String, Object> message = new HashMap<>();
-        message.put("role", "user");
-        message.put("content", content);
-
-        return Map.of("messages", List.of(message));
-    }
-
-    /**
-     * Handles the completion/complete request by using Fess suggest to provide autocomplete
-     * for prompt arguments.
-     *
-     * @param params the request parameters including "ref" and "argument"
-     * @return a map containing "completion" with "values", "total", and "hasMore"
-     * @throws McpApiException if required parameters are missing
-     */
-    @SuppressWarnings("unchecked")
-    protected Map<String, Object> handleComplete(final Map<String, Object> params) {
-        final Map<String, Object> ref = (Map<String, Object>) params.get("ref");
-        if (ref == null) {
-            throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: ref");
-        }
-
-        final Map<String, Object> argument = (Map<String, Object>) params.get("argument");
-        if (argument == null) {
-            throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: argument");
-        }
-
-        final String refType = ref.get("type") instanceof final String s ? s : null;
-        final String argName = argument.get("name") instanceof final String s ? s : null;
-        final String argValueRaw = argument.get("value") instanceof final String s ? s : null;
-        final String argValue = argValueRaw == null ? "" : argValueRaw;
-
-        if ("ref/prompt".equals(refType)) {
-            final String promptName = ref.get("name") instanceof final String s ? s : null;
-
-            // query argument on basic_search / advanced_search -> Fess suggest
-            if (("basic_search".equals(promptName) || "advanced_search".equals(promptName)) && "query".equals(argName)) {
-                if (argValue.isEmpty()) {
-                    return buildCompletionResult(List.of(), 0, false);
-                }
-                return completeViaSuggest(argValue);
-            }
-
-            // advanced_search.sort -> static prefix filter
-            if ("advanced_search".equals(promptName) && "sort".equals(argName)) {
-                final List<String> matches = SORT_VALUES.stream().filter(v -> v.startsWith(argValue)).collect(Collectors.toList());
-                return buildCompletionResult(matches, matches.size(), false);
-            }
-
-            // advanced_search.num or unknown prompt/argument -> empty values
-            return buildCompletionResult(List.of(), 0, false);
-        }
-
-        // ref/resource or any other ref type -> empty values
-        return buildCompletionResult(List.of(), 0, false);
-    }
-
-    /**
-     * Executes Fess suggest and returns a capped completion result.
-     *
-     * @param query the autocomplete input value to forward to Fess suggest
-     * @return the MCP completion/complete response map with {@code values}, {@code total}, and {@code hasMore}
-     */
-    protected Map<String, Object> completeViaSuggest(final String query) {
-        final org.codelibs.fess.suggest.request.suggest.SuggestRequestBuilder builder =
-                ComponentUtil.getSuggestHelper().suggester().suggest();
-        builder.setQuery(query);
-        builder.setSize(100);
-        builder.addKind(org.codelibs.fess.suggest.entity.SuggestItem.Kind.QUERY.toString());
-        builder.addKind(org.codelibs.fess.suggest.entity.SuggestItem.Kind.DOCUMENT.toString());
-
-        final org.codelibs.fess.suggest.request.suggest.SuggestResponse suggestResponse = builder.execute().getResponse();
-
-        final List<String> values = new java.util.ArrayList<>();
-        if (suggestResponse.getItems() != null) {
-            for (final org.codelibs.fess.suggest.entity.SuggestItem item : suggestResponse.getItems()) {
-                values.add(item.getText());
-            }
-        }
-
-        // Cap returned values at 100 per MCP completion spec.
-        final List<String> capped = values.size() > 100 ? values.subList(0, 100) : values;
-        final int total = (int) suggestResponse.getTotal();
-        final boolean hasMore = total > capped.size();
-        return buildCompletionResult(capped, total, hasMore);
-    }
-
-    /**
-     * Builds the MCP completion/complete response envelope.
-     *
-     * @param values  the candidate completion values (capped at 100)
-     * @param total   the total number of candidates known to the server
-     * @param hasMore whether more candidates exist beyond the returned values
-     * @return the MCP completion/complete response map with {@code completion.values}, {@code completion.total}, and {@code completion.hasMore}
-     */
-    protected Map<String, Object> buildCompletionResult(final List<String> values, final int total, final boolean hasMore) {
-        // Cap at 100 per MCP spec.
-        final List<String> capped = values.size() > 100 ? values.subList(0, 100) : values;
-        final int reportedTotal = Math.max(total, capped.size());
-        final boolean reportedHasMore = hasMore || reportedTotal > capped.size();
-        final Map<String, Object> completion = new java.util.LinkedHashMap<>();
-        completion.put("values", capped);
-        completion.put("total", reportedTotal);
-        completion.put("hasMore", reportedHasMore);
-        return Map.of("completion", completion);
-    }
-
-    /**
-     * Processes document items to convert non-serializable objects (like TextFragment) to strings.
-     *
-     * @param documentItems The list of document items from search results
-     * @return A list of processed document items with serializable values
-     */
-    @SuppressWarnings("unchecked")
-    protected List<Map<String, Object>> processDocumentItems(final List<Map<String, Object>> documentItems) {
-        if (documentItems == null) {
-            return Collections.emptyList();
-        }
-        return documentItems.stream().map(doc -> {
-            final Map<String, Object> processedDoc = new LinkedHashMap<>();
-            doc.forEach((key, value) -> processedDoc.put(key, processValue(value)));
-            return processedDoc;
-        }).collect(Collectors.toList());
-    }
-
-    /**
-     * Processes a single value, converting non-serializable objects to strings.
-     *
-     * @param value The value to process
-     * @return The processed value (String for TextFragment, recursively processed for collections)
-     */
-    @SuppressWarnings("unchecked")
-    protected Object processValue(final Object value) {
-        if (value == null) {
-            return null;
-        }
-        // Handle TextFragment by converting to string
-        if (value.getClass().getName().contains("TextFragment")) {
-            return value.toString();
-        }
-        // Handle List
-        if (value instanceof final List<?> list) {
-            return list.stream().map(this::processValue).collect(Collectors.toList());
-        }
-        // Handle Map
-        if (value instanceof final Map<?, ?> map) {
-            final Map<String, Object> processedMap = new LinkedHashMap<>();
-            map.forEach((k, v) -> processedMap.put(k.toString(), processValue(v)));
-            return processedMap;
-        }
-        // Handle arrays
-        if (value.getClass().isArray()) {
-            if (value instanceof final Object[] array) {
-                return java.util.Arrays.stream(array).map(this::processValue).collect(Collectors.toList());
-            }
-        }
-        return value;
-    }
-
-    /**
-     * Gets the maximum content length from system property.
-     *
-     * @return The maximum content length
-     */
-    protected int getContentMaxLength() {
-        return ComponentUtil.getFessConfig().getSystemPropertyAsInt("mcp.content.max.length", DEFAULT_CONTENT_MAX_LENGTH);
-    }
-
-    /**
-     * Truncates content to the specified maximum length.
-     *
-     * @param content   The content to truncate
-     * @param maxLength The maximum length
-     * @return The truncated content
-     */
-    protected String truncateContent(final String content, final int maxLength) {
-        if (content == null || content.length() <= maxLength) {
-            return content;
-        }
-        return content.substring(0, maxLength) + "...";
-    }
-
-    /**
-     * Removes HTML highlight tags from the given text.
-     * Strips both &lt;em&gt; and &lt;strong&gt; tags commonly used for search highlighting.
-     *
-     * @param text The text containing HTML highlight tags
-     * @return The text with highlight tags removed, or empty string if text is null
-     */
-    protected String stripHighlightTags(final String text) {
-        if (text == null) {
-            return "";
-        }
-        return text.replaceAll("</?(?:em|strong)>", "");
-    }
-
-    /**
-     * Creates a document content entry in Markdown format for MCP response.
-     *
-     * @param doc   The processed document
-     * @param index The result index (1-based)
-     * @return A map containing type and text for MCP content
-     */
-    protected Map<String, Object> createDocumentContent(final Map<String, Object> doc, final int index) {
-        final StringBuilder sb = new StringBuilder();
-        final Object score = doc.get("score");
-        sb.append("**Title**: ").append(doc.getOrDefault("title", "")).append("\n");
-        sb.append("**URL**: ").append(doc.getOrDefault("url", "")).append("\n");
-        if (score != null) {
-            sb.append("**Score**: ").append(score).append("\n");
-        }
-        sb.append("\n");
-
-        // Use content_description (highlighted text) if available, fallback to content
-        final String contentDescription = String.valueOf(doc.getOrDefault("content_description", ""));
-        final String displayContent;
-        if (contentDescription.isEmpty() || "null".equals(contentDescription)) {
-            // Fallback to raw content with truncation
-            final String content = String.valueOf(doc.getOrDefault("content", ""));
-            displayContent = truncateContent(content, getContentMaxLength());
-        } else {
-            // Use highlighted content with tags stripped
-            displayContent = stripHighlightTags(contentDescription);
-        }
-        sb.append(displayContent);
-
-        return Map.of("type", "text", "text", sb.toString());
-    }
-
-    /**
-     * Writes an error response in JSON-RPC 2.0 format to the provided HTTP response.
-     *
-     * @param id       The identifier of the request, which can be null if not applicable.
-     * @param code     The error code representing the type of error.
-     * @param message  A descriptive message providing details about the error.
-     * @param response The {@link HttpServletResponse} object to which the error response will be written.
-     */
-    protected void writeError(final Object id, final ErrorCode code, final String message, final HttpServletResponse response) {
-        final Map<String, Object> error = Map.of("code", code.getCode(), "message", message != null ? message : "Unknown error");
-        final Map<String, Object> errorResponse = new LinkedHashMap<>();
-        errorResponse.put("jsonrpc", "2.0");
-        errorResponse.put("id", id);
-        errorResponse.put("error", error);
-        try {
-            write(JsonXContent.contentBuilder().map(errorResponse).toString(), mimeType, Constants.UTF_8);
-        } catch (final IOException e) {
-            logger.warn("Failed to write error response", e);
-        }
     }
 }

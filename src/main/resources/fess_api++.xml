@@ -5,4 +5,7 @@
 	<component name="mcpApiManager"
 		class="org.codelibs.fess.plugin.webapp.api.mcp.McpApiManager">
 	</component>
+	<component name="mcpMetadataApiManager"
+		class="org.codelibs.fess.plugin.webapp.api.mcp.McpMetadataApiManager">
+	</component>
 </components>

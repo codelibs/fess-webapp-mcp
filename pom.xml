@@ -29,6 +29,18 @@
 				<artifactId>maven-jar-plugin</artifactId>
 				<configuration>
 					<archive>
+						<!--
+						  Writes Implementation-Title/Version into the manifest. server/discover
+						  reports _meta.serverInfo.version from
+						  getClass().getPackage().getImplementationVersion(), which is null without
+						  this, so every result self-reported "unknown". Verified to survive Fess's
+						  mounting of WEB-INF/plugin jars as a CLASSES_JAR resource set: Tomcat's
+						  WebappClassLoaderBase still reads the archive manifest when defining the
+						  package.
+						-->
+						<manifest>
+							<addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+						</manifest>
 						<manifestEntries>
 							<Fess-WebAppJar>true</Fess-WebAppJar>
 						</manifestEntries>
