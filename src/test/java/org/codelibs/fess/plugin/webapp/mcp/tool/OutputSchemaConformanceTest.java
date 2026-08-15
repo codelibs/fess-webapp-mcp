@@ -219,8 +219,9 @@ public class OutputSchemaConformanceTest {
         assertEquals("Full Doc", hit.get("title"));
         assertEquals("https://example.com/full", hit.get("url"));
         assertEquals(12.5f, hit.get("score"));
-        assertEquals("a <em>highlighted</em> snippet", hit.get("content_description"));
-        assertFalse(hit.containsKey("content"), "raw content must not leak into structuredContent");
+        assertEquals("a highlighted snippet", hit.get("content_description"),
+                "highlight markup is presentation and is stripped from the machine-readable channel too");
+        assertFalse(hit.containsKey("content"), "raw content must not leak into structuredContent as its own key");
     }
 
     @Test

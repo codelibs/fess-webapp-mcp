@@ -287,13 +287,43 @@ public class SearchTool implements McpTool {
      * @param doc the processed document item, as returned by {@link #processDocumentItems}
      * @return a new map with only the schema's declared fields that Fess actually populated
      */
+    /**
+     * Resolves the one digest both views of a hit report.
+     * <p>
+     * Fess leaves {@code content_description} empty whenever its highlighter produced no
+     * fragment -- a phrase query does this routinely -- so an empty value means "no highlight",
+     * not "no text", and the raw {@code content} is used instead. Highlight markup is
+     * presentation, so it is stripped either way. Both {@link #createDocumentContent} and
+     * {@link #buildHit} go through here: they used to resolve it separately and disagreed,
+     * leaving {@code structuredContent} empty for hits whose text block carried the full digest.
+     * </p>
+     *
+     * @param doc the processed document item
+     * @return the digest to report; empty when Fess supplied neither a highlight nor content
+     */
+    protected String resolveDigest(final Map<String, Object> doc) {
+        final String contentDescription = String.valueOf(doc.getOrDefault("content_description", ""));
+        if (contentDescription.isEmpty() || "null".equals(contentDescription)) {
+            final String content = String.valueOf(doc.getOrDefault("content", ""));
+            if (content.isEmpty() || "null".equals(content)) {
+                return "";
+            }
+            final DocumentFormatter formatter = getDocumentFormatter();
+            return formatter.truncateContent(content, formatter.getContentMaxLength());
+        }
+        return stripHighlightTags(contentDescription);
+    }
+
     protected Map<String, Object> buildHit(final Map<String, Object> doc) {
         final Map<String, Object> hit = new LinkedHashMap<>();
         putIfNotNull(hit, "doc_id", doc.get("doc_id"));
         putIfNotNull(hit, "title", doc.get("title"));
         putIfNotNull(hit, "url", doc.get("url"));
         putIfNotNull(hit, "score", doc.get("score"));
-        putIfNotNull(hit, "content_description", doc.get("content_description"));
+        final String digest = resolveDigest(doc);
+        if (!digest.isEmpty()) {
+            hit.put("content_description", digest);
+        }
         return hit;
     }
 
@@ -623,19 +653,7 @@ public class SearchTool implements McpTool {
         }
         sb.append("\n");
 
-        // Use content_description (highlighted text) if available, fallback to content
-        final String contentDescription = String.valueOf(doc.getOrDefault("content_description", ""));
-        final String displayContent;
-        if (contentDescription.isEmpty() || "null".equals(contentDescription)) {
-            // Fallback to raw content with truncation
-            final String content = String.valueOf(doc.getOrDefault("content", ""));
-            final DocumentFormatter formatter = getDocumentFormatter();
-            displayContent = formatter.truncateContent(content, formatter.getContentMaxLength());
-        } else {
-            // Use highlighted content with tags stripped
-            displayContent = stripHighlightTags(contentDescription);
-        }
-        sb.append(displayContent);
+        sb.append(resolveDigest(doc));
 
         return Map.of("type", "text", "text", sb.toString());
     }
