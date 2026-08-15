@@ -23,12 +23,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpError;
+import org.codelibs.fess.suggest.entity.SuggestItem;
+import org.codelibs.fess.suggest.request.suggest.SuggestRequestBuilder;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -283,5 +287,63 @@ public class CompletionHandlerTest {
         assertTrue(values.isEmpty());
         assertEquals(0, ((Number) completion.get("total")).intValue());
         assertEquals(false, completion.get("hasMore"));
+    }
+
+    @Test
+    public void testCompletionSuggestRequestCarriesTheCallersRoles() {
+        // Same defect, same cause as SuggestTool: fess-suggest always filters on roles and falls
+        // back to the "_guest_" sentinel that no indexed item ever carries, so a request built
+        // without the caller's roles matches nothing and completion/complete returns an empty
+        // list for every argument value. Pinned separately because the two call sites are
+        // independent -- fixing only one leaves the other silently dead.
+        final List<String> addedRoles = new ArrayList<>();
+        final CompletionHandler h = new CompletionHandler() {
+            @Override
+            protected SuggestRequestBuilder newSuggestRequestBuilder() {
+                return new SuggestRequestBuilder(null, null, null) {
+                    @Override
+                    public SuggestRequestBuilder addRole(final String role) {
+                        addedRoles.add(role);
+                        return this;
+                    }
+                };
+            }
+
+            @Override
+            protected Set<String> getCallerRoles() {
+                return new LinkedHashSet<>(List.of("Rguest", "1guest"));
+            }
+        };
+
+        h.buildSuggestRequest("mcp");
+
+        assertEquals(List.of("Rguest", "1guest"), addedRoles, "completion/complete must scope its suggest request to the caller's roles");
+    }
+
+    @Test
+    public void testCompletionSuggestRequestStillDeclaresBothItemKinds() {
+        final List<String> addedKinds = new ArrayList<>();
+        final CompletionHandler h = new CompletionHandler() {
+            @Override
+            protected SuggestRequestBuilder newSuggestRequestBuilder() {
+                return new SuggestRequestBuilder(null, null, null) {
+                    @Override
+                    public SuggestRequestBuilder addKind(final String kind) {
+                        addedKinds.add(kind);
+                        return this;
+                    }
+                };
+            }
+
+            @Override
+            protected Set<String> getCallerRoles() {
+                return Set.of();
+            }
+        };
+
+        h.buildSuggestRequest("mcp");
+
+        assertEquals(List.of(SuggestItem.Kind.QUERY.toString(), SuggestItem.Kind.DOCUMENT.toString()), addedKinds,
+                "completion must ask for both query-log and document derived items");
     }
 }

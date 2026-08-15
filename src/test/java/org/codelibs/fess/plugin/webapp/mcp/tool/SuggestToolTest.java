@@ -20,13 +20,19 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.codelibs.fess.plugin.webapp.exception.McpApiException;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpError;
+import org.codelibs.fess.suggest.entity.SuggestItem;
+import org.codelibs.fess.suggest.request.suggest.SuggestRequestBuilder;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -188,5 +194,67 @@ public class SuggestToolTest {
         } catch (final IllegalStateException e) {
             assertTrue(e.getMessage().contains("container"), "Should fail due to container not initialized");
         }
+    }
+
+    @Test
+    public void testSuggestRequestCarriesTheCallersRoles() {
+        // fess-suggest applies a role filter to every suggest request whether or not the caller
+        // added roles: SuggestRequest#buildFilterQuery injects SuggestConstants.DEFAULT_ROLE
+        // ("_guest_") when the role list is empty. That sentinel is only ever stored on an item
+        // built with no roles at all (SuggestItem's constructor), and Fess always indexes suggest
+        // items with the source document's roles, so a role-less request matches nothing at all.
+        // Fess's own SuggestWordsHandler adds the caller's roles; this tool must do the same or
+        // it returns an empty list for every query in every deployment.
+        final List<String> addedRoles = new ArrayList<>();
+        final SuggestTool tool = new SuggestTool() {
+            @Override
+            protected SuggestRequestBuilder newSuggestRequestBuilder() {
+                return new SuggestRequestBuilder(null, null, null) {
+                    @Override
+                    public SuggestRequestBuilder addRole(final String role) {
+                        addedRoles.add(role);
+                        return this;
+                    }
+                };
+            }
+
+            @Override
+            protected Set<String> getCallerRoles() {
+                return new LinkedHashSet<>(List.of("Rguest", "1guest"));
+            }
+        };
+
+        tool.buildSuggestRequest("padding", 10);
+
+        assertEquals(List.of("Rguest", "1guest"), addedRoles, "every role the caller may search with must be added to the suggest request");
+    }
+
+    @Test
+    public void testSuggestRequestStillDeclaresBothItemKinds() {
+        // Guards the refactor that introduced buildSuggestRequest: dropping either kind would
+        // silently narrow suggest to query-log-only or document-only results.
+        final List<String> addedKinds = new ArrayList<>();
+        final SuggestTool tool = new SuggestTool() {
+            @Override
+            protected SuggestRequestBuilder newSuggestRequestBuilder() {
+                return new SuggestRequestBuilder(null, null, null) {
+                    @Override
+                    public SuggestRequestBuilder addKind(final String kind) {
+                        addedKinds.add(kind);
+                        return this;
+                    }
+                };
+            }
+
+            @Override
+            protected Set<String> getCallerRoles() {
+                return Collections.emptySet();
+            }
+        };
+
+        tool.buildSuggestRequest("padding", 10);
+
+        assertEquals(List.of(SuggestItem.Kind.QUERY.toString(), SuggestItem.Kind.DOCUMENT.toString()), addedKinds,
+                "suggest must ask for both query-log and document derived items");
     }
 }
