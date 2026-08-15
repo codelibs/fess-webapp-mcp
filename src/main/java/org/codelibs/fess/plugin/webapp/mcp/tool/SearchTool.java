@@ -233,6 +233,71 @@ public class SearchTool implements McpTool {
         requireTypeIfPresent(arguments, "fields", Map.class, "an object");
         requireTypeIfPresent(arguments, "as", Map.class, "an object");
         requireTypeIfPresent(arguments, "ex_q", List.class, "an array");
+        // The three container arguments carry values this class then casts. Checking only the
+        // container left the cast to fail deep inside the search, where the exception is
+        // whatever the JVM produced -- a ClassCastException naming loaded classes, or an
+        // ArrayStoreException -- and gets redacted to a correlation id the caller cannot act
+        // on. Measured before this check: {"as":{"q":"quantum"}} (a string where the schema's
+        // example shows an array) answered "Tool execution failed (error_code:<uuid>)" and
+        // wrote a 56-line stack trace at WARN. The argument is wrong in exactly the way
+        // requireTypeIfPresent already reports for the top level, so it is reported the same way.
+        requireArrayValues(arguments, "fields", true);
+        requireArrayValues(arguments, "as", false);
+        requireStringElements(arguments, "ex_q");
+    }
+
+    /**
+     * Rejects a container argument whose values are not arrays.
+     * <p>
+     * {@code stringElements} additionally requires every element to be a string. That is the
+     * difference between the two callers: {@code getFields} builds a {@code String[]} directly,
+     * so a non-string element throws {@code ArrayStoreException}, while {@code getConditions}
+     * maps each element through {@code toString()} and so tolerates any scalar. Only the crash
+     * is being closed here, not the tolerance.
+     * </p>
+     *
+     * @param arguments the tool arguments
+     * @param name the argument to check
+     * @param stringElements whether each element must also be a string
+     * @throws McpError with {@link ErrorCode#InvalidParams} when a value is not a usable array
+     */
+    protected static void requireArrayValues(final Map<String, Object> arguments, final String name, final boolean stringElements) {
+        if (!(arguments.get(name) instanceof final Map<?, ?> container)) {
+            return;
+        }
+        for (final Map.Entry<?, ?> entry : container.entrySet()) {
+            if (!(entry.getValue() instanceof final List<?> values)) {
+                throw new McpError(HttpServletResponse.SC_OK, ErrorCode.InvalidParams,
+                        "Invalid type for parameter: " + name + "." + entry.getKey() + " (expected an array)");
+            }
+            if (stringElements) {
+                for (final Object element : values) {
+                    if (!(element instanceof String)) {
+                        throw new McpError(HttpServletResponse.SC_OK, ErrorCode.InvalidParams,
+                                "Invalid type for parameter: " + name + "." + entry.getKey() + " (expected an array of strings)");
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Rejects an array argument holding anything other than strings.
+     *
+     * @param arguments the tool arguments
+     * @param name the argument to check
+     * @throws McpError with {@link ErrorCode#InvalidParams} when an element is not a string
+     */
+    protected static void requireStringElements(final Map<String, Object> arguments, final String name) {
+        if (!(arguments.get(name) instanceof final List<?> values)) {
+            return;
+        }
+        for (final Object element : values) {
+            if (!(element instanceof String)) {
+                throw new McpError(HttpServletResponse.SC_OK, ErrorCode.InvalidParams,
+                        "Invalid type for parameter: " + name + " (expected an array of strings)");
+            }
+        }
     }
 
     /**

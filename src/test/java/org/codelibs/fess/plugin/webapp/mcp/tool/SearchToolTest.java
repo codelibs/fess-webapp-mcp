@@ -1051,4 +1051,51 @@ public class SearchToolTest {
         assertFalse(params.getConditions().containsKey(SearchRequestParams.AS_Q));
     }
 
+    // ------------------------------------------------------------------
+    // Nested argument types
+
+    @Test
+    public void testAsValueMustBeAnArray() {
+        // The schema's example is {"sitesearch": ["example.com"]}; a bare string used to reach
+        // the cast inside getConditions and surface as an opaque correlation id.
+        assertRejectedAsInvalidParams(Map.of("q", "test", "as", Map.of("q", "quantum")), "as.q");
+    }
+
+    @Test
+    public void testFieldsValueMustBeAnArray() {
+        assertRejectedAsInvalidParams(Map.of("q", "test", "fields", Map.of("label", "label1")), "fields.label");
+    }
+
+    @Test
+    public void testFieldsElementsMustBeStrings() {
+        // getFields builds a String[] directly, so a non-string element throws ArrayStoreException.
+        assertRejectedAsInvalidParams(Map.of("q", "test", "fields", Map.of("label", List.of(Integer.valueOf(1)))), "fields.label");
+    }
+
+    @Test
+    public void testExtraQueryElementsMustBeStrings() {
+        // getExtraQueries does the same.
+        assertRejectedAsInvalidParams(Map.of("q", "test", "ex_q", List.of(Integer.valueOf(1))), "ex_q");
+    }
+
+    @Test
+    public void testAsElementsNeedNotBeStrings() {
+        // getConditions maps each element through toString(), so this already worked and must
+        // keep working: only the crash is being closed, not the tolerance.
+        assertDoesNotThrow(() -> searchTool
+                .validateArguments(new HashMap<>(Map.of("q", "test", "as", Map.of("timestamp", List.of(Integer.valueOf(20260815)))))));
+    }
+
+    @Test
+    public void testWellFormedContainersAreStillAccepted() {
+        assertDoesNotThrow(() -> searchTool.validateArguments(new HashMap<>(Map.of("q", "test", "fields",
+                Map.of("label", List.of("label1")), "as", Map.of("filetype", List.of("html")), "ex_q", List.of("extra")))));
+    }
+
+    @Test
+    public void testEmptyContainersAreAccepted() {
+        assertDoesNotThrow(() -> searchTool
+                .validateArguments(new HashMap<>(Map.of("q", "test", "fields", Map.of(), "as", Map.of(), "ex_q", List.of()))));
+    }
+
 }
