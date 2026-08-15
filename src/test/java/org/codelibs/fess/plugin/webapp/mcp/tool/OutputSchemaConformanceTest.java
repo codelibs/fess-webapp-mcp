@@ -25,6 +25,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.codelibs.fess.entity.SearchRenderData;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
 import org.junit.jupiter.api.Test;
 
@@ -103,7 +104,7 @@ public class OutputSchemaConformanceTest {
     private static SearchTool searchToolReturning(final List<Map<String, Object>> docs) {
         return new SearchTool() {
             @Override
-            protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments) {
+            protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments, final SearchRenderData data) {
                 return docs;
             }
 
@@ -202,7 +203,7 @@ public class OutputSchemaConformanceTest {
     public void testSearchResultConformsToItsOwnSchema_EveryOptionalFieldPresent() {
         final Map<String, Object> result = new SearchTool() {
             @Override
-            protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments) {
+            protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments, final SearchRenderData data) {
                 final Map<String, Object> doc = new HashMap<>();
                 doc.put("title", "Full Doc");
                 doc.put("url", "https://example.com/full");
@@ -248,7 +249,7 @@ public class OutputSchemaConformanceTest {
     public void testSearchResultConformsToItsOwnSchema_ZeroHits() {
         final Map<String, Object> result = new SearchTool() {
             @Override
-            protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments) {
+            protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments, final SearchRenderData data) {
                 return List.of();
             }
         }.call(Map.of("q", "x"), new McpCallContext());

@@ -120,8 +120,13 @@ public class SearchTool implements McpTool {
 
         final Map<String, Object> schema = new LinkedHashMap<>();
         schema.put("type", "object");
-        schema.put("properties", Map.of("hits", Map.of("type", "array", "items", hit)));
-        schema.put("required", List.of("hits"));
+        schema.put("properties",
+                Map.of("hits", Map.of("type", "array", "items", hit), "total",
+                        Map.of("type", "integer", "description", "total number of matching documents"), "total_relation",
+                        Map.of("type", "string", "description",
+                                "EQUAL_TO when total is exact, GREATER_THAN_OR_EQUAL_TO when the search engine stopped counting"),
+                        "has_more", Map.of("type", "boolean", "description", "whether a page exists after this one")));
+        schema.put("required", List.of("hits", "total", "has_more"));
         schema.put("additionalProperties", false);
         return schema;
     }
@@ -140,7 +145,8 @@ public class SearchTool implements McpTool {
     public Map<String, Object> call(final Map<String, Object> arguments, final McpCallContext context) {
         validateArguments(arguments);
 
-        final List<Map<String, Object>> documentItems = executeSearch(arguments);
+        final SearchRenderData data = new SearchRenderData();
+        final List<Map<String, Object>> documentItems = executeSearch(arguments, data);
 
         // Build MCP-compliant response with multiple content entries, plus structuredContent
         // conforming to getOutputSchema().
@@ -152,9 +158,18 @@ public class SearchTool implements McpTool {
             hits.add(buildHit(doc));
         }
 
+        final Map<String, Object> structured = new LinkedHashMap<>();
+        structured.put("hits", hits);
+        structured.put("total", data.getAllRecordCount());
+        // Omitted rather than fabricated when Fess did not supply one: the default searcher always
+        // sets it from the engine's TotalHits relation, but a rank-fusion searcher need not, and
+        // defaulting to EQUAL_TO would claim an exactness this tool cannot verify.
+        putIfNotNull(structured, "total_relation", data.getAllRecordCountRelation());
+        structured.put("has_more", data.isExistNextPage());
+
         final Map<String, Object> result = new LinkedHashMap<>();
         result.put("content", contents);
-        result.put("structuredContent", Map.of("hits", hits));
+        result.put("structuredContent", structured);
         return result;
     }
 
@@ -250,14 +265,13 @@ public class SearchTool implements McpTool {
      * @param arguments the raw {@code search} tool arguments
      * @return the processed document items, in result order; never null
      */
-    protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments) {
+    protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments, final SearchRenderData data) {
         final SearchRequestParams reqParams = buildRequestParams(arguments);
 
         if (logger.isDebugEnabled()) {
             logger.debug("[MCP] Executing search: query='{}', start={}, num={}, sort={}", reqParams.getQuery(),
                     reqParams.getStartPosition(), reqParams.getPageSize(), reqParams.getSort());
         }
-        final SearchRenderData data = new SearchRenderData();
         getSearchHelper().search(reqParams, data, OptionalThing.empty());
         if (logger.isDebugEnabled()) {
             logger.debug("[MCP] Search completed: resultCount={}", data.getDocumentItems() != null ? data.getDocumentItems().size() : 0);
