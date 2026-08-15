@@ -75,13 +75,16 @@ public class GetDocumentTool implements McpTool {
     public Map<String, Object> getOutputSchema() {
         final Map<String, Object> schema = new LinkedHashMap<>();
         schema.put("type", "object");
-        schema.put("properties", Map.of("doc_id", Map.of("type", "string"), "title", Map.of("type", "string"), "url",
-                Map.of("type", "string"), "content", Map.of("type", "string")));
+        schema.put("properties",
+                Map.of("doc_id", Map.of("type", "string"), "title", Map.of("type", "string"), "url", Map.of("type", "string"), "content",
+                        Map.of("type", "string"), "truncated",
+                        Map.of("type", "boolean", "description", "whether content was cut at mcp.content.max.length"), "content_length",
+                        Map.of("type", "integer", "description", "length of the document's content before truncation")));
         // Once a document is found, doc_id echoes the (already validated, non-empty) request
         // argument, and title/url/content are always present -- possibly as an empty string,
         // never absent -- because the lookup falls back to "" for each. This schema only
         // describes the found case: the not-found result carries no structuredContent.
-        schema.put("required", List.of("doc_id", "title", "url", "content"));
+        schema.put("required", List.of("doc_id", "title", "url", "content", "truncated", "content_length"));
         schema.put("additionalProperties", false);
         return schema;
     }
@@ -130,11 +133,25 @@ public class GetDocumentTool implements McpTool {
         final String title = (String) doc.get("title");
         final String url = (String) doc.get("url");
         final String content = (String) doc.get("content");
+        // Defaulted rather than copied straight through: the schema declares both required, and a
+        // lookup override that predates them would otherwise put a null into structuredContent --
+        // the one thing this channel promises never to contain. Absent means "nothing was cut",
+        // which makes content_length the length of what we have.
+        final Boolean truncated = doc.get("truncated") instanceof final Boolean b ? b : Boolean.FALSE;
+        final Integer contentLength = doc.get("content_length") instanceof final Integer i ? i : Integer.valueOf(content.length());
 
         final StringBuilder sb = new StringBuilder();
         sb.append("**Title**: ").append(title).append("\n");
         sb.append("**URL**: ").append(url).append("\n");
-        sb.append("**Doc ID**: ").append(docId).append("\n\n");
+        sb.append("**Doc ID**: ").append(docId).append("\n");
+        if (Boolean.TRUE.equals(truncated)) {
+            // Deliberately does not compute how many characters were shown: that would duplicate
+            // DocumentFormatter's knowledge of its own ellipsis and drift the moment it changes.
+            sb.append("**Truncated**: content was cut at mcp.content.max.length; the document is ")
+                    .append(contentLength)
+                    .append(" characters\n");
+        }
+        sb.append("\n");
         sb.append(content);
 
         final Map<String, Object> structured = new LinkedHashMap<>();
@@ -142,6 +159,8 @@ public class GetDocumentTool implements McpTool {
         structured.put("title", title);
         structured.put("url", url);
         structured.put("content", content);
+        structured.put("truncated", truncated);
+        structured.put("content_length", contentLength);
 
         final Map<String, Object> result = new LinkedHashMap<>();
         result.put("content", List.of(Map.of("type", "text", "text", sb.toString())));
@@ -156,7 +175,9 @@ public class GetDocumentTool implements McpTool {
      * without a DI container: everything below this point (resolving field names via
      * {@link #getFessConfig()} and looking the document up via {@link #getSearchHelper()}) needs
      * one. The returned map's values are never {@code null} -- each falls back to {@code ""} --
-     * and always carries exactly {@code title}, {@code url}, and {@code content}.
+     * and always carries {@code title}, {@code url}, {@code content}, {@code truncated} and
+     * {@code content_length}. An override that omits the last two is tolerated by {@link #call}
+     * (they default to "not truncated"), but should supply them so the report stays accurate.
      * </p>
      *
      * @param docId the non-empty document ID to look up
@@ -176,15 +197,33 @@ public class GetDocumentTool implements McpTool {
             final String title = String.valueOf(doc.getOrDefault(fessConfig.getIndexFieldTitle(), ""));
             final String url = String.valueOf(doc.getOrDefault(fessConfig.getIndexFieldUrl(), ""));
             final String content = String.valueOf(doc.getOrDefault(fessConfig.getIndexFieldContent(), ""));
-            final DocumentFormatter formatter = getDocumentFormatter();
-            final String displayContent = formatter.truncateContent(content, formatter.getContentMaxLength());
 
             final Map<String, Object> result = new LinkedHashMap<>();
             result.put("title", title);
             result.put("url", url);
-            result.put("content", displayContent);
+            result.putAll(buildContentFields(content));
             return result;
         }).orElse(null);
+    }
+
+    /**
+     * Applies the {@code mcp.content.max.length} bound to a document's content.
+     *
+     * @param content the document's untruncated content
+     * @return the fields describing the content this tool will report
+     */
+    protected Map<String, Object> buildContentFields(final String content) {
+        final DocumentFormatter formatter = getDocumentFormatter();
+        final int maxLength = formatter.getContentMaxLength();
+        final Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("content", formatter.truncateContent(content, maxLength));
+        // The trailing "..." cannot carry this: it is indistinguishable from a document that
+        // genuinely ends in an ellipsis, and this tool is the one a client reaches for when it
+        // wants the whole document. content_length is the untruncated length, so a client can
+        // say how much it is missing rather than only that something is.
+        fields.put("truncated", Boolean.valueOf(content.length() > maxLength));
+        fields.put("content_length", Integer.valueOf(content.length()));
+        return fields;
     }
 
     /**
