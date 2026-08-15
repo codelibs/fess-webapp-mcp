@@ -757,7 +757,7 @@ public class McpApiManagerHttpTest {
         assertEquals(429, lastResponse.getStatus(), second);
         assertEquals("60", lastResponse.getHeader("Retry-After"), second);
         assertTrue(second.contains("\"id\":1"), "the id is known by the time the rate limit is enforced: " + second);
-        assertTrue(second.contains("-32603"), second);
+        assertTrue(second.contains("-32000"), "a refusal by policy is not an internal error: " + second);
     }
 
     @Test

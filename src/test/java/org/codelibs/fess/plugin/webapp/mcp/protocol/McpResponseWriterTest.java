@@ -142,7 +142,7 @@ public class McpResponseWriterTest {
     public void testRetryAfterHeaderIsSetFromErrorData() {
         final MockletHttpServletResponseImpl response = response();
         writer.writeError(response, 1, true,
-                new McpError(429, ErrorCode.InternalError, "rate limit exceeded", Map.of("retryAfterSeconds", 60)));
+                new McpError(429, ErrorCode.RateLimited, "rate limit exceeded", Map.of("retryAfterSeconds", 60)));
 
         assertEquals(429, response.getStatus());
         assertEquals("60", response.getHeader("Retry-After"));
