@@ -19,10 +19,12 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import jakarta.servlet.http.HttpServletResponse;
 
+import org.codelibs.fess.entity.SearchRequestParams.SearchRequestType;
 import org.codelibs.fess.helper.SuggestHelper;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
@@ -117,13 +119,7 @@ public class CompletionHandler implements McpMethodHandler {
      *         and {@code hasMore}
      */
     protected Map<String, Object> completeViaSuggest(final String query) {
-        final SuggestRequestBuilder builder = getSuggestHelper().suggester().suggest();
-        builder.setQuery(query);
-        builder.setSize(MAX_VALUES);
-        builder.addKind(SuggestItem.Kind.QUERY.toString());
-        builder.addKind(SuggestItem.Kind.DOCUMENT.toString());
-
-        final SuggestResponse suggestResponse = builder.execute().getResponse();
+        final SuggestResponse suggestResponse = buildSuggestRequest(query).execute().getResponse();
 
         final List<String> values = new ArrayList<>();
         if (suggestResponse.getItems() != null) {
@@ -136,6 +132,41 @@ public class CompletionHandler implements McpMethodHandler {
         final int total = (int) suggestResponse.getTotal();
         final boolean hasMore = total > capped.size();
         return buildCompletionResult(capped, total, hasMore);
+    }
+
+    /**
+     * Configures the suggest request backing {@code completion/complete}.
+     *
+     * @param query the autocomplete input value
+     * @return the configured builder, ready to execute
+     */
+    protected SuggestRequestBuilder buildSuggestRequest(final String query) {
+        final SuggestRequestBuilder builder = newSuggestRequestBuilder();
+        builder.setQuery(query);
+        builder.setSize(MAX_VALUES);
+        builder.addKind(SuggestItem.Kind.QUERY.toString());
+        builder.addKind(SuggestItem.Kind.DOCUMENT.toString());
+        getCallerRoles().forEach(builder::addRole);
+        return builder;
+    }
+
+    /**
+     * Creates an unconfigured suggest request builder. Overridable so
+     * {@link #buildSuggestRequest} can be asserted on without a container.
+     *
+     * @return a fresh builder from Fess's suggester
+     */
+    protected SuggestRequestBuilder newSuggestRequestBuilder() {
+        return getSuggestHelper().suggester().suggest();
+    }
+
+    /**
+     * Returns the roles the current caller may search with.
+     *
+     * @return the caller's roles; never null, possibly empty
+     */
+    protected Set<String> getCallerRoles() {
+        return ComponentUtil.getRoleQueryHelper().build(SearchRequestType.SUGGEST);
     }
 
     /**
