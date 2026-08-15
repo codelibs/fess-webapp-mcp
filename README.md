@@ -514,6 +514,15 @@ A tool that reports a server-side failure itself gets the same treatment through
 
 This is not defensiveness for its own sake: these messages routinely embed text this plugin never wrote. Fess's own `InvalidQueryException` carries the fully serialized OpenSearch query DSL, *including* the role and permission filter terms already merged into it, and a caller can provoke it with nothing but an out-of-range `start`. A fresh uuid per failure is what makes a user report ("I got `error_code:X`") pinpoint one log line.
 
+**A rejected query is not an unexpected failure.** Fess raises `InvalidQueryException` for input the *caller* wrote — an unparseable query string, a sort field that does not exist, a `start` past the ceiling — so these are answered as `-32602` with a message you can act on, not a correlation id:
+
+```json
+{ "jsonrpc": "2.0", "id": 3,
+  "error": { "code": -32602, "message": "The specified sort nope.asc is unsupported." } }
+```
+
+The text comes from Fess's own end-user message bundle (the same strings the search UI shows), never from `getMessage()` — so the DSL-bearing case above resolves to the deliberately uninformative `Could not process the specified query.` and the leak stays closed. These are logged at **DEBUG**, not WARN: the stack trace is not evidence of a server fault, and logging one per request would let any caller drive an unbounded volume of it by sending `q=foo AND`.
+
 **Caller-directed errors are not redacted.** An error describing what is wrong with the caller's own request — JSON-RPC `-32700`, `-32600`, `-32601`, or `-32602` — passes through verbatim, because those messages are written by this plugin and name nothing but the offending argument: `Unknown tool: get_index_stats`, `Missing required parameter: doc_id`, `Invalid type for parameter: q (expected a string)`. The split is fail-closed: any other code, including a new one added later, is redacted until someone decides otherwise. The `Document not found: abc123` result shown above is unaffected too — that is not a failure at all, but a normal `isError: true` result the tool builds itself.
 
 ### 4. resources/list
@@ -938,7 +947,7 @@ The API returns standard JSON-RPC 2.0 error responses:
 
 Unlike a strict per-code HTTP status mapping, the HTTP status for a given JSON-RPC code depends on *where* it is raised: for example `-32602` is HTTP 400 for a malformed `params._meta`, but HTTP 200 (with a JSON-RPC error body) for an unknown/unauthorized tool, prompt, or resource, for a wrong-typed tool argument, or for an inbound `cursor`.
 
-An error raised by a tool is a special case: only caller-directed codes carry their real message, and anything else is replaced with a correlation id you must look up in the Fess log. See [Unexpected tool failures carry a correlation id, not a message](#unexpected-tool-failures-carry-a-correlation-id-not-a-message).
+An error raised by a tool is a special case: caller-directed codes carry their real message, a rejected query carries the resolved text of Fess's own end-user message, and anything else is replaced with a correlation id you must look up in the Fess log. See [Unexpected tool failures carry a correlation id, not a message](#unexpected-tool-failures-carry-a-correlation-id-not-a-message).
 
 ### Error Codes
 
@@ -948,7 +957,7 @@ An error raised by a tool is a special case: only caller-directed codes carry th
 | -32600 | Invalid Request | The JSON sent is not a valid Request object (e.g. an explicit `"id": null`) |
 | -32601 | Method not found | The method does not exist, including the retired `initialize` and `ping` |
 | -32602 | Invalid params | Invalid method parameter(s), including a tool argument whose JSON type disagrees with the tool's `inputSchema`; also covers an unknown, gated, or otherwise unusable tool/prompt/resource, and a non-null inbound `cursor` (this server never issues one; an explicit `null` is treated as absent) |
-| -32603 | Internal error | Internal JSON-RPC error; also used for a rate-limit refusal (HTTP 429, with a `retryAfterSeconds` in `error.data` and an HTTP `Retry-After` header), and for a tool reporting a server-side failure, whose message is always the fixed `Tool execution failed (error_code:<uuid>)` |
+| -32603 | Internal error | Internal JSON-RPC error; also used for a tool reporting a server-side failure, whose message is always the fixed `Tool execution failed (error_code:<uuid>)` |
 | -32000 | RateLimited | The caller exceeded `mcp.rate.limit.per.minute`. Always paired with HTTP 429 and a `Retry-After` header, plus `data.retryAfterSeconds`. This number sits in the JSON-RPC range the MCP schema marks implementation-defined (`-32000`–`-32019`), which receivers are told not to give cross-implementation meaning — **key off the HTTP status and `Retry-After`, not the code** |
 | -32020 | HeaderMismatch | A required MCP request-metadata header (`MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`) is missing, is sent more than once, or disagrees with the request body. A missing or incomplete `params._meta` is `-32602` instead — the specification scopes this code to the header layer |
 | -32021 | MissingRequiredClientCapability | The request needs a client capability the client did not declare. **Defined by this server but never emitted** — nothing in this plugin currently requires an optional client capability. |

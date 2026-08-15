@@ -18,18 +18,23 @@ package org.codelibs.fess.plugin.webapp.mcp.handler;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Locale;
 import java.util.UUID;
 
 import jakarta.servlet.http.HttpServletResponse;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codelibs.fess.exception.InvalidQueryException;
+import org.codelibs.fess.mylasta.action.FessMessages;
 import org.codelibs.fess.plugin.webapp.exception.McpApiException;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
 import org.codelibs.fess.plugin.webapp.mcp.auth.PermissionGate;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpError;
 import org.codelibs.fess.plugin.webapp.mcp.tool.McpTool;
+import org.codelibs.fess.util.ComponentUtil;
+import org.lastaflute.web.validation.VaMessenger;
 
 /**
  * The {@code tools/call} handler.
@@ -41,7 +46,7 @@ import org.codelibs.fess.plugin.webapp.mcp.tool.McpTool;
  *
  * <h2>What a failing tool is allowed to tell the caller</h2>
  * <p>
- * A tool failure reaches the caller through one of two shapes, and neither may echo an
+ * A tool failure reaches the caller through one of three shapes, and none may echo an
  * exception message this plugin did not author:
  * </p>
  * <ul>
@@ -51,6 +56,19 @@ import org.codelibs.fess.plugin.webapp.mcp.tool.McpTool;
  *       {@code "Missing required parameter: doc_id"}, {@code "Missing required parameter: q"}.
  *       Those strings are written here, contain nothing but the argument name, and are the
  *       whole point of the error, so they are bridged to {@link McpError} unchanged.</li>
+ *   <li><b>A rejected query is answered from Fess's own end-user message bundle.</b> An
+ *       {@link InvalidQueryException} always describes the caller's input -- an unparseable
+ *       query string, a sort field that does not exist, an offset past the ceiling -- but its
+ *       {@code getMessage()} is written for an operator and cannot be forwarded (see the DSL
+ *       leak below). It also carries a {@link VaMessenger}, the channel {@code SearchAction}
+ *       and {@code ApiAdminSearchlistAction} already use to tell an end user what was wrong.
+ *       Those strings are caller-facing by construction and interpolate nothing but the
+ *       caller's own input, so {@link #resolveCallerMessage} returns that instead and the
+ *       failure becomes a -32602, consistent with the wrong-typed-argument errors the tools
+ *       already raise. The DSL-bearing case resolves to {@code "Could not process the
+ *       specified query."}, so the leak below stays closed. These are logged at DEBUG rather
+ *       than WARN: the stack trace is not evidence of a server fault, and an unauthenticated
+ *       caller could otherwise drive an unbounded volume of it by sending {@code "foo AND"}.</li>
  *   <li><b>Everything else is replaced with a correlation id.</b> An {@code InternalError}
  *       (-32603) or an exception that escaped a tool entirely is describing a *server-side*
  *       failure, and its message routinely embeds text this plugin never wrote. Two verified
@@ -60,17 +78,20 @@ import org.codelibs.fess.plugin.webapp.mcp.tool.McpTool;
  *       searchRequestBuilder)}, whose {@code toString()} is the fully serialized OpenSearch
  *       DSL -- including the role/permission filter terms that were already merged into it at
  *       throw time. A caller can trigger that one with nothing but a {@code start} between
- *       {@code index.max_result_window} and {@code query.max.search.result.offset}. The caller
- *       gets a fixed message plus {@code error_code:<uuid>}; the real message and stack trace
- *       go to the WARN log under the same id.</li>
+ *       {@code index.max_result_window} and {@code query.max.search.result.offset} -- which is
+ *       why that one is now answered by the arm above, from its message code rather than its
+ *       message. Anything that reaches this arm gets a fixed message plus
+ *       {@code error_code:<uuid>}; the real message and stack trace go to the WARN log under
+ *       the same id.</li>
  * </ul>
  * <p>
  * The redaction is unconditional -- it deliberately does not consult Fess's
  * {@code api.json.response.exception.included} flag. That flag is read through
  * {@code ComponentUtil}, which this container-free handler otherwise never touches, and it is
  * not an established contract for this shape of leak anyway: Fess's own v2 {@code SearchHandler}
- * leaks the same {@code InvalidQueryException} text without consulting it. Redacting always is
- * both cheaper and safer than making disclosure a configuration mistake away.
+ * leaks the same {@code InvalidQueryException} text without consulting it. Resolving the message
+ * code instead of the message keeps that disclosure closed without making it a configuration
+ * mistake away, and without leaving the caller nothing to act on.
  * </p>
  * <p>
  * This leak is pre-existing rather than introduced here: the same {@code "Error: " +
@@ -82,8 +103,55 @@ public class ToolsCallHandler implements McpMethodHandler {
 
     private static final Logger logger = LogManager.getLogger(ToolsCallHandler.class);
 
+    /** Returned when an {@link InvalidQueryException} carries no resolvable message code. */
+    protected static final String FALLBACK_INVALID_QUERY = "The given query is invalid.";
+
     /** The tools this handler can invoke. */
     private final List<McpTool> tools;
+
+    /**
+     * Resolves the localized, caller-facing text an {@link InvalidQueryException} carries.
+     * <p>
+     * Deliberately not {@code e.getMessage()}: that string is written for an operator and, in
+     * the {@code SearchEngineClient} case, contains the executed OpenSearch DSL together with
+     * the role filters derived from this caller's own principal. The {@link VaMessenger} is the
+     * channel Fess already uses to tell an end user what was wrong with their query, so every
+     * message it can resolve to is safe to hand back by construction.
+     * </p>
+     * <p>
+     * Isolated behind this seam because it reads {@link ComponentUtil}, and the handler test
+     * suite is container-free -- the same discipline the other {@code ComponentUtil} callers in
+     * this package follow.
+     * </p>
+     *
+     * @param messageCode the message code the exception carried, may be null
+     * @return the resolved text, never null and never empty
+     */
+    protected String resolveCallerMessage(final VaMessenger<FessMessages> messageCode) {
+        if (messageCode == null) {
+            return FALLBACK_INVALID_QUERY;
+        }
+        try {
+            final FessMessages messages = new FessMessages();
+            messageCode.message(messages);
+            // Locale.ROOT, not the servlet request's locale. MCP negotiates no locale, so the
+            // request's is whatever Tomcat defaulted to: on a Japanese-default host this returned
+            // a Japanese sentence while every other message this plugin emits ("Missing required
+            // parameter: q") stayed English, which is worse than either language alone. SearchTool
+            // already declares Locale.ROOT for the search request itself; this matches it.
+            final List<String> texts = ComponentUtil.getMessageManager().toMessageList(Locale.ROOT, messages);
+            if (!texts.isEmpty()) {
+                return String.join(" ", texts);
+            }
+        } catch (final RuntimeException e) {
+            // A missing bundle key or an unresolvable locale must not turn a caller's bad query
+            // into a 500. Fall through to the fixed text.
+            if (logger.isDebugEnabled()) {
+                logger.debug("[MCP] Could not resolve the message for a rejected query", e);
+            }
+        }
+        return FALLBACK_INVALID_QUERY;
+    }
 
     /**
      * Creates a {@code tools/call} handler backed by this server's standard tool set.
@@ -178,6 +246,26 @@ public class ToolsCallHandler implements McpMethodHandler {
             // a message this plugin wrote, so it is caller-directed by construction -- unlike
             // the arbitrary backend exceptions the catch-all below has to assume the worst about.
             throw e;
+        } catch (final InvalidQueryException e) {
+            // Fess raises this for a query the *caller* wrote: an unparseable query string, a
+            // sort field that does not exist, an offset past the ceiling. The catch-all below
+            // would be wrong twice over. It would answer a correlation id, leaving an agent
+            // nothing to correct and no reason not to send the same argument again; and it
+            // would write a stack trace at WARN for every such request, which is a log volume
+            // any unauthenticated caller can drive just by sending "foo AND".
+            //
+            // getMessage() still may not be returned -- the SearchEngineClient variant embeds
+            // the whole OpenSearch DSL, this caller's role filters included. The exception also
+            // carries the VaMessenger that SearchAction and ApiAdminSearchlistAction already
+            // show to end users, and every one of those strings is written for a caller and
+            // interpolates nothing but the caller's own input ("The specified sort {0} is
+            // unsupported."). The DSL-bearing case resolves to "Could not process the specified
+            // query." -- still useless to an attacker, still enough for a caller to stop
+            // retrying. Resolve that, and leave the redaction of everything else untouched.
+            if (logger.isDebugEnabled()) {
+                logger.debug("[MCP] Tool '{}' rejected the caller's query", name, e);
+            }
+            throw new McpError(HttpServletResponse.SC_OK, ErrorCode.InvalidParams, resolveCallerMessage(e.getMessageCode()));
         } catch (final Exception e) {
             // Unexpected: whatever this is, its message was written by code outside this plugin
             // and may embed backend internals (an OpenSearch DSL with role filters, a JVM cast
