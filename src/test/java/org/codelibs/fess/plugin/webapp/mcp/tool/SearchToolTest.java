@@ -680,4 +680,105 @@ public class SearchToolTest {
     public void testPageSize_NumericStringNegativeFallsBackToTheDefaultNotTheMaximum() {
         assertEquals(DEFAULT_PAGE_SIZE, pageSizeOf(Map.of("q", "x", "num", "-5")), "num=\"-5\" must fall back to the default");
     }
+
+    @Test
+    public void testSearchHitCarriesDocIdSoGetDocumentIsReachable() {
+        // doc_id is the only key get_document and the fess://document/{doc_id} resource template
+        // accept, and Fess already returns it on every search item. Without it here there is no
+        // path at all from a search hit to either primitive: passing the url instead answers
+        // "Document not found", and the fields argument is a filter, not a projection.
+        final Map<String, Object> doc = Map.of("title", "Test Document", "url", "https://example.com/test", "score", 10.5,
+                "content_description", "digest", "doc_id", "d82177b8ab2749909afbfd6f3a54dc57");
+
+        final Map<String, Object> hit = searchTool.buildHit(doc);
+
+        assertEquals("d82177b8ab2749909afbfd6f3a54dc57", hit.get("doc_id"), "the hit must carry the document id");
+    }
+
+    @Test
+    public void testSearchHitOmitsDocIdWhenFessDidNotPopulateIt() {
+        final Map<String, Object> hit = searchTool.buildHit(Map.of("title", "Test Document"));
+
+        assertFalse(hit.containsKey("doc_id"), "an absent doc_id must be omitted, never fabricated as an empty string");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testOutputSchemaDeclaresDocId() {
+        // The hit schema is additionalProperties:false and OutputSchemaConformanceTest validates
+        // every produced hit against it, so buildHit and this declaration have to move together.
+        final Map<String, Object> hits =
+                (Map<String, Object>) ((Map<String, Object>) searchTool.getOutputSchema().get("properties")).get("hits");
+        final Map<String, Object> item = (Map<String, Object>) hits.get("items");
+        final Map<String, Object> properties = (Map<String, Object>) item.get("properties");
+
+        assertTrue(properties.containsKey("doc_id"), "outputSchema must declare doc_id");
+        assertEquals("string", ((Map<String, Object>) properties.get("doc_id")).get("type"), "doc_id must be declared as a string");
+    }
+
+    @Test
+    public void testCreateDocumentContentIncludesDocId() {
+        // The text block is what a client that ignores structuredContent reads, so the id has to
+        // be reachable from there too.
+        final Map<String, Object> doc = Map.of("title", "Test Document", "url", "https://example.com/test", "content",
+                "This is test content.", "doc_id", "d82177b8ab2749909afbfd6f3a54dc57");
+
+        final String text = (String) searchTool.createDocumentContent(doc, 1).get("text");
+
+        assertTrue(text.contains("**Doc ID**: d82177b8ab2749909afbfd6f3a54dc57"), "Text should contain the document id");
+    }
+
+    @Test
+    public void testCreateDocumentContentOmitsDocIdLineWhenAbsent() {
+        final Map<String, Object> doc = Map.of("title", "Test Document", "url", "https://example.com/test");
+
+        final String text = (String) searchTool.createDocumentContent(doc, 1).get("text");
+
+        assertFalse(text.contains("**Doc ID**"), "no doc id line when Fess did not populate one");
+    }
+
+    @Test
+    public void testResponseFieldsRequestDocIdFromFess() {
+        // buildHit copying doc_id is a silent no-op unless the search actually asks Fess for the
+        // field: getResponseFields() is the _source include list, and a field left out of it is
+        // simply absent from every item. This is the half of the change that has runtime effect.
+        final SearchTool tool = new SearchTool() {
+            @Override
+            protected FessConfig getFessConfig() {
+                return new FessConfig.SimpleImpl() {
+
+                    private static final long serialVersionUID = 1L;
+
+                    @Override
+                    public String getIndexFieldTitle() {
+                        return "title";
+                    }
+
+                    @Override
+                    public String getIndexFieldContent() {
+                        return "content";
+                    }
+
+                    @Override
+                    public String getIndexFieldUrl() {
+                        return "url";
+                    }
+
+                    @Override
+                    public String getResponseFieldContentDescription() {
+                        return "content_description";
+                    }
+
+                    @Override
+                    public String getIndexFieldDocId() {
+                        return "doc_id";
+                    }
+                };
+            }
+        };
+
+        final List<String> fields = List.of(tool.buildRequestParams(Map.of("q", "x")).getResponseFields());
+
+        assertTrue(fields.contains("doc_id"), "search must request doc_id so buildHit has one to copy: " + fields);
+    }
 }

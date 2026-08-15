@@ -106,8 +106,8 @@ public class SearchTool implements McpTool {
     public Map<String, Object> getOutputSchema() {
         final Map<String, Object> hit = new LinkedHashMap<>();
         hit.put("type", "object");
-        hit.put("properties", Map.of("title", Map.of("type", "string"), "url", Map.of("type", "string"), "score", Map.of("type", "number"),
-                "content_description", Map.of("type", "string")));
+        hit.put("properties", Map.of("doc_id", Map.of("type", "string"), "title", Map.of("type", "string"), "url", Map.of("type", "string"),
+                "score", Map.of("type", "number"), "content_description", Map.of("type", "string")));
         // No field is guaranteed present on every Fess document item: title/url can be
         // entirely absent from _source for a malformed or partially-indexed document, and score
         // is absent when rank fusion has no BM25 branch (e.g. kNN-only semantic search).
@@ -289,6 +289,7 @@ public class SearchTool implements McpTool {
      */
     protected Map<String, Object> buildHit(final Map<String, Object> doc) {
         final Map<String, Object> hit = new LinkedHashMap<>();
+        putIfNotNull(hit, "doc_id", doc.get("doc_id"));
         putIfNotNull(hit, "title", doc.get("title"));
         putIfNotNull(hit, "url", doc.get("url"));
         putIfNotNull(hit, "score", doc.get("score"));
@@ -509,8 +510,8 @@ public class SearchTool implements McpTool {
             @Override
             public String[] getResponseFields() {
                 final FessConfig fessConfig = getFessConfig();
-                return new String[] { fessConfig.getIndexFieldTitle(), fessConfig.getIndexFieldContent(), fessConfig.getIndexFieldUrl(),
-                        fessConfig.getResponseFieldContentDescription() };
+                return new String[] { fessConfig.getIndexFieldDocId(), fessConfig.getIndexFieldTitle(), fessConfig.getIndexFieldContent(),
+                        fessConfig.getIndexFieldUrl(), fessConfig.getResponseFieldContentDescription() };
             }
         };
     }
@@ -613,6 +614,10 @@ public class SearchTool implements McpTool {
         final Object score = doc.get("score");
         sb.append("**Title**: ").append(doc.getOrDefault("title", "")).append("\n");
         sb.append("**URL**: ").append(doc.getOrDefault("url", "")).append("\n");
+        final Object docId = doc.get("doc_id");
+        if (docId != null) {
+            sb.append("**Doc ID**: ").append(docId).append("\n");
+        }
         if (score != null) {
             sb.append("**Score**: ").append(score).append("\n");
         }
