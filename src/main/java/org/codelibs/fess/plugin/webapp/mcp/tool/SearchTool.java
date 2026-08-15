@@ -121,13 +121,17 @@ public class SearchTool implements McpTool {
 
         final Map<String, Object> schema = new LinkedHashMap<>();
         schema.put("type", "object");
-        schema.put("properties", Map.of("hits", Map.of("type", "array", "items", hit), "total",
-                Map.of("type", "integer", "description", "total number of matching documents"), "total_relation",
-                Map.of("type", "string", "description",
-                        "EQUAL_TO when total is exact, GREATER_THAN_OR_EQUAL_TO when the search engine stopped counting"),
-                "has_more", Map.of("type", "boolean", "description", "whether a page exists after this one"), "collapsed", Map.of("type",
-                        "boolean", "description", "whether near-duplicate results were folded, so fewer than total items are obtainable")));
-        schema.put("required", List.of("hits", "total", "has_more", "collapsed"));
+        schema.put("properties",
+                Map.of("hits", Map.of("type", "array", "items", hit), "total",
+                        Map.of("type", "integer", "description", "total number of matching documents"), "total_relation",
+                        Map.of("type", "string", "description",
+                                "EQUAL_TO when total is exact, GREATER_THAN_OR_EQUAL_TO when the search engine stopped counting"),
+                        "has_more", Map.of("type", "boolean", "description", "whether a page exists after this one"), "collapsed",
+                        Map.of("type", "boolean", "description",
+                                "whether near-duplicate results were folded, so fewer than total items are obtainable"),
+                        "partial", Map.of("type", "boolean", "description",
+                                "whether the search did not complete, so these results are not the whole answer")));
+        schema.put("required", List.of("hits", "total", "has_more", "collapsed", "partial"));
         schema.put("additionalProperties", false);
         return schema;
     }
@@ -172,6 +176,13 @@ public class SearchTool implements McpTool {
         // ships result.collapsed=true, and without this flag total reads as a promise the caller
         // cannot fulfil.
         structured.put("collapsed", Boolean.valueOf(isResultCollapsed()));
+        // A search that timed out, or that never reached a working searcher at all, still returns
+        // an ordinary empty or short result. Without this the caller cannot tell "nothing matches"
+        // from "the search engine is unreachable", and an agent reports the former: measured on a
+        // live server with the engine stopped, this tool answered total 0 with no error at all.
+        // Required rather than optional for the same reason as collapsed -- an omitted flag and a
+        // false one would be indistinguishable in exactly the situation it exists to signal.
+        structured.put("partial", Boolean.valueOf(data.isPartialResults()));
 
         final Map<String, Object> result = new LinkedHashMap<>();
         result.put("content", contents);

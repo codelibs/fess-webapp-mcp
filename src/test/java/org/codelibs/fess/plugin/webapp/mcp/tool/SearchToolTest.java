@@ -1145,4 +1145,56 @@ public class SearchToolTest {
         assertTrue(((String) sort.get("description")).contains(".asc"), "the schema itself must carry the shape");
     }
 
+    // ------------------------------------------------------------------
+    // A search that did not complete must say so
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testPartialIsReportedWhenTheSearchDidNotComplete() {
+        // Fess returns an ordinary empty result when the searcher timed out or never ran, so
+        // without this flag "nothing matches" and "the search engine is unreachable" are the
+        // same response.
+        final SearchTool tool = new ContainerFreeSearchTool() {
+            @Override
+            protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments, final SearchRenderData data) {
+                data.setPartialResults(true);
+                return List.of();
+            }
+        };
+
+        final Map<String, Object> structured =
+                (Map<String, Object>) tool.call(Map.of("q", "x"), new McpCallContext()).get("structuredContent");
+
+        assertEquals(Boolean.TRUE, structured.get("partial"), "an incomplete search must not look like a complete empty one");
+        assertEquals(0, ((List<Object>) structured.get("hits")).size());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testPartialIsFalseForACompletedSearch() {
+        final SearchTool tool = new ContainerFreeSearchTool() {
+            @Override
+            protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments, final SearchRenderData data) {
+                return List.of(Map.of("title", "t", "url", "https://example.com/"));
+            }
+        };
+
+        final Map<String, Object> structured =
+                (Map<String, Object>) tool.call(Map.of("q", "x"), new McpCallContext()).get("structuredContent");
+
+        assertEquals(Boolean.FALSE, structured.get("partial"), "a completed search must not be flagged");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testOutputSchemaDeclaresAndRequiresPartial() {
+        // Required, not optional: an omitted flag and a false one would be indistinguishable in
+        // exactly the situation this exists to signal.
+        final Map<String, Object> schema = new SearchTool().getOutputSchema();
+        final Map<String, Object> properties = (Map<String, Object>) schema.get("properties");
+        assertTrue(properties.containsKey("partial"), "the caller cannot check a field that is not advertised");
+        assertEquals("boolean", ((Map<String, Object>) properties.get("partial")).get("type"));
+        assertTrue(((List<String>) schema.get("required")).contains("partial"));
+    }
+
 }
