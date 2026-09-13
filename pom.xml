@@ -52,6 +52,66 @@
 				</configuration>
 			</plugin>
 			<plugin>
+				<artifactId>maven-shade-plugin</artifactId>
+				<executions>
+					<execution>
+						<phase>package</phase>
+						<goals>
+							<goal>shade</goal>
+						</goals>
+						<configuration>
+							<createDependencyReducedPom>false</createDependencyReducedPom>
+							<!-- No relocation. Nothing else in an installation names these classes:
+							     `mvn dependency:list -DincludeGroupIds=com.nimbusds` on Fess 15.9 answers
+							     "none", and the built war carries no nimbus-*, oauth2-oidc-sdk-* or jcip-*
+							     jar in WEB-INF/lib. OAuthResourceServerAuthenticator resolves
+							     com.nimbusds.* by its real name from inside this same jar, so there is no
+							     copy to collide with and nothing a rename would buy. -->
+							<artifactSet>
+								<!-- An include list, not an exclude list: this jar bundles exactly one
+								     artifact and must keep doing so if a future dependency arrives. Adding
+								     one here has to be a deliberate act, whereas an exclude list silently
+								     absorbs whatever the tree grows next.
+								     nimbus-jose-jwt is a leaf - `mvn dependency:tree -Dincludes=com.nimbusds`
+								     shows it with no children - and is self-contained at run time: it ships
+								     jcip-annotations relocated into com.nimbusds.jose.shaded.jcip and gson
+								     into com.nimbusds.jose.shaded.gson, and its bytecode contains no
+								     reference to net/jcip. Its manifest's Import-Package lists
+								     net.jcip.annotations, Bouncy Castle and Google Tink, but every one of
+								     those is resolution:=optional and reached only by algorithms this
+								     plugin does not accept - newProcessor restricts JWS to RS256, which
+								     the JDK's own JCA provides. -->
+								<includes>
+									<include>com.nimbusds:nimbus-jose-jwt</include>
+								</includes>
+							</artifactSet>
+							<filters>
+								<filter>
+									<artifact>*:*</artifact>
+									<excludes>
+										<!-- Signature files would no longer match the repacked entries. -->
+										<exclude>META-INF/*.SF</exclude>
+										<exclude>META-INF/*.DSA</exclude>
+										<exclude>META-INF/*.RSA</exclude>
+										<!-- nimbus-jose-jwt is Multi-Release and keeps its descriptor at
+										     META-INF/versions/9/module-info.class. Shading merges it into a
+										     jar whose manifest has no Multi-Release, so it would be dead
+										     weight at best; the root-level pattern guards against a future
+										     dependency that puts one there, where it would make the jar an
+										     automatic module named after a package it no longer owns. -->
+										<exclude>module-info.class</exclude>
+										<exclude>META-INF/versions/*/module-info.class</exclude>
+									</excludes>
+								</filter>
+							</filters>
+							<!-- No ServicesResourceTransformer: `unzip -l` on nimbus-jose-jwt-10.9.1.jar
+							     shows no META-INF/services entry, so there is nothing to merge. Add one
+							     alongside any future artifact that does ship service files. -->
+						</configuration>
+					</execution>
+				</executions>
+			</plugin>
+			<plugin>
 				<artifactId>maven-javadoc-plugin</artifactId>
 			</plugin>
 			<plugin>
@@ -131,12 +191,18 @@
 		<!-- OAuthResourceServerAuthenticator verifies bearer tokens with Nimbus JOSE + JWT.
 		     This used to arrive transitively through Fess, which depended on
 		     com.nimbusds:oauth2-oidc-sdk until the SSO authenticators moved out to the
-		     fess-sso-* plugins. Declare it directly rather than rely on an accident. -->
+		     fess-sso-* plugins. Declare it directly rather than rely on an accident.
+		     Compile scope, not provided: the war supplies none of it, and a plugin jar in
+		     WEB-INF/plugin gets no dependency resolution, so it has to be shaded in above.
+		     Without that, the DI container fails to start - not merely the oauth path:
+		     McpApiManager initialises an OAuthResourceServerAuthenticator field eagerly, and
+		     verifying that class loads com.nimbusds.jwt.proc.JWTClaimsSetVerifier, so
+		     container.init() dies with NoClassDefFoundError under every mcp.auth.mode,
+		     including the default none. -->
 		<dependency>
 			<groupId>com.nimbusds</groupId>
 			<artifactId>nimbus-jose-jwt</artifactId>
 			<version>${nimbus.jose.jwt.version}</version>
-			<scope>provided</scope>
 		</dependency>
 		<dependency>
 			<groupId>org.slf4j</groupId>
