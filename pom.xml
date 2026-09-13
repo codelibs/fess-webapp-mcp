@@ -17,6 +17,10 @@
 		<version>15.9.0-SNAPSHOT</version>
 		<relativePath />
 	</parent>
+	<properties>
+		<!-- The version oauth2-oidc-sdk 11.38.2 resolves, i.e. what Fess used to supply. -->
+		<nimbus.jose.jwt.version>10.9.1</nimbus.jose.jwt.version>
+	</properties>
 	<build>
 		<plugins>
 			<plugin>
@@ -128,6 +132,16 @@
 			<groupId>org.opensearch</groupId>
 			<artifactId>opensearch</artifactId>
 			<version>${opensearch.version}</version>
+			<scope>provided</scope>
+		</dependency>
+		<!-- OAuthResourceServerAuthenticator verifies bearer tokens with Nimbus JOSE + JWT.
+		     This used to arrive transitively through Fess, which depended on
+		     com.nimbusds:oauth2-oidc-sdk until the SSO authenticators moved out to the
+		     fess-sso-* plugins. Declare it directly rather than rely on an accident. -->
+		<dependency>
+			<groupId>com.nimbusds</groupId>
+			<artifactId>nimbus-jose-jwt</artifactId>
+			<version>${nimbus.jose.jwt.version}</version>
 			<scope>provided</scope>
 		</dependency>
 		<dependency>

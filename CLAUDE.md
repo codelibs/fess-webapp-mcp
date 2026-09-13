@@ -77,4 +77,4 @@ Every configuration key is a Fess system property, read through `ComponentUtil.g
 - OpenSearch for search operations
 - LastaFlute web framework
 - Jakarta EE APIs (Servlet, Annotation)
-- Nimbus JOSE+JWT / `oauth2-oidc-sdk` (transitively provided by the `fess` dependency), used by `OAuthResourceServerAuthenticator` for JWT verification
+- Nimbus JOSE+JWT (`com.nimbusds:nimbus-jose-jwt`, declared directly at `provided` scope), used by `OAuthResourceServerAuthenticator` for JWT verification. It used to arrive transitively through the `fess` dependency, which pulled `oauth2-oidc-sdk` until the SSO authenticators moved out to the `fess-sso-*` plugins
