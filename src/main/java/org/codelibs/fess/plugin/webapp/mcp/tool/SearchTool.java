@@ -121,17 +121,20 @@ public class SearchTool implements McpTool {
 
         final Map<String, Object> schema = new LinkedHashMap<>();
         schema.put("type", "object");
-        schema.put("properties",
-                Map.of("hits", Map.of("type", "array", "items", hit), "total",
-                        Map.of("type", "integer", "description", "total number of matching documents"), "total_relation",
-                        Map.of("type", "string", "description",
-                                "EQUAL_TO when total is exact, GREATER_THAN_OR_EQUAL_TO when the search engine stopped counting"),
-                        "has_more", Map.of("type", "boolean", "description", "whether a page exists after this one"), "collapsed",
-                        Map.of("type", "boolean", "description",
-                                "whether near-duplicate results were folded, so fewer than total items are obtainable"),
-                        "partial", Map.of("type", "boolean", "description",
-                                "whether the search did not complete, so these results are not the whole answer")));
-        schema.put("required", List.of("hits", "total", "has_more", "collapsed", "partial"));
+        schema.put("properties", Map.of("hits", Map.of("type", "array", "items", hit), "total",
+                Map.of("type", "integer", "description", "total number of matching documents"), "total_relation",
+                Map.of("type", "string", "description",
+                        "EQUAL_TO when total is exact, GREATER_THAN_OR_EQUAL_TO when the search engine stopped counting"),
+                "has_more", Map.of("type", "boolean", "description", "whether a page exists after this one"), "collapsed",
+                Map.of("type", "boolean", "description",
+                        "whether near-duplicate results were folded, so fewer than total items are obtainable"),
+                "partial",
+                Map.of("type", "boolean", "description", "whether the search did not complete, so these results are not the whole answer"),
+                "timed_out",
+                Map.of("type", "boolean", "description", "whether the search engine stopped collecting because the query timeout elapsed"),
+                "shard_failed", Map.of("type", "boolean", "description",
+                        "whether part of the index failed to answer, so matching documents may be missing")));
+        schema.put("required", List.of("hits", "total", "has_more", "collapsed", "partial", "timed_out", "shard_failed"));
         schema.put("additionalProperties", false);
         return schema;
     }
@@ -183,6 +186,11 @@ public class SearchTool implements McpTool {
         // Required rather than optional for the same reason as collapsed -- an omitted flag and a
         // false one would be indistinguishable in exactly the situation it exists to signal.
         structured.put("partial", Boolean.valueOf(data.isPartialResults()));
+        // Why it is partial, when Fess knows: the query timeout elapsed, or a shard failed. The two
+        // need different responses from an operator, and a partial result with neither set is one
+        // that could not be run at all.
+        structured.put("timed_out", Boolean.valueOf(data.isTimedOut()));
+        structured.put("shard_failed", Boolean.valueOf(data.isShardFailed()));
 
         final Map<String, Object> result = new LinkedHashMap<>();
         result.put("content", contents);
