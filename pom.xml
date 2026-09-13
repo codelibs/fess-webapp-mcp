@@ -128,12 +128,6 @@
 			<version>${fess.version}</version>
 			<scope>provided</scope>
 		</dependency>
-		<dependency>
-			<groupId>org.opensearch</groupId>
-			<artifactId>opensearch</artifactId>
-			<version>${opensearch.version}</version>
-			<scope>provided</scope>
-		</dependency>
 		<!-- OAuthResourceServerAuthenticator verifies bearer tokens with Nimbus JOSE + JWT.
 		     This used to arrive transitively through Fess, which depended on
 		     com.nimbusds:oauth2-oidc-sdk until the SSO authenticators moved out to the

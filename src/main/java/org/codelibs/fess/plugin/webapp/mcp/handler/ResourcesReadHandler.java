@@ -34,7 +34,7 @@ import org.codelibs.fess.plugin.webapp.mcp.tool.IndexStatsTool;
 import org.codelibs.fess.plugin.webapp.mcp.tool.McpTool;
 import org.codelibs.fess.util.ComponentUtil;
 import org.dbflute.optional.OptionalThing;
-import org.opensearch.common.xcontent.json.JsonXContent;
+import org.codelibs.fesen.opensearch.common.xcontent.json.JsonXContent;
 
 /**
  * The {@code resources/read} handler.

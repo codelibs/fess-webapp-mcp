@@ -74,7 +74,7 @@ Every configuration key is a Fess system property, read through `ComponentUtil.g
 ## Key Dependencies
 
 - Fess search engine framework (provided scope)
-- OpenSearch for search operations
+- OpenSearch DTOs and query builders for search operations, from the fork in `org.codelibs.fesen.opensearch` shipped by `fesen-httpclient` and supplied through the `fess` dependency (there is no direct `org.opensearch:opensearch` dependency)
 - LastaFlute web framework
 - Jakarta EE APIs (Servlet, Annotation)
 - Nimbus JOSE+JWT (`com.nimbusds:nimbus-jose-jwt`, declared directly at `provided` scope), used by `OAuthResourceServerAuthenticator` for JWT verification. It used to arrive transitively through the `fess` dependency, which pulled `oauth2-oidc-sdk` until the SSO authenticators moved out to the `fess-sso-*` plugins
