@@ -269,7 +269,9 @@ A `search` result carries more than the hits, and a client that ignores the rest
   "total_relation": "EQUAL_TO",
   "has_more": true,
   "collapsed": false,
-  "partial": false
+  "partial": false,
+  "timed_out": false,
+  "shard_failed": false
 }
 ```
 
@@ -285,6 +287,9 @@ A `search` result carries more than the hits, and a client that ignores the rest
 - **`partial` says the search did not complete.** A search that timed out, or that never reached a working
   search engine at all, still returns an ordinary short or empty result with no error. Without checking this
   flag, an agent reports "no documents matched" when the index is simply down.
+- **`timed_out` and `shard_failed` say why, when Fess knows.** `timed_out` means the query timeout elapsed and
+  the search engine stopped collecting; `shard_failed` means part of the index failed to answer. Both can be
+  true at once, and `partial` can be true with neither when the search could not be run at all.
 
 Two more things worth knowing when consuming results:
 
@@ -453,7 +458,7 @@ filter. A credential carrying only `Radmin-api` matches no documents; grant a se
 [Reading a search result](#reading-a-search-result).
 
 **`search` returns zero hits and the index is fine.** Check `partial`: a value of `true` means the search did
-not complete, not that nothing matched.
+not complete, not that nothing matched; `timed_out` and `shard_failed` tell a query timeout from a failed shard.
 
 **A tool failed with `Tool execution failed (error_code:<uuid>)`.** That correlation id is deliberate — the
 real message is only in the Fess log. Grep the log for the uuid; the entry is at WARN. See
@@ -579,7 +584,7 @@ omitted. No tool declares `idempotentHint`.
         "name": "search",
         "description": "Search documents via Fess. Query syntax is similar to Lucene: multiple terms are combined with AND by default, use OR explicitly for OR search (e.g., \"term1 OR term2\"), use quotes for phrase search, use - for exclusion.",
         "inputSchema": { "type": "object", "properties": { "q": { "type": "string", "description": "query string" }, "...": {} }, "required": ["q"] },
-        "outputSchema": { "type": "object", "properties": { "hits": {}, "total": {}, "total_relation": {}, "has_more": {}, "collapsed": {}, "partial": {} }, "required": ["hits", "total", "has_more", "collapsed", "partial"], "additionalProperties": false },
+        "outputSchema": { "type": "object", "properties": { "hits": {}, "total": {}, "total_relation": {}, "has_more": {}, "collapsed": {}, "partial": {}, "timed_out": {}, "shard_failed": {} }, "required": ["hits", "total", "has_more", "collapsed", "partial", "timed_out", "shard_failed"], "additionalProperties": false },
         "annotations": { "title": "Search Documents", "readOnlyHint": true, "destructiveHint": false, "openWorldHint": false }
       }
     ],
@@ -627,7 +632,9 @@ still fails with `-32602 Missing required parameter: q`.
       "total_relation": "EQUAL_TO",
       "has_more": true,
       "collapsed": false,
-      "partial": false
+      "partial": false,
+      "timed_out": false,
+      "shard_failed": false
     }
   }
 }
@@ -837,6 +844,8 @@ The completion source depends on `ref.type` and the argument name:
 | `has_more` | boolean | Yes | Whether a page exists after this one |
 | `collapsed` | boolean | Yes | Whether near-duplicate results were folded, so fewer than `total` items are obtainable |
 | `partial` | boolean | Yes | Whether the search did not complete, so these results are not the whole answer |
+| `timed_out` | boolean | Yes | Whether the search engine stopped collecting because the query timeout elapsed |
+| `shard_failed` | boolean | Yes | Whether part of the index failed to answer, so matching documents may be missing |
 
 > **`as` narrows `q`, it does not replace it.** Fess builds the query from the advanced conditions *instead
 > of* the plain query string as soon as one of them is query-bearing, so `q` is folded into `as.q` before the

@@ -1197,4 +1197,65 @@ public class SearchToolTest {
         assertTrue(((List<String>) schema.get("required")).contains("partial"));
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testATimeoutIsReportedAsATimeout() {
+        final Map<String, Object> structured = structuredContentFor(data -> {
+            data.setPartialResults(true);
+            data.setTimedOut(true);
+        });
+
+        assertEquals(Boolean.TRUE, structured.get("partial"));
+        assertEquals(Boolean.TRUE, structured.get("timed_out"), "a search cut short by the query timeout must say so");
+        assertEquals(Boolean.FALSE, structured.get("shard_failed"), "no shard failed");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testAShardFailureIsNotReportedAsATimeout() {
+        final Map<String, Object> structured = structuredContentFor(data -> {
+            data.setPartialResults(true);
+            data.setShardFailed(true);
+        });
+
+        assertEquals(Boolean.TRUE, structured.get("partial"));
+        assertEquals(Boolean.FALSE, structured.get("timed_out"), "a failed shard is not a timeout");
+        assertEquals(Boolean.TRUE, structured.get("shard_failed"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testACompletedSearchReportsNeitherCause() {
+        final Map<String, Object> structured = structuredContentFor(data -> {});
+
+        assertEquals(Boolean.FALSE, structured.get("timed_out"));
+        assertEquals(Boolean.FALSE, structured.get("shard_failed"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testOutputSchemaDeclaresAndRequiresTheCauses() {
+        // Required for the same reason as partial: an omitted flag and a false one would be
+        // indistinguishable.
+        final Map<String, Object> schema = new SearchTool().getOutputSchema();
+        final Map<String, Object> properties = (Map<String, Object>) schema.get("properties");
+        for (final String name : List.of("timed_out", "shard_failed")) {
+            assertTrue(properties.containsKey(name), "the caller cannot check a field that is not advertised: " + name);
+            assertEquals("boolean", ((Map<String, Object>) properties.get(name)).get("type"));
+            assertTrue(((List<String>) schema.get("required")).contains(name), name);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> structuredContentFor(final java.util.function.Consumer<SearchRenderData> result) {
+        final SearchTool tool = new ContainerFreeSearchTool() {
+            @Override
+            protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments, final SearchRenderData data) {
+                result.accept(data);
+                return List.of();
+            }
+        };
+        return (Map<String, Object>) tool.call(Map.of("q", "x"), new McpCallContext()).get("structuredContent");
+    }
+
 }
