@@ -204,6 +204,22 @@
 			<artifactId>nimbus-jose-jwt</artifactId>
 			<version>${nimbus.jose.jwt.version}</version>
 		</dependency>
+		<!-- OAuthResourceServerAuthenticator verifies bearer tokens with Nimbus JOSE + JWT.
+		     This used to arrive transitively through Fess, which depended on
+		     com.nimbusds:oauth2-oidc-sdk until the SSO authenticators moved out to the
+		     fess-sso-* plugins. Declare it directly rather than rely on an accident.
+		     Compile scope, not provided: the war supplies none of it, and a plugin jar in
+		     WEB-INF/plugin gets no dependency resolution, so it has to be shaded in above.
+		     Without that, the DI container fails to start - not merely the oauth path:
+		     McpApiManager initialises an OAuthResourceServerAuthenticator field eagerly, and
+		     verifying that class loads com.nimbusds.jwt.proc.JWTClaimsSetVerifier, so
+		     container.init() dies with NoClassDefFoundError under every mcp.auth.mode,
+		     including the default none. -->
+		<dependency>
+			<groupId>com.nimbusds</groupId>
+			<artifactId>nimbus-jose-jwt</artifactId>
+			<version>${nimbus.jose.jwt.version}</version>
+		</dependency>
 		<dependency>
 			<groupId>org.slf4j</groupId>
 			<artifactId>slf4j-api</artifactId>
