@@ -34,9 +34,9 @@ import org.codelibs.fess.plugin.webapp.exception.McpApiException;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
 import org.codelibs.fess.util.ComponentUtil;
-import org.opensearch.action.search.SearchResponse;
-import org.opensearch.common.xcontent.json.JsonXContent;
-import org.opensearch.search.SearchHits;
+import org.codelibs.fesen.opensearch.action.search.SearchResponse;
+import org.codelibs.fesen.opensearch.common.xcontent.json.JsonXContent;
+import org.codelibs.fesen.opensearch.search.SearchHits;
 
 /**
  * The {@code get_index_stats} MCP tool: index document count, configuration, and JVM
