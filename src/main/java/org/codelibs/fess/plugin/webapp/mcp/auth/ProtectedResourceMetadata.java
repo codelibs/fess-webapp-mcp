@@ -41,7 +41,7 @@ public final class ProtectedResourceMetadata {
      * advertise: it signals refresh-token issuance, which this resource server -- a pure token
      * verifier, not an authorization endpoint -- never performs.
      */
-    private static final String OFFLINE_ACCESS_SCOPE = "offline_access";
+    static final String OFFLINE_ACCESS_SCOPE = "offline_access";
 
     /** The {@code bearer_methods_supported} value: this server accepts the token only via the {@code Authorization} header. */
     private static final List<String> BEARER_METHODS_SUPPORTED = List.of("header");

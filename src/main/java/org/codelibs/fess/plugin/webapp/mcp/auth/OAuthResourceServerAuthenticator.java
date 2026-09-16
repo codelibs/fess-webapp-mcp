@@ -623,7 +623,8 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
      *            {@code errorDescription})
      * @param errorDescription the RFC 6750 {@code error_description} value; ignored when
      *            {@code error} is {@code null}
-     * @param scopes the scopes to advertise in the {@code scope} auth-param; omitted when empty
+     * @param scopes the scopes to advertise in the {@code scope} auth-param, never including
+     *            {@code offline_access}; omitted when nothing else is left
      * @param metadataUrl the RFC 9728 {@code resource_metadata} URL; omitted when {@code null}
      */
     private void setChallenge(final HttpServletResponse response, final String error, final String errorDescription,
@@ -635,8 +636,14 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
                 challenge.append(", error_description=\"").append(errorDescription).append('"');
             }
         }
-        if (scopes != null && !scopes.isEmpty()) {
-            challenge.append(", scope=\"").append(String.join(" ", scopes)).append('"');
+        // offline_access is dropped here as it already is from the metadata document's
+        // scopes_supported: the authorization spec says a server SHOULD NOT include it in the
+        // challenge's scope, since it asks for a refresh token rather than for access to this
+        // resource. Listing it in mcp.oauth.required.scopes used to put it in every challenge.
+        final List<String> advertised = scopes == null ? List.of()
+                : scopes.stream().filter(scope -> !ProtectedResourceMetadata.OFFLINE_ACCESS_SCOPE.equals(scope)).toList();
+        if (!advertised.isEmpty()) {
+            challenge.append(", scope=\"").append(String.join(" ", advertised)).append('"');
         }
         if (metadataUrl != null) {
             challenge.append(", resource_metadata=\"").append(metadataUrl).append('"');
