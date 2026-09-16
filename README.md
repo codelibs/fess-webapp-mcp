@@ -808,11 +808,14 @@ The completion source depends on `ref.type` and the argument name:
 
 - `ref.type == "ref/prompt"`:
   - `basic_search.query`, `advanced_search.query` — candidates from the Fess suggest engine.
-  - `advanced_search.sort` — prefix-filtered from a static enum: `score.desc`, `score.asc`,
-    `last_modified.desc`, `last_modified.asc`, `create_timestamp.desc`, `create_timestamp.asc`.
+  - `advanced_search.sort` — prefix-filtered `<field>.desc` and `<field>.asc` for every field this deployment
+    accepts in `sort`: the same list the `search` tool advertises, so every candidate is a value the tool takes.
   - `advanced_search.num` — no completions.
+  - A prompt name this server does not have — `-32602 Unknown prompt: <name>`.
 - `ref.type == "ref/resource"` — no completions; there is no source for `doc_id` completion.
 - Any other `ref.type` — no completions.
+
+A missing `ref`, `argument`, `argument.name`, or (for `ref/prompt`) `ref.name` is `-32602`.
 
 ```json
 {
