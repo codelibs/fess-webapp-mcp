@@ -168,7 +168,39 @@ public class McpResponseWriter {
             out.write(bytes);
             out.flush();
         } catch (final IOException e) {
-            logger.warn("[MCP] Failed to write response: error={}", e.getMessage(), e);
+            if (isClientAbort(e)) {
+                // The caller hung up before its answer was written. That is not a server fault, and
+                // logging it at WARN wrote a 60-line stack trace for a timed-out or cancelled client --
+                // a volume any unauthenticated caller can drive. Fess core logs the same condition at
+                // DEBUG (SearchEngineApiManager, ViewHelper).
+                if (logger.isDebugEnabled()) {
+                    logger.debug("[MCP] The client closed the connection before the response was written", e);
+                }
+            } else {
+                logger.warn("[MCP] Failed to write response: error={}", e.getMessage(), e);
+            }
         }
+    }
+
+    /**
+     * Tells whether a write failed because the client went away.
+     * <p>
+     * Matched by class name because Tomcat's {@code ClientAbortException} is supplied by the
+     * container and is not on this plugin's compile class path. The cause chain is walked because a
+     * wrapping stream may rethrow it as the cause of another {@link IOException}.
+     * </p>
+     *
+     * @param e the failure raised while writing the response
+     * @return true when it is, or is caused by, a {@code ClientAbortException}
+     */
+    protected static boolean isClientAbort(final Throwable e) {
+        Throwable t = e;
+        for (int depth = 0; t != null && depth < 10; depth++) {
+            if ("ClientAbortException".equals(t.getClass().getSimpleName())) {
+                return true;
+            }
+            t = t.getCause() == t ? null : t.getCause();
+        }
+        return false;
     }
 }
