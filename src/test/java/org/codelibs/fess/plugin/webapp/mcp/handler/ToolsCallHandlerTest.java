@@ -508,23 +508,29 @@ public class ToolsCallHandlerTest {
         };
     }
 
-    private McpError reject(final InvalidQueryException failure, final String resolved) {
+    /** Calls a tool that rejects the query, returning the text of the result the caller gets. */
+    private String reject(final InvalidQueryException failure, final String resolved) {
         final ToolsCallHandler handler = handlerRejectingWith(failure, resolved);
-        return assertThrows(McpError.class,
-                () -> handler.handle(contextWithParams(Map.of("name", "search", "arguments", Map.of("q", "x")))));
+        final Map<String, Object> result =
+                assertDoesNotThrow(() -> handler.handle(contextWithParams(Map.of("name", "search", "arguments", Map.of("q", "x")))),
+                        "a rejected query is a tool execution error, not a JSON-RPC error");
+        assertEquals(Boolean.TRUE, result.get("isError"), "a rejected query must be flagged isError: " + result);
+        assertFalse(result.containsKey("structuredContent"), "an error result carries no structuredContent: " + result);
+        final List<?> content = (List<?>) result.get("content");
+        assertEquals(1, content.size(), result.toString());
+        return (String) ((Map<?, ?>) content.get(0)).get("text");
     }
 
     @Test
-    public void testRejectedQueryIsAnInvalidParamsRatherThanACorrelationId() {
+    public void testRejectedQueryIsAToolExecutionErrorRatherThanACorrelationId() {
         // A caller who sent an unusable argument value has to be told which one, or an agent
-        // retries the same call forever. This is the same shape the tools already use for a
-        // wrong-typed argument, so the two cannot disagree.
-        final McpError error = reject(new InvalidQueryException(messages -> {}, "Unsupported sort field: sort:nope.asc"),
+        // retries the same call forever. MCP 2026-07-28 reports an input validation error inside
+        // the result with isError: true, which a client is expected to pass to the model; as a
+        // JSON-RPC error both official SDKs raised it as an exception instead.
+        final String text = reject(new InvalidQueryException(messages -> {}, "Unsupported sort field: sort:nope.asc"),
                 "The specified sort nope.asc is unsupported.");
-        assertEquals(ErrorCode.InvalidParams, error.getErrorCode());
-        assertEquals(HttpServletResponse.SC_OK, error.getHttpStatus());
-        assertEquals("The specified sort nope.asc is unsupported.", error.getMessage());
-        assertFalse(error.getMessage().contains("error_code:"), "a caller-directed failure needs no correlation id");
+        assertEquals("The specified sort nope.asc is unsupported.", text);
+        assertFalse(text.contains("error_code:"), "a caller-directed failure needs no correlation id");
     }
 
     @Test
@@ -532,11 +538,11 @@ public class ToolsCallHandlerTest {
         // The SearchEngineClient variant carries the executed OpenSearch DSL, role filters
         // included. Only the resolved message code may reach the caller.
         final String dsl = "Failed query: {\"query\":{\"bool\":{\"filter\":[{\"term\":{\"role\":\"Rguest\"}}]}}}";
-        final McpError error = reject(new InvalidQueryException(messages -> {}, dsl), "Could not process the specified query.");
-        assertEquals("Could not process the specified query.", error.getMessage());
-        assertFalse(error.getMessage().contains("Rguest"), "the caller's role filter must not leak");
-        assertFalse(error.getMessage().contains("{"), "the executed DSL must not leak");
-        assertFalse(error.getMessage().contains("bool"), "the executed DSL must not leak");
+        final String text = reject(new InvalidQueryException(messages -> {}, dsl), "Could not process the specified query.");
+        assertEquals("Could not process the specified query.", text);
+        assertFalse(text.contains("Rguest"), "the caller's role filter must not leak");
+        assertFalse(text.contains("{"), "the executed DSL must not leak");
+        assertFalse(text.contains("bool"), "the executed DSL must not leak");
     }
 
     @Test

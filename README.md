@@ -827,7 +827,7 @@ The completion source depends on `ref.type` and the argument name:
 | `start` | integer | No | Start position for paging (default `0`) |
 | `offset` | integer | No | Alias for `start`, used only when `start` is absent. When both are sent, **`start` wins** — including when `start` is itself unparseable or negative, so the alias never silently repairs a broken `start` and pages from somewhere the caller did not ask for. |
 | `num` | integer | No | Results per page. Default `mcp.default.page.size` (3). A value above `paging.search.page.max.size` is clamped to that maximum; **zero or negative falls back to the default**, not the maximum. |
-| `sort` | string | No | `<field>.asc` / `<field>.desc`. The advertised `inputSchema` description lists the fields this deployment accepts, so a client need not guess: Fess ships `score`, `filename`, `created`, `content_length`, `last_modified`, `timestamp`, `click_count`, `favorite_count`, and `query.additional.sort.fields` extends the list. An unaccepted field is rejected with `-32602` naming it. |
+| `sort` | string | No | `<field>.asc` / `<field>.desc`. The advertised `inputSchema` description lists the fields this deployment accepts, so a client need not guess: Fess ships `score`, `filename`, `created`, `content_length`, `last_modified`, `timestamp`, `click_count`, `favorite_count`, and `query.additional.sort.fields` extends the list. An unaccepted field is answered with an `isError: true` result naming it. |
 | `fields` | object | No | Field filters keyed by field name, e.g. `{"label": ["label1"]}` |
 | `lang` | string | No | Language filter |
 | `as` | object | No | Advanced search conditions keyed by condition name (`q`, `epq`, `oq`, `nq`, `filetype`, `sitesearch`, `timestamp`, `occt`), each an array of strings. Combined with `q`, never instead of it — see the note below. |
@@ -947,13 +947,21 @@ can provoke it with nothing but an out-of-range `start`. A fresh uuid per failur
 ("I got `error_code:X`") pinpoint one log line.
 
 **A rejected query is not an unexpected failure.** Input the *caller* wrote — an unparseable query string, a
-sort field that does not exist, a `start` past the ceiling — is answered as `-32602` with a message you can
-act on:
+sort field that does not exist, a `start` past the ceiling — is answered as an `isError: true` result at HTTP
+200 whose text you can act on:
 
 ```json
 { "jsonrpc": "2.0", "id": 3,
-  "error": { "code": -32602, "message": "The specified sort nope.asc is unsupported." } }
+  "result": {
+    "content": [{ "type": "text", "text": "The specified sort nope.asc is unsupported." }],
+    "isError": true } }
 ```
+
+This is a tool execution error rather than a JSON-RPC error on purpose. MCP `2026-07-28` reports input
+validation errors inside the result so that the client hands the text to the model, which can then correct the
+argument; a protocol error is one a client may keep from the model. An argument of the wrong JSON type, or a
+missing required argument, does not satisfy `inputSchema` at all and is still `-32602` (see
+[Argument type checking](#argument-type-checking)).
 
 The text comes from Fess's own end-user message bundle — the same strings the search UI shows — never from
 `getMessage()`, so the DSL-bearing case above resolves to the deliberately uninformative

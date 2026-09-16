@@ -63,10 +63,14 @@ import org.lastaflute.web.validation.VaMessenger;
  *       leak below). It also carries a {@link VaMessenger}, the channel {@code SearchAction}
  *       and {@code ApiAdminSearchlistAction} already use to tell an end user what was wrong.
  *       Those strings are caller-facing by construction and interpolate nothing but the
- *       caller's own input, so {@link #resolveCallerMessage} returns that instead and the
- *       failure becomes a -32602, consistent with the wrong-typed-argument errors the tools
- *       already raise. The DSL-bearing case resolves to {@code "Could not process the
- *       specified query."}, so the leak below stays closed. These are logged at DEBUG rather
+ *       caller's own input, so {@link #resolveCallerMessage} returns that instead, as the text
+ *       of an {@code isError: true} result: MCP 2026-07-28 files an input validation error
+ *       ("date in wrong format, value out of range") under tool execution errors, which a
+ *       client should hand to the model so it can correct itself, not under protocol errors,
+ *       which it may drop. A wrong-typed or missing argument is different -- the call does not
+ *       satisfy the advertised inputSchema at all -- and stays a -32602. The DSL-bearing case
+ *       resolves to {@code "Could not process the specified query."}, so the leak below stays
+ *       closed. These are logged at DEBUG rather
  *       than WARN: the stack trace is not evidence of a server fault, and an unauthenticated
  *       caller could otherwise drive an unbounded volume of it by sending {@code "foo AND"}.</li>
  *   <li><b>Everything else is replaced with a correlation id.</b> An {@code InternalError}
@@ -262,10 +266,19 @@ public class ToolsCallHandler implements McpMethodHandler {
             // unsupported."). The DSL-bearing case resolves to "Could not process the specified
             // query." -- still useless to an attacker, still enough for a caller to stop
             // retrying. Resolve that, and leave the redaction of everything else untouched.
+            //
+            // Answered as a tool execution error, not a JSON-RPC error. The value is well-typed and
+            // the call satisfies inputSchema; Fess refused what the value says. That is the "input
+            // validation error" the tools page reports with isError: true so a client passes the text
+            // to the model, whereas a protocol error is one a client MAY withhold -- and both official
+            // SDKs raise it as an exception instead of returning a result.
             if (logger.isDebugEnabled()) {
                 logger.debug("[MCP] Tool '{}' rejected the caller's query", name, e);
             }
-            throw new McpError(HttpServletResponse.SC_OK, ErrorCode.InvalidParams, resolveCallerMessage(e.getMessageCode()));
+            final Map<String, Object> result = new LinkedHashMap<>();
+            result.put("content", List.of(Map.of("type", "text", "text", resolveCallerMessage(e.getMessageCode()))));
+            result.put("isError", true);
+            return result;
         } catch (final Exception e) {
             // Unexpected: whatever this is, its message was written by code outside this plugin
             // and may embed backend internals (an OpenSearch DSL with role filters, a JVM cast
