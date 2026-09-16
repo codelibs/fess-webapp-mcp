@@ -482,6 +482,10 @@ Streamable HTTP, one JSON request and one JSON response per call. There is no ba
 stateful session. `GET` and `DELETE` (legacy Streamable HTTP session semantics) are not implemented and are
 rejected with HTTP 405.
 
+The `Origin` check runs before anything else, on every request: a present `Origin` that is not in
+`mcp.allowed.origins` gets HTTP 403 even on a `GET`, a `DELETE`, or a disabled endpoint, where the request would
+otherwise have been answered with 405 or 503.
+
 A **notification** — a JSON-RPC request with no `id` — is accepted with HTTP 202 and an empty body. Notifications
 do not require the metadata headers or `params._meta`.
 

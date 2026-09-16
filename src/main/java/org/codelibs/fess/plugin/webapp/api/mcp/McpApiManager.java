@@ -452,6 +452,13 @@ public class McpApiManager extends BaseApiManager {
             // below that, and each error the catch blocks answer with -- has to carry them. It
             // used to sit after both early exits, which emitted none on either.
             writeHeaders(response);
+            // Ahead of every other exit, including the 503 and the 405 below. The Streamable HTTP
+            // transport requires the Origin header to be validated on all incoming connections,
+            // and a present but invalid Origin to be answered with 403. When this ran after those
+            // two, a GET or DELETE from a disallowed browser origin got 405 and a request to a
+            // disabled endpoint got 503: nothing leaked, but the answer depended on the request
+            // shape instead of on the Origin the transport says to refuse.
+            validateOrigin(request);
             if (!isEnabled()) {
                 throw new McpError(HttpServletResponse.SC_SERVICE_UNAVAILABLE, ErrorCode.InternalError,
                         "The MCP endpoint is disabled (mcp.enabled=false)");
@@ -462,7 +469,6 @@ public class McpApiManager extends BaseApiManager {
                 response.setHeader("Allow", "POST");
                 return;
             }
-            validateOrigin(request); // Task 10
             final McpPrincipal principal = authenticate(request, response); // Task 13-14
 
             final String body = readRequestBody(request);
