@@ -61,12 +61,15 @@
 						</goals>
 						<configuration>
 							<createDependencyReducedPom>false</createDependencyReducedPom>
-							<!-- No relocation. Nothing else in an installation names these classes:
-							     `mvn dependency:list -DincludeGroupIds=com.nimbusds` on Fess 15.9 answers
-							     "none", and the built war carries no nimbus-*, oauth2-oidc-sdk-* or jcip-*
-							     jar in WEB-INF/lib. OAuthResourceServerAuthenticator resolves
-							     com.nimbusds.* by its real name from inside this same jar, so there is no
-							     copy to collide with and nothing a rename would buy. -->
+							<!-- Relocated, because another plugin carries the same classes. The war has no
+							     nimbus-*, oauth2-oidc-sdk-* or jcip-* jar, but fess-sso-entraid shades
+							     oauth2-oidc-sdk and nimbus-jose-jwt into its own jar unrelocated - it has to,
+							     since MSAL4J names those classes. Every jar in WEB-INF/plugin shares one
+							     class loader, so with both plugins installed each com.nimbusds class is
+							     loaded from whichever jar comes first. That is harmless only while both
+							     carry byte-identical classes; the day one of them moves to another
+							     nimbus-jose-jwt version, a single installation mixes classes from two
+							     versions. This jar is the one of the two that can step aside. -->
 							<artifactSet>
 								<!-- An include list, not an exclude list: this jar bundles exactly one
 								     artifact and must keep doing so if a future dependency arrives. Adding
@@ -104,6 +107,12 @@
 									</excludes>
 								</filter>
 							</filters>
+							<relocations>
+								<relocation>
+									<pattern>com.nimbusds</pattern>
+									<shadedPattern>org.codelibs.fess.plugin.webapp.mcp.nimbusds</shadedPattern>
+								</relocation>
+							</relocations>
 							<!-- No ServicesResourceTransformer: `unzip -l` on nimbus-jose-jwt-10.9.1.jar
 							     shows no META-INF/services entry, so there is nothing to merge. Add one
 							     alongside any future artifact that does ship service files. -->
