@@ -908,7 +908,7 @@ a wrong-typed tool argument, or an inbound `cursor`.
 
 | Code | Name | Description |
 |------|------|-------------|
-| -32700 | Parse error | Invalid JSON. Also covers a JSON array body: the array shape is rejected before Request-object validation, so a batch request never reaches it. |
+| -32700 | Parse error | Invalid JSON. Also covers a JSON array body: the array shape is rejected before Request-object validation, so a batch request never reaches it. Anything after the object other than whitespace is rejected the same way, so two concatenated messages are refused rather than answered as the first. |
 | -32600 | Invalid Request | Not a valid Request object (for example an explicit `"id": null`) |
 | -32601 | Method not found | Unknown method, including the retired `initialize` and `ping` |
 | -32602 | Invalid params | Invalid parameters; also an unknown, gated, or otherwise unusable tool/prompt/resource, a tool argument whose JSON type disagrees with `inputSchema`, and a non-null inbound `cursor` |

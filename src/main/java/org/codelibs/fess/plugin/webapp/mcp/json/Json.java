@@ -43,9 +43,16 @@ public final class Json {
      * does not throw for array input, it silently returns an empty map, so the array shape is checked
      * explicitly before delegating to it.</p>
      *
+     * <p>So is anything after the object. {@link XContentParser#map()} stops at the object's closing
+     * brace and never looks further, so {@code {...} xyz} used to parse as the object alone, and two
+     * concatenated requests {@code {...}{...}} were answered as the first one while the second was
+     * dropped without an error. The body of a Streamable HTTP POST is a single JSON-RPC message;
+     * whitespace after it is fine, any further token is not.</p>
+     *
      * @param body the raw request body
      * @return the decoded object
-     * @throws McpError with HTTP 400 and -32700 when the body is empty, malformed, or not a JSON object
+     * @throws McpError with HTTP 400 and -32700 when the body is empty, malformed, not a JSON object, or
+     *         carries content after the object
      */
     public static Map<String, Object> parseObject(final String body) {
         if (body == null || body.isBlank()) {
@@ -56,7 +63,12 @@ public final class Json {
             if (parser.nextToken() != XContentParser.Token.START_OBJECT) {
                 throw new McpError(HttpServletResponse.SC_BAD_REQUEST, ErrorCode.ParseError, "request body must be a JSON object");
             }
-            return parser.map();
+            final Map<String, Object> map = parser.map();
+            if (parser.nextToken() != null) {
+                throw new McpError(HttpServletResponse.SC_BAD_REQUEST, ErrorCode.ParseError,
+                        "request body must be a single JSON object with nothing after it");
+            }
+            return map;
         } catch (final McpError e) {
             throw e;
         } catch (final IOException | RuntimeException e) {
