@@ -18,6 +18,7 @@ package org.codelibs.fess.plugin.webapp.api.mcp;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -331,6 +332,36 @@ public class McpApiManagerHttpTest {
         // exact same absent Location header as the correct setStatus()-based implementation. That
         // regression is guarded instead by SendErrorProhibitedTest, which scans the production
         // sources for any use of response.sendError(...).
+    }
+
+    @Test
+    public void testGetWithADisallowedOriginIs403Not405() throws Exception {
+        // The transport requires Origin to be validated on all incoming connections, so a
+        // disallowed Origin decides the answer before the request method does.
+        for (final String method : new String[] { "GET", "DELETE" }) {
+            final TestManager manager = new TestManager();
+            final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest(method, "/mcp");
+            request.addHeader("Origin", "https://evil.example.com");
+            final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
+
+            manager.process(request, response, null);
+
+            final String body = McpHttpTestSupport.bodyOf(response);
+            assertEquals(403, response.getStatus(), method + " with a disallowed Origin: " + body);
+            assertNull(response.getHeader("Allow"), method + " must not reach the 405 branch: " + body);
+            assertTrue(body.contains("-32600"), method + ": " + body);
+            assertTrue(manager.allowedOriginsCalled, method + " must consult the allowed-origins config");
+        }
+    }
+
+    @Test
+    public void testDisabledEndpointWithADisallowedOriginIs403Not503() throws Exception {
+        final TestManager manager = new TestManager();
+        manager.enabled = false;
+        final Map<String, String> headers = new LinkedHashMap<>(modernHeaders("tools/list"));
+        headers.put("Origin", "https://evil.example.com");
+        final String body = post(manager, modernBody("tools/list"), headers);
+        assertEquals(403, lastResponse.getStatus(), body);
     }
 
     @Test
