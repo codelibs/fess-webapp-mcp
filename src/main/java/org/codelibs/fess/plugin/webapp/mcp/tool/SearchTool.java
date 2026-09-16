@@ -160,6 +160,14 @@ public class SearchTool implements McpTool {
         // conforming to getOutputSchema().
         final List<Map<String, Object>> contents = new ArrayList<>();
         final List<Map<String, Object>> hits = new ArrayList<>();
+        // partial, timed_out and shard_failed below reach only a client that reads
+        // structuredContent. The text blocks are the per-hit Markdown (README Deviation 2), so a
+        // client that hands the model only content got no sign that the result was incomplete --
+        // and with the search engine down it got an empty content array, indistinguishable from
+        // "nothing matched". Lead with one block that says so, and only when it is true.
+        if (data.isPartialResults()) {
+            contents.add(Map.of("type", "text", "text", describePartialResult(data)));
+        }
         int index = 1;
         for (final Map<String, Object> doc : documentItems) {
             contents.add(createDocumentContent(doc, index++));
@@ -196,6 +204,26 @@ public class SearchTool implements McpTool {
         result.put("content", contents);
         result.put("structuredContent", structured);
         return result;
+    }
+
+    /**
+     * Describes an incomplete search for a client that reads only the text content.
+     *
+     * @param data the render data of a search whose {@code isPartialResults()} is true
+     * @return one sentence naming the cause when Fess knows it, and what it means for the hits
+     */
+    protected String describePartialResult(final SearchRenderData data) {
+        final String cause;
+        if (data.isTimedOut() && data.isShardFailed()) {
+            cause = "the query timeout elapsed and part of the index failed to answer";
+        } else if (data.isTimedOut()) {
+            cause = "the query timeout elapsed before the search engine finished";
+        } else if (data.isShardFailed()) {
+            cause = "part of the index failed to answer";
+        } else {
+            return "Partial result: the search could not be run, so an empty or short result here does not mean that nothing" + " matches.";
+        }
+        return "Partial result: " + cause + ", so matching documents may be missing and total counts only what was collected.";
     }
 
     /**

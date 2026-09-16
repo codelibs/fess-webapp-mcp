@@ -1246,6 +1246,61 @@ public class SearchToolTest {
         }
     }
 
+    @Test
+    public void testAnIncompleteSearchLeadsTheTextContentWithTheCause() {
+        // A client that passes only content to the model must not see an incomplete result as a
+        // complete one. Each state names its own cause.
+        assertEquals("Partial result: the query timeout elapsed before the search engine finished, so matching documents may"
+                + " be missing and total counts only what was collected.", leadingTexts(data -> {
+                    data.setPartialResults(true);
+                    data.setTimedOut(true);
+                }, 1).get(0));
+        assertTrue(leadingTexts(data -> {
+            data.setPartialResults(true);
+            data.setShardFailed(true);
+        }, 1).get(0).startsWith("Partial result: part of the index failed to answer,"));
+        assertTrue(leadingTexts(data -> {
+            data.setPartialResults(true);
+            data.setTimedOut(true);
+            data.setShardFailed(true);
+        }, 1).get(0).startsWith("Partial result: the query timeout elapsed and part of the index failed to answer,"));
+    }
+
+    @Test
+    public void testASearchThatNeverRanIsNotAnEmptyContentArray() {
+        // With the search engine unreachable Fess returns no hits and neither cause; before this
+        // the content array was empty.
+        final List<String> texts = leadingTexts(data -> data.setPartialResults(true), 0);
+        assertEquals(1, texts.size());
+        assertTrue(texts.get(0).startsWith("Partial result: the search could not be run,"), texts.get(0));
+    }
+
+    @Test
+    public void testACompletedSearchAddsNoBlock() {
+        final List<String> texts = leadingTexts(data -> {}, 2);
+        assertEquals(2, texts.size(), "one block per hit and nothing else: " + texts);
+        assertTrue(texts.stream().noneMatch(t -> t.contains("Partial result")), texts.toString());
+    }
+
+    /** Runs a search returning {@code hitCount} hits with the given render state; returns every text block. */
+    @SuppressWarnings("unchecked")
+    private List<String> leadingTexts(final java.util.function.Consumer<SearchRenderData> result, final int hitCount) {
+        final SearchTool tool = new ContainerFreeSearchTool() {
+            @Override
+            protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments, final SearchRenderData data) {
+                result.accept(data);
+                final List<Map<String, Object>> docs = new java.util.ArrayList<>();
+                for (int i = 0; i < hitCount; i++) {
+                    docs.add(Map.of("title", "t" + i, "url", "https://example.com/" + i));
+                }
+                return docs;
+            }
+        };
+        final List<Map<String, Object>> content =
+                (List<Map<String, Object>>) tool.call(Map.of("q", "x"), new McpCallContext()).get("content");
+        return content.stream().map(block -> (String) block.get("text")).toList();
+    }
+
     @SuppressWarnings("unchecked")
     private Map<String, Object> structuredContentFor(final java.util.function.Consumer<SearchRenderData> result) {
         final SearchTool tool = new ContainerFreeSearchTool() {

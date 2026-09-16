@@ -290,6 +290,11 @@ A `search` result carries more than the hits, and a client that ignores the rest
 - **`timed_out` and `shard_failed` say why, when Fess knows.** `timed_out` means the query timeout elapsed and
   the search engine stopped collecting; `shard_failed` means part of the index failed to answer. Both can be
   true at once, and `partial` can be true with neither when the search could not be run at all.
+- **When `partial` is true, `total` counts only what was collected.** `total_relation` is passed through from
+  the search engine and can still read `EQUAL_TO` while a failed shard's documents are missing, so treat
+  `total` as a lower bound whenever `partial` is set. A client that reads only the text content is told the
+  same thing: the first `content` block then begins with `Partial result:` and names the cause, and it is
+  present even when there are no hits.
 
 Two more things worth knowing when consuming results:
 
