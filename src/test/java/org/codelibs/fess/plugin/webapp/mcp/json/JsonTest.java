@@ -67,6 +67,28 @@ public class JsonTest {
     }
 
     @Test
+    public void testTrailingGarbageIsParseError() {
+        final McpError error = assertThrows(McpError.class, () -> Json.parseObject("{\"jsonrpc\":\"2.0\",\"id\":1} xyz"));
+        assertEquals(ErrorCode.ParseError, error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    public void testSecondConcatenatedObjectIsRejectedNotDropped() {
+        // Before this was checked, the first object was answered and the second silently lost.
+        final McpError error = assertThrows(McpError.class, () -> Json.parseObject(
+                "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\"}"));
+        assertEquals(ErrorCode.ParseError, error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    public void testTrailingWhitespaceIsAccepted() {
+        final Map<String, Object> result = Json.parseObject("{\"jsonrpc\":\"2.0\",\"id\":1}\r\n  \n");
+        assertEquals(1, result.get("id"));
+    }
+
+    @Test
     public void testValidObjectIsParsed() {
         final Map<String, Object> result = Json.parseObject("{\"jsonrpc\":\"2.0\",\"method\":\"tools/list\",\"id\":1}");
         assertEquals("2.0", result.get("jsonrpc"));
