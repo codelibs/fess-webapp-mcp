@@ -39,6 +39,55 @@ public class McpResponseWriterTest {
         return McpHttpTestSupport.newResponse(request);
     }
 
+    /** Stands in for Tomcat's org.apache.catalina.connector.ClientAbortException, which is not on the test class path. */
+    static class ClientAbortException extends java.io.IOException {
+        private static final long serialVersionUID = 1L;
+
+        ClientAbortException(final Throwable cause) {
+            super(cause);
+        }
+    }
+
+    @Test
+    public void testAClientThatHungUpIsRecognised() {
+        assertTrue(McpResponseWriter.isClientAbort(new ClientAbortException(new java.io.IOException("Broken pipe"))));
+        assertTrue(McpResponseWriter.isClientAbort(new java.io.IOException("wrapped", new ClientAbortException(null))),
+                "a wrapping stream may rethrow it as a cause");
+    }
+
+    @Test
+    public void testOtherWriteFailuresAreNotMistakenForAHangUp() {
+        assertFalse(McpResponseWriter.isClientAbort(new java.io.IOException("Broken pipe")));
+        assertFalse(McpResponseWriter.isClientAbort(null));
+    }
+
+    @Test
+    public void testAHangUpDuringTheWriteDoesNotPropagate() {
+        final MockletHttpServletResponseImpl response = new MockletHttpServletResponseImpl(McpHttpTestSupport.newRequest("POST", "/mcp")) {
+            @Override
+            public jakarta.servlet.ServletOutputStream getOutputStream() {
+                return new jakarta.servlet.ServletOutputStream() {
+                    @Override
+                    public void write(final int b) throws java.io.IOException {
+                        throw new ClientAbortException(new java.io.IOException("Broken pipe"));
+                    }
+
+                    @Override
+                    public boolean isReady() {
+                        return true;
+                    }
+
+                    @Override
+                    public void setWriteListener(final jakarta.servlet.WriteListener writeListener) {
+                        // not used
+                    }
+                };
+            }
+        };
+        org.junit.jupiter.api.Assertions
+                .assertDoesNotThrow(() -> writer.writeResult(response, 1, new LinkedHashMap<>(Map.of("tools", java.util.List.of()))));
+    }
+
     @Test
     public void testResultCarriesResultTypeAndServerInfo() {
         final MockletHttpServletResponseImpl response = response();
