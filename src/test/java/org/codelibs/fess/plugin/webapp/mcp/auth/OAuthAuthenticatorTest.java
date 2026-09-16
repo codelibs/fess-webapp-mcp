@@ -319,6 +319,44 @@ public class OAuthAuthenticatorTest {
                 challenge);
     }
 
+    @Test
+    public void testChallengeScopeOmitsOfflineAccessEvenIfRequired() {
+        // The same filtering the metadata document's scopes_supported already applies: the
+        // authorization spec says a server SHOULD NOT put offline_access in the challenge's scope.
+        final MockletHttpServletRequestImpl request = request();
+        final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
+        assertThrows(McpError.class, () -> newAuthenticator("fess:search,offline_access").authenticate(request, response));
+
+        final String challenge = response.getHeader("WWW-Authenticate");
+        assertTrue(challenge.contains("scope=\"fess:search\""), challenge);
+        assertFalse(challenge.contains("offline_access"), challenge);
+    }
+
+    @Test
+    public void testChallengeOmitsTheScopeParameterWhenOfflineAccessIsTheOnlyRequiredScope() {
+        final MockletHttpServletRequestImpl request = request();
+        final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
+        assertThrows(McpError.class, () -> newAuthenticator("offline_access").authenticate(request, response));
+
+        final String challenge = response.getHeader("WWW-Authenticate");
+        assertFalse(challenge.contains("scope="), "an empty scope=\"\" is not a scope: " + challenge);
+        assertTrue(challenge.contains("resource_metadata="), challenge);
+    }
+
+    @Test
+    public void testInsufficientScopeChallengeOmitsOfflineAccess() throws Exception {
+        final String token = sign(validClaims().claim("scope", "fess:search"), signingKey);
+        final TestAuthenticator auth = newAuthenticator("fess:search,fess:admin,offline_access");
+        final MockletHttpServletRequestImpl request = bearerRequest(token);
+        final MockletHttpServletResponseImpl response = McpHttpTestSupport.newResponse(request);
+
+        final McpError error = assertThrows(McpError.class, () -> auth.authenticate(request, response));
+        assertEquals(403, error.getHttpStatus());
+        final String challenge = response.getHeader("WWW-Authenticate");
+        assertTrue(challenge.contains("scope=\"fess:search fess:admin\""), challenge);
+        assertFalse(challenge.contains("offline_access"), challenge);
+    }
+
     // ------------------------------------------------------------------
     // Unusable configuration: isUsable() requires issuer, audience, and jwks.uri, each checked
     // in isolation (every other requirement is satisfied by usableConfig() so each negative test

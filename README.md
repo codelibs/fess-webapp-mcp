@@ -1037,6 +1037,7 @@ curl -sS http://localhost:8080/.well-known/oauth-protected-resource/mcp
 
 `scopes_supported` is `mcp.oauth.required.scopes`, parsed the same way it is enforced, minus `offline_access`
 (this server never issues refresh tokens, so it never advertises that scope even if one is listed by mistake).
+The `scope` parameter of every `WWW-Authenticate` challenge leaves it out the same way.
 
 A rejected request carries the metadata URL in its `WWW-Authenticate` challenge:
 
