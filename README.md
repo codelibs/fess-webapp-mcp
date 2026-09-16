@@ -56,7 +56,7 @@ an MCP caller sees only what its credential is allowed to see.
 
 ## Requirements
 
-- Fess 15.8 or later
+- Fess 15.9 or later, with the plugin version that matches it (15.9.x for Fess 15.9)
 - Java 21 or later
 
 ## Installation
@@ -65,7 +65,13 @@ an MCP caller sees only what its credential is allowed to see.
 2. Place it in your Fess plugin directory (`WEB-INF/plugin`), or install it from **Administration > Plugin** in the Fess admin UI.
 3. Restart Fess.
 
-See the [Plugin Administration Guide](https://fess.codelibs.org/15.8/admin/plugin-guide.html) for details.
+See the [Plugin Administration Guide](https://fess.codelibs.org/15.9/admin/plugin-guide.html) for details.
+
+**When upgrading Fess, upgrade this plugin before starting the new version.** A plugin JAR built for an older
+Fess must not stay in `WEB-INF/plugin`: the 15.8 JAR, for example, relied on a library the 15.9 war no longer
+ships, so Fess 15.9 fails to initialize at startup — every page and API, not only `/mcp`, answers 404. Run
+`bin/fess-setup upgrade plugins` after copying the plugin directory over, as the
+[upgrade guide](https://fess.codelibs.org/15.9/install/upgrade.html) describes.
 
 After the restart, `POST /mcp` is live. With the shipped defaults it is **unauthenticated** — read
 [Securing the endpoint](#securing-the-endpoint) before exposing it beyond a trusted network.
@@ -82,26 +88,21 @@ server's own diagnostic:
  "data":{"supportedVersions":["2026-07-28"]}}}
 ```
 
-At the time of writing:
+Clients that support `2026-07-28` connect directly. Measured against Fess 15.9:
 
 | Client / SDK | Newest protocol revision | Connects directly |
 |---|---|---|
-| MCP **Python** SDK 2.0 | `2026-07-28` | Yes — use `ClientSession.discover()`; there is no `initialize` to call |
-| MCP **TypeScript** SDK 1.30 | `2025-11-25` | No |
-| `mcp-remote` | (TypeScript SDK 1.x) | No |
-| Clients built on the TypeScript SDK 1.x | (TypeScript SDK 1.x) | No |
+| **Claude Code** 2.1.273 | `2026-07-28` | Yes — configure the server as `{"type": "http", "url": "https://fess.example.com/mcp"}`. It opens with `server/discover` and never sends `initialize`. |
+| MCP **TypeScript** SDK v2 (`@modelcontextprotocol/client` 2.0) | `2026-07-28` | Yes, with `versionNegotiation` set to `{ mode: "auto" }` or `{ mode: { pin: "2026-07-28" } }`. **Its default is `legacy`**, which sends `initialize` and fails with the diagnostic above. |
+| MCP **Python** SDK 2.2 | `2026-07-28` | Yes |
+| `mcp-remote` 0.14 (stdio-to-HTTP bridge for desktop clients) | `2026-07-28` | Yes, with `--protocol auto` (for example `npx mcp-remote https://fess.example.com/mcp --protocol auto`). **Its default is `legacy`**, which sends `initialize` and fails. |
+| MCP TypeScript SDK v1 (`@modelcontextprotocol/sdk` 1.30), and clients built on it | `2025-11-25` | No |
 
-`mcp-remote` — the most common local-to-remote bridge for desktop MCP clients — is built on the TypeScript
-SDK 1.x generation and still performs the legacy `initialize` handshake, so it cannot bridge to this endpoint.
-The SDK generation that adds `2026-07-28` support ships under new package names rather than as a drop-in
-upgrade, so this is not something a version bump of `mcp-remote` fixes today.
-
-Until your client's SDK catches up, you have two options:
-
-- Drive the endpoint directly over HTTP (see [Quick start](#quick-start)) from your own agent code.
-- Put a bridge in front of it that speaks the older revision to the client and `2026-07-28` to this endpoint,
-  translating `initialize` into [`server/discover`](#serverdiscover) and adding the request-metadata headers
-  and `params._meta` this revision requires.
+The TypeScript SDK's `2026-07-28` support ships under the new `@modelcontextprotocol/client` package name
+rather than as a version of `@modelcontextprotocol/sdk`, so a client built on the older package does not pick
+it up by upgrading. Such a client can still reach this endpoint through `mcp-remote --protocol auto`, which
+answers the client's `initialize` itself and speaks `2026-07-28` to this server, or by driving the endpoint
+over HTTP from your own agent code (see [Quick start](#quick-start)).
 
 ## Quick start
 
@@ -913,7 +914,7 @@ a wrong-typed tool argument, or an inbound `cursor`.
 | -32601 | Method not found | Unknown method, including the retired `initialize` and `ping` |
 | -32602 | Invalid params | Invalid parameters; also an unknown, gated, or otherwise unusable tool/prompt/resource, a tool argument whose JSON type disagrees with `inputSchema`, and a non-null inbound `cursor` |
 | -32603 | Internal error | Internal JSON-RPC error; also a tool reporting a server-side failure, whose message is always the fixed `Tool execution failed (error_code:<uuid>)` |
-| -32000 | RateLimited | `mcp.rate.limit.per.minute` exceeded. Always paired with HTTP 429, a `Retry-After` header, and `data.retryAfterSeconds`. This number sits in the range the MCP schema marks implementation-defined (`-32000`–`-32019`), which receivers are told not to give cross-implementation meaning — **key off the HTTP status and `Retry-After`, not the code.** |
+| -32000 | RateLimited | `mcp.rate.limit.per.minute` exceeded. Always paired with HTTP 429, a `Retry-After` header, and `data.retryAfterSeconds`. This number sits in the range the MCP schema marks implementation-defined (`-32000`–`-32019`), which receivers are told not to give cross-implementation meaning — **key off the HTTP status and `Retry-After`, not the code.** The `2026-07-28` text is not consistent about that range: `schema.ts` calls it implementation-defined, while the base protocol page calls it legacy and asks new implementations not to use it, so a later revision may settle it either way. |
 | -32020 | HeaderMismatch | A required metadata header is missing, duplicated, or disagrees with the body. A missing or incomplete `params._meta` is `-32602` instead: the specification scopes this code to the header layer. |
 | -32021 | MissingRequiredClientCapability | Defined by this server but **never emitted** — nothing here currently requires an optional client capability. |
 | -32022 | UnsupportedProtocolVersion | The declared protocol version is not `2026-07-28`; `error.data` carries both `supported` and `requested`. |
@@ -1157,8 +1158,8 @@ These are deliberate, reviewed choices, not oversights:
 12. **Tool inputs are type-checked, not schema-validated.** `inputSchema` is advertised for clients to
     validate against; the server checks that required arguments are present and that each declared argument
     has the right top-level JSON type, but does not validate nested element types, formats, or ranges. There
-    is no JSON Schema validator on the plugin's classpath, and the plugin ships as a single JAR bundling no
-    dependencies of its own, so adding one is a packaging decision rather than a code change. Container shape
+    is no JSON Schema validator on the plugin's classpath, and the only library the plugin JAR bundles is the
+    JOSE/JWT one its OAuth mode needs, so adding a validator is a packaging decision rather than a code change. Container shape
     *is* checked, because those were the cases that reached a raw `ClassCastException` or
     `ArrayStoreException` inside the search and came back as a redacted correlation id.
 

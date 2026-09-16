@@ -214,11 +214,11 @@ public class SearchTool implements McpTool {
      * </p>
      * <p>
      * This is a top-level type check, not a schema validator, and deliberately stops there.
-     * There is no JSON Schema validator on this plugin's classpath, and the build produces a
-     * plain {@code maven-jar-plugin} artifact with no shade or assembly step -- the jar ships
-     * alone into {@code WEB-INF/plugin} and bundles none of its own dependencies, relying on
-     * Fess to supply them at runtime. Introducing a validator is therefore a packaging decision
-     * rather than part of this fix. Specifically not checked:
+     * There is no JSON Schema validator on this plugin's classpath: the jar ships alone into
+     * {@code WEB-INF/plugin}, relies on Fess to supply its dependencies at runtime, and shades in
+     * only the JOSE/JWT library the OAuth mode needs because the war no longer carries it.
+     * Introducing a validator is therefore a packaging decision rather than part of this fix.
+     * Specifically not checked:
      * </p>
      * <ul>
      *   <li><b>Element types inside {@code fields}/{@code as}/{@code ex_q}.</b> Those need nested,
