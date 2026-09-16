@@ -36,7 +36,8 @@ import org.codelibs.fess.util.ComponentUtil;
 
 /**
  * The {@code completion/complete} handler: autocomplete for prompt arguments, backed by Fess
- * suggest for {@code query} and a static prefix filter for {@code advanced_search.sort}.
+ * suggest for {@code query} and by the sort fields this deployment accepts for
+ * {@code advanced_search.sort}.
  *
  * <p>
  * Not a {@code CacheableResult}: {@code CompleteResult} is not in the schema's cacheable-result
@@ -55,9 +56,8 @@ public class CompletionHandler implements McpMethodHandler {
     /** The maximum number of completion values returned, per the MCP completion spec. */
     protected static final int MAX_VALUES = 100;
 
-    /** Static sort candidate values for {@code advanced_search.sort} completion. */
-    protected static final List<String> SORT_VALUES =
-            List.of("score.desc", "score.asc", "last_modified.desc", "last_modified.asc", "create_timestamp.desc", "create_timestamp.asc");
+    /** The prompts this server advertises, in {@code prompts/list} order. */
+    protected static final List<String> PROMPT_NAMES = List.of("basic_search", "advanced_search");
 
     @Override
     public String getMethod() {
@@ -83,11 +83,26 @@ public class CompletionHandler implements McpMethodHandler {
 
         final String refType = ref.get("type") instanceof final String s ? s : null;
         final String argName = argument.get("name") instanceof final String s ? s : null;
+        // CompleteRequestParams.argument is { name: string; value: string }. A missing name is a
+        // missing required argument, which the completion page answers with -32602 like a missing
+        // ref or argument object; it used to fall through to an empty result.
+        if (argName == null || argName.isEmpty()) {
+            throw new McpError(HttpServletResponse.SC_OK, ErrorCode.InvalidParams, "Missing required parameter: argument.name");
+        }
         final String argValueRaw = argument.get("value") instanceof final String s ? s : null;
         final String argValue = argValueRaw == null ? "" : argValueRaw;
 
         if ("ref/prompt".equals(refType)) {
             final String promptName = ref.get("name") instanceof final String s ? s : null;
+            if (promptName == null || promptName.isEmpty()) {
+                throw new McpError(HttpServletResponse.SC_OK, ErrorCode.InvalidParams, "Missing required parameter: ref.name");
+            }
+            // An empty completion for a prompt this server does not have was indistinguishable from
+            // "no candidates"; the completion page names an invalid prompt name as -32602. Same
+            // message as prompts/get, so the two cannot disagree about which prompts exist.
+            if (!PROMPT_NAMES.contains(promptName)) {
+                throw new McpError(HttpServletResponse.SC_OK, ErrorCode.InvalidParams, "Unknown prompt: " + promptName);
+            }
 
             // query argument on basic_search / advanced_search -> Fess suggest
             if (("basic_search".equals(promptName) || "advanced_search".equals(promptName)) && "query".equals(argName)) {
@@ -97,9 +112,9 @@ public class CompletionHandler implements McpMethodHandler {
                 return completeViaSuggest(argValue);
             }
 
-            // advanced_search.sort -> static prefix filter
+            // advanced_search.sort -> prefix filter over the sort values this deployment accepts
             if ("advanced_search".equals(promptName) && "sort".equals(argName)) {
-                final List<String> matches = SORT_VALUES.stream().filter(v -> v.startsWith(argValue)).collect(Collectors.toList());
+                final List<String> matches = getSortValues().stream().filter(v -> v.startsWith(argValue)).collect(Collectors.toList());
                 return buildCompletionResult(matches, matches.size(), false);
             }
 
@@ -109,6 +124,41 @@ public class CompletionHandler implements McpMethodHandler {
 
         // ref/resource or any other ref type -> empty values
         return buildCompletionResult(List.of(), 0, false);
+    }
+
+    /**
+     * Returns the {@code advanced_search.sort} candidates: {@code <field>.desc} and
+     * {@code <field>.asc} for every field this deployment accepts.
+     * <p>
+     * These used to be a fixed list whose last two entries, {@code create_timestamp.desc} and
+     * {@code create_timestamp.asc}, name a field Fess does not sort on, so completion offered values
+     * the search tool then rejects. Reading the same list {@code SearchTool} advertises in its
+     * {@code sort} description keeps the candidates and the validation fed from one source.
+     * </p>
+     *
+     * @return the sort candidates, never null, empty when the accepted fields cannot be resolved
+     */
+    protected List<String> getSortValues() {
+        final List<String> values = new ArrayList<>();
+        for (final String field : getSortableFields()) {
+            values.add(field + ".desc");
+            values.add(field + ".asc");
+        }
+        return values;
+    }
+
+    /**
+     * Returns the fields this deployment accepts in {@code sort}, as {@code SearchTool} does.
+     *
+     * @return the accepted sort fields, never null, possibly empty
+     */
+    protected String[] getSortableFields() {
+        try {
+            final String[] fields = ComponentUtil.getQueryFieldConfig().getSortFields();
+            return fields == null ? new String[0] : fields;
+        } catch (final RuntimeException e) {
+            return new String[0];
+        }
     }
 
     /**

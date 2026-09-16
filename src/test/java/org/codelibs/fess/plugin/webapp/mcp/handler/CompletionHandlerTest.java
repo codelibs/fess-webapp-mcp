@@ -39,7 +39,7 @@ import org.junit.jupiter.api.Test;
  * Test class for {@link CompletionHandler}.
  *
  * <p>
- * {@code testAdvancedSearchSortEmptyValueReturnsAllSixValues},
+ * {@code testAdvancedSearchSortEmptyValueReturnsEveryAcceptedSortValue},
  * {@code testAdvancedSearchSortPrefixNoMatchReturnsEmpty},
  * {@code testAdvancedSearchKnownPromptButUnmatchedArgumentFallsThroughToEmptyCompletions},
  * {@code testCompleteViaSuggestRequiresDiContainer}, and the three
@@ -55,7 +55,16 @@ import org.junit.jupiter.api.Test;
  */
 public class CompletionHandlerTest {
 
-    private final CompletionHandler handler = new CompletionHandler();
+    /** Fess's shipped sort fields, in QueryFieldConfig order. */
+    private static final String[] SHIPPED_SORT_FIELDS =
+            { "score", "filename", "created", "content_length", "last_modified", "timestamp", "click_count", "favorite_count" };
+
+    private final CompletionHandler handler = new CompletionHandler() {
+        @Override
+        protected String[] getSortableFields() {
+            return SHIPPED_SORT_FIELDS;
+        }
+    };
 
     private McpCallContext contextWithParams(final Map<String, Object> params) {
         return new McpCallContext(null, null, params);
@@ -122,7 +131,7 @@ public class CompletionHandlerTest {
     @Test
     public void testDoesNotSetTtlMsOrCacheScope() {
         // CompleteResult is not a CacheableResult in the 2026-07-28 schema.
-        final Map<String, Object> params = Map.of("ref", Map.of("type", "ref/unknown"), "argument", Map.of());
+        final Map<String, Object> params = Map.of("ref", Map.of("type", "ref/unknown"), "argument", Map.of("name", "x", "value", ""));
         final Map<String, Object> result = handler.handle(contextWithParams(params));
         assertFalse(result.containsKey("ttlMs"));
         assertFalse(result.containsKey("cacheScope"));
@@ -130,23 +139,54 @@ public class CompletionHandlerTest {
 
     @Test
     public void testResultIsMutable() {
-        final Map<String, Object> params = Map.of("ref", Map.of("type", "ref/unknown"), "argument", Map.of());
+        final Map<String, Object> params = Map.of("ref", Map.of("type", "ref/unknown"), "argument", Map.of("name", "x", "value", ""));
         final Map<String, Object> result = handler.handle(contextWithParams(params));
         assertDoesNotThrow(() -> result.put("resultType", "complete"));
     }
 
     @SuppressWarnings("unchecked")
     @Test
-    public void testAdvancedSearchSortEmptyValueReturnsAllSixValues() {
-        // An empty (or absent) sort prefix must return every SORT_VALUES entry, not none.
+    public void testAdvancedSearchSortEmptyValueReturnsEveryAcceptedSortValue() {
+        // An empty (or absent) sort prefix must return every candidate, not none.
         final Map<String, Object> params =
                 Map.of("ref", Map.of("type", "ref/prompt", "name", "advanced_search"), "argument", Map.of("name", "sort", "value", ""));
 
         final Map<String, Object> result = handler.handle(contextWithParams(params));
 
         final Map<String, Object> completion = (Map<String, Object>) result.get("completion");
-        assertEquals(6, ((List<String>) completion.get("values")).size());
+        assertEquals(SHIPPED_SORT_FIELDS.length * 2, ((List<String>) completion.get("values")).size());
         assertEquals(false, completion.get("hasMore"));
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    public void testSortCandidatesAreOnlyValuesTheSearchToolAccepts() {
+        // The fixed list this replaced offered create_timestamp.desc/.asc, a field Fess does not
+        // sort on: completing it produced a value the search tool then rejects.
+        final Map<String, Object> params =
+                Map.of("ref", Map.of("type", "ref/prompt", "name", "advanced_search"), "argument", Map.of("name", "sort", "value", ""));
+        final List<String> values =
+                (List<String>) ((Map<String, Object>) handler.handle(contextWithParams(params)).get("completion")).get("values");
+        final List<String> accepted = List.of(SHIPPED_SORT_FIELDS);
+        for (final String value : values) {
+            final int dot = value.lastIndexOf('.');
+            assertTrue(dot > 0 && accepted.contains(value.substring(0, dot)), "not an accepted sort field: " + value);
+            assertTrue(value.endsWith(".asc") || value.endsWith(".desc"), value);
+        }
+        assertFalse(values.stream().anyMatch(v -> v.startsWith("create_timestamp")), values.toString());
+        assertEquals("score.desc", values.get(0), "score first, as Fess lists it");
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    public void testUnresolvableSortFieldsOfferNoCandidatesRatherThanInventedOnes() {
+        // No container here, so the real getSortableFields() cannot resolve QueryFieldConfig.
+        final Map<String, Object> params =
+                Map.of("ref", Map.of("type", "ref/prompt", "name", "advanced_search"), "argument", Map.of("name", "sort", "value", ""));
+        final List<String> values =
+                (List<String>) ((Map<String, Object>) new CompletionHandler().handle(contextWithParams(params)).get("completion"))
+                        .get("values");
+        assertTrue(values.isEmpty(), values.toString());
     }
 
     @SuppressWarnings("unchecked")
@@ -195,8 +235,8 @@ public class CompletionHandlerTest {
     public void testAdvancedSearchSortMissingValueKeyTreatedAsEmptyPrefix() {
         // argument carries no "value" key at all (not even ""): argValueRaw is null and must be
         // coalesced to "" before it is read as a prefix. If the coalescing were removed,
-        // SORT_VALUES.stream().filter(v -> v.startsWith(null)) would NPE, unlike
-        // testAdvancedSearchSortEmptyValueReturnsAllSixValues, whose explicit "" never exercises
+        // getSortValues().stream().filter(v -> v.startsWith(null)) would NPE, unlike
+        // testAdvancedSearchSortEmptyValueReturnsEveryAcceptedSortValue, whose explicit "" never exercises
         // the null branch of the coalescing at all.
         final Map<String, Object> params = new HashMap<>();
         params.put("ref", Map.of("type", "ref/prompt", "name", "advanced_search"));
@@ -208,26 +248,30 @@ public class CompletionHandlerTest {
         final Map<String, Object> result = handler.handle(contextWithParams(params));
 
         final Map<String, Object> completion = (Map<String, Object>) result.get("completion");
-        assertEquals(6, ((List<String>) completion.get("values")).size(),
-                "a missing value key must behave like an empty prefix and return all 6 sort values");
+        assertEquals(SHIPPED_SORT_FIELDS.length * 2, ((List<String>) completion.get("values")).size(),
+                "a missing value key must behave like an empty prefix and return every sort value");
     }
 
     @Test
-    public void testUnrecognisedPromptNameWithQueryArgumentReturnsEmptyWithoutTouchingSuggest() {
+    public void testUnrecognisedPromptNameIsInvalidParamsWithoutTouchingSuggest() {
         // ref/prompt with an unrecognised prompt name, but a *known* query argument name and a
-        // *non-empty* value: the prompt-name conjunct in the first branch condition
-        // (("basic_search".equals(promptName) || "advanced_search".equals(promptName)) &&
-        // "query".equals(argName)) must reject this before ever reaching completeViaSuggest. If
-        // that conjunct were dropped, this call would reach ComponentUtil.getSuggestHelper() and
-        // throw IllegalStateException instead of returning empty completions.
+        // *non-empty* value. The completion page answers an invalid prompt name with -32602, and
+        // the check must come before completeViaSuggest: if it did not, this call would reach
+        // ComponentUtil.getSuggestHelper() and throw IllegalStateException instead.
         final Map<String, Object> params = Map.of("ref", Map.of("type", "ref/prompt", "name", "totally_unknown_prompt"), "argument",
                 Map.of("name", "query", "value", "something"));
 
-        @SuppressWarnings("unchecked")
-        final Map<String, Object> completion = (Map<String, Object>) handler.handle(contextWithParams(params)).get("completion");
-        @SuppressWarnings("unchecked")
-        final List<String> values = (List<String>) completion.get("values");
-        assertTrue(values.isEmpty(), "an unrecognised prompt name must yield no completions, not reach Fess suggest");
+        final McpError error = assertThrows(McpError.class, () -> handler.handle(contextWithParams(params)));
+        assertEquals(ErrorCode.InvalidParams, error.getErrorCode());
+        assertEquals(200, error.getHttpStatus());
+        assertEquals("Unknown prompt: totally_unknown_prompt", error.getMessage(), "the same wording prompts/get uses");
+    }
+
+    @Test
+    public void testPromptReferenceWithoutANameIsInvalidParams() {
+        final Map<String, Object> params = Map.of("ref", Map.of("type", "ref/prompt"), "argument", Map.of("name", "query", "value", "x"));
+        final McpError error = assertThrows(McpError.class, () -> handler.handle(contextWithParams(params)));
+        assertEquals(ErrorCode.InvalidParams, error.getErrorCode());
     }
 
     @Test
@@ -273,20 +317,16 @@ public class CompletionHandlerTest {
     }
 
     @Test
-    public void testEmptyArgumentMapYieldsNoCompletionsWithoutDiAccess() {
-        // argument is present but empty: argument.name is null, so no branch matches and the
-        // ref/prompt fallback applies without ever reaching Fess suggest.
+    public void testArgumentWithoutANameIsInvalidParamsWithoutDiAccess() {
+        // argument is present but empty. CompleteRequestParams.argument requires name, and a
+        // missing required argument is -32602 -- reported before anything reaches Fess suggest.
         final Map<String, Object> params = new HashMap<>();
         params.put("ref", Map.of("type", "ref/prompt", "name", "basic_search"));
         params.put("argument", Map.of());
 
-        @SuppressWarnings("unchecked")
-        final Map<String, Object> completion = (Map<String, Object>) handler.handle(contextWithParams(params)).get("completion");
-        @SuppressWarnings("unchecked")
-        final List<String> values = (List<String>) completion.get("values");
-        assertTrue(values.isEmpty());
-        assertEquals(0, ((Number) completion.get("total")).intValue());
-        assertEquals(false, completion.get("hasMore"));
+        final McpError error = assertThrows(McpError.class, () -> handler.handle(contextWithParams(params)));
+        assertEquals(ErrorCode.InvalidParams, error.getErrorCode());
+        assertEquals("Missing required parameter: argument.name", error.getMessage());
     }
 
     @Test
