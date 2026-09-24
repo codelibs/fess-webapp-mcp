@@ -177,13 +177,6 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
     }
 
     /**
-     * Guards {@link #getJwksCacheSeconds()}'s clamp WARN so it is emitted at most once per
-     * instance. The clamp itself is unconditional; only the log line is rate-limited, so an
-     * operator sees the misconfiguration without it repeating for the life of the process.
-     */
-    private final AtomicBoolean jwksCacheFloorWarned = new AtomicBoolean();
-
-    /**
      * Tracks whether the JWKS endpoint is currently believed to be unreachable, so one outage
      * produces one WARN rather than one per request.
      * <p>
@@ -670,6 +663,14 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
      * here, and violating it throws an unchecked exception this class would otherwise report to
      * the caller as an invalid token. See {@link #getJwksCacheSeconds()}.
      * </p>
+     * <p>
+     * The clamp is reported here, at WARN, every time a source is built with a clamped value --
+     * not in {@link #getJwksCacheSeconds()}, which {@link #getProcessor()} calls on every
+     * token-bearing request. {@link #getProcessor()} rebuilds only when the effective
+     * configuration changes, so the line appears once per edit that leaves the value below the
+     * floor, and again if a later edit puts it back there after it was corrected. There is no
+     * "already warned" flag to go stale.
+     * </p>
      *
      * <p>
      * The retrieval limits come from {@link #newJwksRetriever()} rather than from
@@ -682,8 +683,16 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
      * @throws MalformedURLException if {@code jwksUri} is not a valid URL
      */
     protected ConfigurableJWTProcessor<SecurityContext> newProcessor(final String jwksUri) throws MalformedURLException {
-        final JWKSource<SecurityContext> source = JWKSourceBuilder.<SecurityContext> create(new URL(jwksUri), newJwksRetriever())
-                .cache(getJwksCacheSeconds() * 1000L, JWKS_CACHE_REFRESH_TIMEOUT_MILLIS)
+        final URL url = new URL(jwksUri);
+        final int cacheSeconds = getJwksCacheSeconds();
+        final int configured = getConfiguredJwksCacheSeconds();
+        if (configured < MIN_JWKS_CACHE_SECONDS) {
+            logger.warn(
+                    "[MCP] mcp.oauth.jwks.cache.seconds={} is below the minimum of {}s the JWKS source can be built with; using {}s instead.",
+                    configured, MIN_JWKS_CACHE_SECONDS, cacheSeconds);
+        }
+        final JWKSource<SecurityContext> source = JWKSourceBuilder.<SecurityContext> create(url, newJwksRetriever())
+                .cache(cacheSeconds * 1000L, JWKS_CACHE_REFRESH_TIMEOUT_MILLIS)
                 .refreshAheadCache(true)
                 .retrying(true)
                 .build();
@@ -910,6 +919,10 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
      * is strictly worse than the 401 it would replace. A bad TTL must never disable
      * authentication, so this method clamps and continues instead.
      * </p>
+     * <p>
+     * This method does not log: it runs on every token-bearing request, which any caller can send.
+     * {@link #newProcessor(String)} reports the clamp each time it builds a source with it.
+     * </p>
      *
      * @return the effective JWKS cache lifetime in seconds: {@code mcp.oauth.jwks.cache.seconds}'s
      *         value when it is at least {@value #MIN_JWKS_CACHE_SECONDS},
@@ -917,19 +930,17 @@ public class OAuthResourceServerAuthenticator implements McpAuthenticator {
      *         {@value #DEFAULT_JWKS_CACHE_SECONDS} when the property is unset
      */
     protected int getJwksCacheSeconds() {
-        final int configured = getSystemPropertyAsInt("mcp.oauth.jwks.cache.seconds", DEFAULT_JWKS_CACHE_SECONDS);
-        if (configured >= MIN_JWKS_CACHE_SECONDS) {
-            return configured;
-        }
-        if (logger.isWarnEnabled() && jwksCacheFloorWarned.compareAndSet(false, true)) {
-            logger.warn(
-                    "[MCP] mcp.oauth.jwks.cache.seconds={} is below the minimum supported value - using {} instead. "
-                            + "The JWKS cache lifetime must leave room for both the 30s refresh-ahead window and the 30s cache "
-                            + "refresh timeout, and must be strictly longer than the 30s rate-limiter interval; a smaller value "
-                            + "makes the JWKS source fail to build and every token-bearing request return a misleading 401.",
-                    configured, MIN_JWKS_CACHE_SECONDS);
-        }
-        return MIN_JWKS_CACHE_SECONDS;
+        return Math.max(getConfiguredJwksCacheSeconds(), MIN_JWKS_CACHE_SECONDS);
+    }
+
+    /**
+     * Returns {@code mcp.oauth.jwks.cache.seconds} as configured, before
+     * {@link #getJwksCacheSeconds()}'s clamp.
+     *
+     * @return the configured value, or {@value #DEFAULT_JWKS_CACHE_SECONDS} when unset
+     */
+    private int getConfiguredJwksCacheSeconds() {
+        return getSystemPropertyAsInt("mcp.oauth.jwks.cache.seconds", DEFAULT_JWKS_CACHE_SECONDS);
     }
 
     /**
