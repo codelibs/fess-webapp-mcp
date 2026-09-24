@@ -866,6 +866,98 @@ public class OAuthAuthenticatorTest {
     }
 
     @Test
+    public void testSubFloorJwksCacheSecondsIsReportedOnEveryBuild() throws Exception {
+        // No "already warned" latch: each source built with a clamped TTL is reported, so an
+        // operator who fixes the value and later breaks it again sees the second occurrence too.
+        final ConfigOnlyAuthenticator auth = jwksConfig("https://idp.example.com/jwks");
+        auth.properties.put("mcp.oauth.jwks.cache.seconds", "5");
+        final List<String> warnings = captureWarnings(() -> {
+            auth.newProcessor("https://idp.example.com/jwks");
+            auth.newProcessor("https://idp.example.com/jwks");
+        });
+        assertEquals(2, warnings.size(), "every clamped build must be reported, not only the first: " + warnings);
+        assertTrue(warnings.get(1).contains("mcp.oauth.jwks.cache.seconds=5"), warnings.get(1));
+    }
+
+    @Test
+    public void testJwksCacheSecondsClampIsReportedAgainWhenTheMisconfigurationRecurs() throws Exception {
+        final ConfigOnlyAuthenticator auth = jwksConfig("https://idp.example.com/jwks");
+        final List<String> warnings = captureWarnings(() -> {
+            auth.properties.put("mcp.oauth.jwks.cache.seconds", "5");
+            auth.getProcessor();
+            // getProcessor() and getJwksCacheSeconds() run on every token-bearing request; they must
+            // not log per request, only when a source is actually built.
+            auth.getProcessor();
+            auth.getJwksCacheSeconds();
+            assertEquals(1, warnings().size());
+
+            auth.properties.put("mcp.oauth.jwks.cache.seconds", "300");
+            auth.getProcessor();
+            auth.properties.put("mcp.oauth.jwks.cache.seconds", "10");
+            auth.getProcessor();
+        });
+        assertEquals(2, warnings.size(), "a misconfiguration that recurs after being corrected must be reported again: " + warnings);
+        assertTrue(warnings.get(1).contains("mcp.oauth.jwks.cache.seconds=10"), warnings.get(1));
+    }
+
+    @Test
+    public void testJwksCacheSecondsAtOrAboveTheFloorIsNotReported() throws Exception {
+        final ConfigOnlyAuthenticator auth = jwksConfig("https://idp.example.com/jwks");
+        auth.properties.put("mcp.oauth.jwks.cache.seconds", "60");
+        assertTrue(captureWarnings(auth::getProcessor).isEmpty());
+    }
+
+    /** A block that may throw, run by {@link #captureWarnings}. */
+    @FunctionalInterface
+    interface ThrowingRunnable {
+        void run() throws Exception;
+    }
+
+    private static final List<String> CAPTURED = new ArrayList<>();
+
+    /** The WARN messages captured so far by the enclosing {@link #captureWarnings} call. */
+    private static List<String> warnings() {
+        synchronized (CAPTURED) {
+            return new ArrayList<>(CAPTURED);
+        }
+    }
+
+    /**
+     * Runs {@code block} with a log4j appender attached to {@link OAuthResourceServerAuthenticator}'s
+     * logger, forced to WARN for the duration, and returns the formatted WARN messages it produced.
+     */
+    private static List<String> captureWarnings(final ThrowingRunnable block) throws Exception {
+        final org.apache.logging.log4j.core.Logger logger = (org.apache.logging.log4j.core.Logger) org.apache.logging.log4j.LogManager
+                .getLogger(OAuthResourceServerAuthenticator.class);
+        final org.apache.logging.log4j.Level originalLevel = logger.getLevel();
+        final org.apache.logging.log4j.core.Appender appender = new org.apache.logging.log4j.core.appender.AbstractAppender(
+                "oauth-test-capture", null, null, true, org.apache.logging.log4j.core.config.Property.EMPTY_ARRAY) {
+            @Override
+            public void append(final org.apache.logging.log4j.core.LogEvent event) {
+                if (event.getLevel() == org.apache.logging.log4j.Level.WARN) {
+                    synchronized (CAPTURED) {
+                        CAPTURED.add(event.getMessage().getFormattedMessage());
+                    }
+                }
+            }
+        };
+        appender.start();
+        synchronized (CAPTURED) {
+            CAPTURED.clear();
+        }
+        logger.addAppender(appender);
+        logger.setLevel(org.apache.logging.log4j.Level.WARN);
+        try {
+            block.run();
+            return warnings();
+        } finally {
+            logger.removeAppender(appender);
+            logger.setLevel(originalLevel);
+            appender.stop();
+        }
+    }
+
+    @Test
     public void testBlankIssuerAndJwksUriAreTheRealDefaults() {
         final TestAuthenticator auth = new TestAuthenticator();
         assertEquals("", auth.getIssuer());
