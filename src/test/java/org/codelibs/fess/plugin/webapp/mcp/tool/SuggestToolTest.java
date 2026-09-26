@@ -49,6 +49,47 @@ public class SuggestToolTest {
 
     private final SuggestTool suggestTool = new SuggestTool();
 
+    /** A suggest tool whose backend throws, standing in for a suggest index that cannot answer. */
+    private static SuggestTool failingWith(final RuntimeException failure) {
+        return new SuggestTool() {
+            @Override
+            protected List<String> executeSuggest(final String query, final Object numArg) {
+                throw failure;
+            }
+        };
+    }
+
+    @Test
+    public void testASuggestBackendFailureIsReportedAsAServerSideFailure() {
+        // Measured with the search engine stopped: suggest answered "Tool execution failed
+        // (error_code:...)", which an agent cannot tell from a bug in the tool.
+        final RuntimeException failure = new org.codelibs.fess.suggest.exception.SuggesterException("Failed to execute request",
+                new java.net.ConnectException("Connection refused"));
+        final Map<String, Object> result = failingWith(failure).call(Map.of("q", "pad"), null);
+        assertEquals(Boolean.TRUE, result.get("isError"), result.toString());
+        assertTrue(!result.containsKey("structuredContent"), "an error result carries no structuredContent: " + result);
+        final String text = (String) ((Map<?, ?>) ((List<?>) result.get("content")).get(0)).get("text");
+        assertTrue(text.contains("server-side failure, not an empty result"), text);
+        assertTrue(!text.contains("Connection refused"), "the backend's message stays in the log: " + text);
+    }
+
+    @Test
+    public void testAnUnexpectedFailureStillPropagates() {
+        // Only the suggest backend's own failure is described here; anything else keeps the
+        // redacted correlation-id path in ToolsCallHandler.
+        final IllegalStateException failure = new IllegalStateException("something else");
+        assertThrows(IllegalStateException.class, () -> failingWith(failure).call(Map.of("q", "pad"), null));
+    }
+
+    @Test
+    public void testRootCauseMessageNamesWhatFailed() {
+        assertEquals("Connection refused",
+                SuggestTool.rootCauseMessage(new org.codelibs.fess.suggest.exception.SuggesterException("Failed to execute request",
+                        new RuntimeException("wrapper", new java.net.ConnectException("Connection refused")))));
+        assertEquals("only", SuggestTool.rootCauseMessage(new RuntimeException("only")));
+        assertEquals(RuntimeException.class.getName(), SuggestTool.rootCauseMessage(new RuntimeException()));
+    }
+
     @Test
     @SuppressWarnings("unchecked")
     public void testInputSchemaRequiresQ() {

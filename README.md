@@ -884,7 +884,9 @@ A missing `ref`, `argument`, `argument.name`, or (for `ref/prompt`) `ref.name` i
 | `q` | string | Yes | Query prefix to autocomplete |
 | `num` | integer | No | Number of suggestions (default 10), capped by `paging.search.page.max.size` |
 
-Returns `{"suggestions": [{"text": "..."}]}`.
+Returns `{"suggestions": [{"text": "..."}]}`. When the suggest index cannot answer — most often because the
+search engine is down — the result is `isError: true` with text saying it is a server-side failure rather than
+an empty result, and the cause is logged as one WARN line.
 
 ### `get_document`
 

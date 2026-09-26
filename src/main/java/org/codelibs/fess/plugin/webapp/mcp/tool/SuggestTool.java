@@ -22,7 +22,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.Set;
 import java.util.stream.Collectors;
 
 import jakarta.servlet.http.HttpServletResponse;
@@ -37,6 +36,7 @@ import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpError;
 import org.codelibs.fess.suggest.entity.SuggestItem;
+import org.codelibs.fess.suggest.exception.SuggesterException;
 import org.codelibs.fess.suggest.request.suggest.SuggestRequestBuilder;
 import org.codelibs.fess.suggest.request.suggest.SuggestResponse;
 import org.codelibs.fess.util.ComponentUtil;
@@ -47,6 +47,10 @@ import org.codelibs.fess.util.ComponentUtil;
 public class SuggestTool implements McpTool {
 
     private static final Logger logger = LogManager.getLogger(SuggestTool.class);
+
+    /** Returned when the suggest index cannot answer: a server-side failure, not an empty result. */
+    static final String UNAVAILABLE_TEXT = "Suggestions are unavailable: the server could not complete the suggest request. "
+            + "This is a server-side failure, not an empty result; retry later.";
 
     /**
      * Creates a {@code suggest} tool.
@@ -130,7 +134,26 @@ public class SuggestTool implements McpTool {
             throw new McpApiException(ErrorCode.InvalidParams, "Missing required parameter: q");
         }
 
-        final List<String> suggestions = executeSuggest(query, arguments.get("num"));
+        final List<String> suggestions;
+        try {
+            suggestions = executeSuggest(query, arguments.get("num"));
+        } catch (final SuggesterException e) {
+            // The suggest index could not answer, most often because the search engine is down.
+            // ToolsCallHandler's catch-all would report an opaque correlation id, which an agent
+            // cannot tell from a bug, and write a stack trace per call for as long as the outage
+            // lasts. Say that the server failed and that it is not an empty answer; the operator
+            // gets one line with the cause.
+            if (logger.isWarnEnabled()) {
+                logger.warn("[MCP] suggest could not be answered: {}", rootCauseMessage(e));
+            }
+            if (logger.isDebugEnabled()) {
+                logger.debug("[MCP] suggest failure", e);
+            }
+            final Map<String, Object> result = new LinkedHashMap<>();
+            result.put("content", List.of(Map.of("type", "text", "text", UNAVAILABLE_TEXT)));
+            result.put("isError", true);
+            return result;
+        }
 
         final List<Map<String, Object>> contents = new ArrayList<>();
         for (final String text : suggestions) {
@@ -180,6 +203,26 @@ public class SuggestTool implements McpTool {
             }
         }
         return texts;
+    }
+
+    /**
+     * Returns the message of the innermost cause, which names what actually failed (for example
+     * the refused connection) rather than the wrapper's "Failed to execute request".
+     *
+     * @param e the failure
+     * @return the innermost non-null message, or the failure's own class name
+     */
+    static String rootCauseMessage(final Throwable e) {
+        String message = e.getClass().getName();
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t.getMessage() != null) {
+                message = t.getMessage();
+            }
+            if (t.getCause() == t) {
+                break;
+            }
+        }
+        return message;
     }
 
     /**
