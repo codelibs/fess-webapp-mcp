@@ -92,6 +92,8 @@ Fess 15.9:
 | `mcp-remote` 0.14 (stdio-to-HTTP bridge for desktop clients) | `2026-07-28` | Yes. `--protocol auto` speaks `2026-07-28`; the default `legacy` speaks `2025-11-25`. |
 | MCP TypeScript SDK v1 (`@modelcontextprotocol/sdk` 1.30), and clients built on it | `2025-11-25` | Yes, as a legacy client |
 | **OpenCode** 1.18 (`"type": "remote"`, including its OAuth login) | `2025-11-25` | Yes, as a legacy client |
+| **Codex CLI** 0.157 (`[mcp_servers.<name>] url = ...`) | legacy | Yes, as a legacy client |
+| **Gemini CLI** 0.61 (`gemini mcp add --transport http`) | `2025-11-25` | Yes, as a legacy client. It sends no `MCP-Protocol-Version` after `initialize`, which is served as `2025-11-25` (see below). |
 
 ### Legacy clients
 
@@ -100,11 +102,15 @@ A client that opens with `initialize` is served as a legacy client. This is on b
 
 - **Version negotiation.** `initialize` answers with the client's `protocolVersion` when it is `2025-11-25` or
   `2025-06-18`, and with `2025-11-25` otherwise (the client may then disconnect). `2025-03-26` and earlier are
-  not supported: they send no `MCP-Protocol-Version` header, so their later requests cannot be recognised.
+  not supported: such a client is offered `2025-11-25` and is expected to disconnect.
 - **Recognising later requests.** A request whose `MCP-Protocol-Version` header names one of those two
   revisions, and whose body carries no `params._meta` protocol version, is served as legacy. It needs no
-  `Mcp-Method` / `Mcp-Name` header. A request carrying modern `_meta` is always served per `2026-07-28`, so a
-  legacy version declared *there* is still `-32022`.
+  `Mcp-Method` / `Mcp-Name` header. A request with **no** `MCP-Protocol-Version` header and no `params._meta`
+  protocol version is served as legacy `2025-11-25` too: `2025-11-25` has a server that cannot tell the version
+  assume an older one, and some clients drop the header after `initialize` (Gemini CLI 0.61 never sends it).
+  A header naming any other version is refused with `-32020`. A request carrying modern `_meta` is always served
+  per `2026-07-28` — without the header it still gets `-32020` — so a legacy version declared *there* is still
+  `-32022`.
 - **Stateless.** No `Mcp-Session-Id` is issued, `GET` and `DELETE` stay 405 (both allowed by `2025-11-25`), and
   `ping` answers `{}`.
 - **Same server underneath.** A legacy request goes through the same Origin check, authentication (the 401
