@@ -34,6 +34,7 @@ import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpError;
 import org.codelibs.fess.plugin.webapp.mcp.tool.McpTool;
 import org.codelibs.fess.util.ComponentUtil;
+import org.lastaflute.core.message.UserMessages;
 import org.lastaflute.web.validation.VaMessenger;
 
 /**
@@ -158,6 +159,63 @@ public class ToolsCallHandler implements McpMethodHandler {
     }
 
     /**
+     * Tells whether a rejected query was rejected for its {@code sort} value: a malformed value,
+     * a field that is not sortable, or an order other than {@code asc}/{@code desc}.
+     *
+     * @param messageCode the message code the exception carried, may be null
+     * @return true when the rejection is about the sort value
+     */
+    protected static boolean isSortRejection(final VaMessenger<FessMessages> messageCode) {
+        if (messageCode == null) {
+            return false;
+        }
+        try {
+            final FessMessages messages = new FessMessages();
+            messageCode.message(messages);
+            return messages.hasMessageOf(UserMessages.GLOBAL_PROPERTY_KEY, FessMessages.ERRORS_invalid_query_sort_value)
+                    || messages.hasMessageOf(UserMessages.GLOBAL_PROPERTY_KEY, FessMessages.ERRORS_invalid_query_unsupported_sort_field)
+                    || messages.hasMessageOf(UserMessages.GLOBAL_PROPERTY_KEY, FessMessages.ERRORS_invalid_query_unsupported_sort_order);
+        } catch (final RuntimeException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Builds the sentence appended to a sort rejection: the accepted shape and, when this
+     * deployment's sortable fields can be read, the fields themselves.
+     *
+     * @return the hint, never empty
+     */
+    protected String buildSortHint() {
+        final String fields = String.join(", ", getSortableFields());
+        if (fields.isEmpty()) {
+            return "Use <field>.asc or <field>.desc.";
+        }
+        return "Use <field>.asc or <field>.desc, where <field> is one of: " + fields + ".";
+    }
+
+    /**
+     * Returns the fields this deployment accepts in {@code sort}.
+     * <p>
+     * Isolated behind this seam because it reads {@link ComponentUtil}, which the handler tests
+     * do not have. {@code QueryFieldConfig} fills the array lazily, so it can be null.
+     * </p>
+     *
+     * @return the accepted sort fields, never null, possibly empty
+     */
+    protected String[] getSortableFields() {
+        try {
+            final String[] fields = ComponentUtil.getQueryFieldConfig().getSortFields();
+            return fields == null ? new String[0] : fields;
+        } catch (final RuntimeException e) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("[MCP] Could not resolve the sortable field list", e);
+            }
+            return new String[0];
+        }
+    }
+
+    /**
      * Creates a {@code tools/call} handler backed by this server's standard tool set.
      */
     public ToolsCallHandler() {
@@ -275,8 +333,15 @@ public class ToolsCallHandler implements McpMethodHandler {
             if (logger.isDebugEnabled()) {
                 logger.debug("[MCP] Tool '{}' rejected the caller's query", name, e);
             }
+            String text = resolveCallerMessage(e.getMessageCode());
+            if (isSortRejection(e.getMessageCode())) {
+                // The message names the rejected value but not what would have been accepted. An
+                // agent that reads only the error (and not the sort argument's description) has
+                // nothing to correct it with, so say it here too.
+                text = text + " " + buildSortHint();
+            }
             final Map<String, Object> result = new LinkedHashMap<>();
-            result.put("content", List.of(Map.of("type", "text", "text", resolveCallerMessage(e.getMessageCode()))));
+            result.put("content", List.of(Map.of("type", "text", "text", text)));
             result.put("isError", true);
             return result;
         } catch (final Exception e) {

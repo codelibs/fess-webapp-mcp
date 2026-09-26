@@ -533,6 +533,72 @@ public class ToolsCallHandlerTest {
         assertFalse(text.contains("error_code:"), "a caller-directed failure needs no correlation id");
     }
 
+    /** A rejecting handler whose sortable fields are fixed, standing in for QueryFieldConfig. */
+    private String rejectWithSortFields(final InvalidQueryException failure, final String resolved, final String... fields) {
+        final ToolsCallHandler handler = new ToolsCallHandler(List.of(new RejectingTool(failure))) {
+            @Override
+            protected String resolveCallerMessage(
+                    final org.lastaflute.web.validation.VaMessenger<org.codelibs.fess.mylasta.action.FessMessages> messageCode) {
+                return resolved;
+            }
+
+            @Override
+            protected String[] getSortableFields() {
+                return fields;
+            }
+        };
+        final Map<String, Object> result = handler.handle(contextWithParams(Map.of("name", "search", "arguments", Map.of("q", "x"))));
+        assertEquals(Boolean.TRUE, result.get("isError"), result.toString());
+        return (String) ((Map<?, ?>) ((List<?>) result.get("content")).get(0)).get("text");
+    }
+
+    @Test
+    public void testASortRejectionNamesTheAcceptedFields() {
+        // Measured with a real agent: "The specified sort nope is unsupported." named the fault
+        // but not the fix, so an agent that does not read the sort argument's description had to
+        // guess. Each of the three sort rejections Fess raises gets the accepted shape and fields.
+        final String field = rejectWithSortFields(
+                new InvalidQueryException(
+                        messages -> messages.addErrorsInvalidQueryUnsupportedSortField(
+                                org.lastaflute.core.message.UserMessages.GLOBAL_PROPERTY_KEY, "nope"),
+                        "Unsupported sort field: sort:nope.asc"),
+                "The specified sort nope is unsupported.", "score", "filename", "content_length");
+        assertEquals("The specified sort nope is unsupported. Use <field>.asc or <field>.desc, where <field> is one of: "
+                + "score, filename, content_length.", field);
+
+        final String order =
+                rejectWithSortFields(
+                        new InvalidQueryException(
+                                messages -> messages.addErrorsInvalidQueryUnsupportedSortOrder(
+                                        org.lastaflute.core.message.UserMessages.GLOBAL_PROPERTY_KEY, "up"),
+                                "Invalid sort order: sort:score.up"),
+                        "The specified sort order up is unsupported.", "score");
+        assertTrue(order.endsWith("where <field> is one of: score."), order);
+
+        final String value = rejectWithSortFields(new InvalidQueryException(
+                messages -> messages.addErrorsInvalidQuerySortValue(org.lastaflute.core.message.UserMessages.GLOBAL_PROPERTY_KEY, "a.b.c"),
+                "Invalid sort field: sort:a.b.c"), "The specified sort a.b.c is invalid.", "score");
+        assertTrue(value.endsWith("where <field> is one of: score."), value);
+    }
+
+    @Test
+    public void testASortRejectionWithoutAFieldListStillGivesTheShape() {
+        final String text =
+                rejectWithSortFields(new InvalidQueryException(
+                        messages -> messages.addErrorsInvalidQueryUnsupportedSortField(
+                                org.lastaflute.core.message.UserMessages.GLOBAL_PROPERTY_KEY, "nope"),
+                        "Unsupported sort field: sort:nope.asc"), "The specified sort nope is unsupported.");
+        assertEquals("The specified sort nope is unsupported. Use <field>.asc or <field>.desc.", text);
+    }
+
+    @Test
+    public void testANonSortRejectionGetsNoSortHint() {
+        final String text = rejectWithSortFields(new InvalidQueryException(
+                messages -> messages.addErrorsInvalidQueryParseError(org.lastaflute.core.message.UserMessages.GLOBAL_PROPERTY_KEY),
+                "Cannot parse: foo AND"), "The given query is invalid.", "score");
+        assertEquals("The given query is invalid.", text);
+    }
+
     @Test
     public void testRejectedQueryNeverEchoesTheExceptionMessage() {
         // The SearchEngineClient variant carries the executed OpenSearch DSL, role filters
