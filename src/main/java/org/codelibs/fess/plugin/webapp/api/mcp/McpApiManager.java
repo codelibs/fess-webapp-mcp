@@ -605,6 +605,16 @@ public class McpApiManager extends BaseApiManager {
      * {@code MCP-Protocol-Version} on every request and sends no {@code _meta}, which is how those
      * requests are recognised. Anything else is left to the modern path.
      * </p>
+     * <p>
+     * A request with no {@code MCP-Protocol-Version} header at all, and no {@code _meta}
+     * protocol version, is legacy too: 2025-11-25 tells a server that cannot otherwise tell the
+     * version to assume an older one, and a stateless server cannot. Some clients drop the header
+     * after {@code initialize} (Gemini CLI 0.61 wraps the SDK transport and never forwards the
+     * negotiated version to it). Such a client negotiated a legacy version, so it is served as
+     * {@link McpConstants#LEGACY_PROTOCOL_VERSION}. A modern request always carries {@code _meta},
+     * so it still reaches the modern path and its -32020 for the missing header; a header naming
+     * a version this server does not speak is still refused there.
+     * </p>
      *
      * @param request the servlet request
      * @param mcpRequest the parsed request
@@ -624,10 +634,13 @@ public class McpApiManager extends BaseApiManager {
             return null;
         } else {
             final String header = request.getHeader(McpConstants.HEADER_PROTOCOL_VERSION);
-            if (header == null || !McpConstants.LEGACY_PROTOCOL_VERSIONS.contains(header)) {
+            if (header == null) {
+                version = McpConstants.LEGACY_PROTOCOL_VERSION;
+            } else if (McpConstants.LEGACY_PROTOCOL_VERSIONS.contains(header)) {
+                version = header;
+            } else {
                 return null;
             }
-            version = header;
         }
         // Consulted last, so a modern request never pays for the property read.
         return isLegacyProtocolEnabled() ? version : null;
