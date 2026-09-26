@@ -325,6 +325,14 @@ connection; this one does not out of the box, so that an existing Fess deploymen
 plugin is installed. The endpoint logs a WARN whenever it resolves to unauthenticated behaviour. For any
 deployment reachable beyond a trusted network, set `mcp.auth.mode` to `fess_token` or `oauth`.
 
+**`none` honours `login.required`.** When Fess requires a login to search (`login.required=true`, **Login
+Required** on the General settings page), the search pages send an anonymous visitor to the login page and
+`/api/v2` answers 401 `auth_required`. `/mcp` in `none` mode refuses the same caller with HTTP 403 and a
+JSON-RPC `-32600` error naming both settings, for every method including `server/discover`. A request that
+carries a Fess login session is served. `fess_token` and `oauth` authenticate the caller themselves, so a
+valid credential is accepted regardless of `login.required`. A site that requires a login and wants MCP
+clients must therefore use one of those two modes.
+
 An `oauth` configuration that is missing a required key **falls back to `none` rather than failing hard**,
 which means the endpoint silently starts serving anonymous callers. That fallback is logged at ERROR naming
 the missing keys. Because Fess re-reads its properties on a live server, this can happen minutes after a
