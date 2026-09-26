@@ -306,6 +306,9 @@ Two more things worth knowing when consuming results:
   gives its untruncated length, so a client can report "showing 10000 of 20957 characters". Do not read the
   trailing `...` as the signal — it is indistinguishable from a document that genuinely ends in one. Raise
   `mcp.content.max.length` to return whole documents; there is no way to fetch the remainder in a second call.
+- **Two different `content_length`s.** The one `get_document` returns counts characters of the extracted
+  text. The `content_length` that `search` sorts by is Fess's index field: the size of the original file in
+  bytes, markup included. A 298-character HTML page can sort as 524. The `sort` description says so.
 
 ## Securing the endpoint
 
@@ -566,7 +569,7 @@ authenticate.
   "result": {
     "supportedVersions": ["2026-07-28"],
     "capabilities": { "tools": {}, "resources": {}, "prompts": {}, "completions": {} },
-    "instructions": "Fess Enterprise Search Server. Use the 'search' tool to perform full-text search with Lucene-like query syntax (AND default, OR explicit, quotes for phrase, - for exclusion). Use 'suggest' for query autocomplete.",
+    "instructions": "Fess Enterprise Search Server. Use the 'search' tool to perform full-text search with Lucene-like query syntax (AND default, OR explicit, quotes for phrase, - for exclusion); its 'sort' argument orders the hits (<field>.asc or <field>.desc, accepted fields listed in its description). Each hit carries a doc_id: pass it to 'get_document' to read the document's full text. Use 'suggest' for query autocomplete.",
     "ttlMs": 3600000,
     "cacheScope": "public",
     "resultType": "complete",

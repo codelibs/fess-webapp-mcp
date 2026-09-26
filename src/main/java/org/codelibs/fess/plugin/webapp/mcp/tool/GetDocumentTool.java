@@ -79,7 +79,9 @@ public class GetDocumentTool implements McpTool {
                 Map.of("doc_id", Map.of("type", "string"), "title", Map.of("type", "string"), "url", Map.of("type", "string"), "content",
                         Map.of("type", "string"), "truncated",
                         Map.of("type", "boolean", "description", "whether content was cut at mcp.content.max.length"), "content_length",
-                        Map.of("type", "integer", "description", "length of the document's content before truncation")));
+                        Map.of("type", "integer", "description",
+                                "number of characters of the extracted text before truncation; not the content_length "
+                                        + "search sorts by, which is the size of the original file in bytes")));
         // Once a document is found, doc_id echoes the (already validated, non-empty) request
         // argument, and title/url/content are always present -- possibly as an empty string,
         // never absent -- because the lookup falls back to "" for each. This schema only

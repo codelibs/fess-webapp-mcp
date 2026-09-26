@@ -1116,6 +1116,28 @@ public class SearchToolTest {
     }
 
     @Test
+    public void testSortDescriptionSaysWhatContentLengthMeasures() {
+        // The content_length search sorts by is the original file's size in bytes; get_document's
+        // content_length counts characters of the extracted text. Same name, different number.
+        final SearchTool tool = new SearchTool() {
+            @Override
+            protected String[] getSortableFields() {
+                return new String[] { "score", "content_length" };
+            }
+        };
+        assertTrue(tool.buildSortDescription().contains("content_length is the size of the original file in bytes"),
+                tool.buildSortDescription());
+
+        final SearchTool withoutIt = new SearchTool() {
+            @Override
+            protected String[] getSortableFields() {
+                return new String[] { "score" };
+            }
+        };
+        assertFalse(withoutIt.buildSortDescription().contains("original file"), "no note for a field this deployment does not accept");
+    }
+
+    @Test
     public void testSortDescriptionStillDescribesTheShapeWithoutAContainer() {
         // QueryFieldConfig fills the array lazily and ComponentUtil is absent here, so the
         // tool must still advertise something usable rather than failing to build its schema.
