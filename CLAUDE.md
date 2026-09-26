@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Maven-based Java plugin for Fess that implements a Model Context Protocol (MCP) server, protocol revision **`2026-07-28`**, over JSON-RPC 2.0. The plugin enables MCP clients to search Fess, retrieve documents, get autocomplete suggestions, and (behind a permission gate) read index statistics.
+This is a Maven-based Java plugin for Fess that implements a Model Context Protocol (MCP) server, protocol revision **`2026-07-28`** (and, for clients that open with `initialize`, `2025-11-25`/`2025-06-18`), over JSON-RPC 2.0. The plugin enables MCP clients to search Fess, retrieve documents, get autocomplete suggestions, and (behind a permission gate) read index statistics.
 
 ## Development Commands
 
@@ -61,7 +61,7 @@ The dispatcher (`McpDispatcher`, constructed from nine handlers in `McpApiManage
 - `prompts/get` — substitutes prompt arguments; requires `Mcp-Name` to match `params.name`.
 - `completion/complete` — argument autocomplete via Fess suggest (prompt `query` args) or a static enum (`advanced_search.sort`); rate-limited like `tools/call`.
 
-`initialize` and `ping` no longer exist as handlers at all: `initialize` gets a dedicated `-32601` message naming the supported version (legacy clients have no fall-forward mechanism), and a bare JSON array body (batching) is rejected with HTTP 400 before the method is even looked at.
+`initialize` and `ping` are not dispatcher handlers. With `mcp.legacy.protocol.enabled` (default `true`) the server is dual-era: `McpApiManager#resolveLegacyProtocolVersion` routes `initialize`, and any request whose `MCP-Protocol-Version` header is `2025-11-25`/`2025-06-18` and whose body has no modern `_meta`, through `dispatchLegacy` — after Origin validation and `authenticate()`, through the same rate limit and handlers — and `McpResponseWriter#writeLegacyResult` strips the 2026-07-28-only result fields. With it off, `initialize` gets a dedicated `-32601` message naming the supported version (legacy clients have no fall-forward mechanism). A bare JSON array body (batching) is rejected with HTTP 400 before the method is even looked at.
 
 ### Search Integration
 

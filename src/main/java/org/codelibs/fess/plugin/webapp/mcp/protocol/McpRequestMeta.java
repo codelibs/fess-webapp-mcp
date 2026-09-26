@@ -64,6 +64,19 @@ public class McpRequestMeta {
     }
 
     /**
+     * Builds the metadata for a legacy (handshake-based) request, which carries no
+     * {@code params._meta}: the version comes from the {@code initialize} negotiation or the
+     * {@code MCP-Protocol-Version} header, and the client's capabilities and identity were sent
+     * once, in {@code initialize}, and are not kept.
+     *
+     * @param protocolVersion the legacy protocol version in effect for the request
+     * @return the metadata; never null
+     */
+    public static McpRequestMeta legacy(final String protocolVersion) {
+        return new McpRequestMeta(protocolVersion, Collections.<String, Object> emptyMap(), Collections.<String, Object> emptyMap());
+    }
+
+    /**
      * Extracts and validates {@code params._meta}.
      *
      * @param params the request params

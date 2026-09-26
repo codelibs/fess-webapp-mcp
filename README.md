@@ -10,10 +10,10 @@ Install the plugin, restart Fess, and a `/mcp` endpoint appears alongside the se
 are produced by the same Fess search pipeline the web UI uses, so role-based access control still applies:
 an MCP caller sees only what its credential is allowed to see.
 
-> **Before you install: check your MCP client.**
-> This plugin implements MCP protocol revision **`2026-07-28`** and nothing else. There is no legacy
-> `initialize` handshake and no version negotiation, so a client built against an older revision cannot
-> connect at all. See [Client compatibility](#client-compatibility) before deploying.
+> **MCP protocol revisions.**
+> This plugin implements MCP protocol revision **`2026-07-28`**, and also answers clients that still open with
+> the `initialize` handshake of `2025-11-25` or `2025-06-18` (a "dual-era" server in the specification's
+> terms). See [Client compatibility](#client-compatibility).
 
 > **Status: work in progress.** Features, defaults, and documentation may change as the MCP specification
 > and the client ecosystem evolve. Contributions and feedback are welcome.
@@ -79,30 +79,46 @@ After the restart, `POST /mcp` is live. With the shipped defaults it is **unauth
 ## Client compatibility
 
 MCP revision `2026-07-28` replaced the `initialize` handshake with `server/discover` and made per-request
-metadata headers mandatory. A client that speaks an older revision fails on its very first call, with this
-server's own diagnostic:
+metadata headers mandatory. Many clients are still built on an SDK that speaks `2025-11-25`, so this server
+answers both: a request carrying `params._meta` is served per `2026-07-28`, and an `initialize` request is
+served per the handshake-based revision it negotiates (see [Legacy clients](#legacy-clients)). Measured against
+Fess 15.9:
+
+| Client / SDK | Newest protocol revision | Connects directly |
+|---|---|---|
+| **Claude Code** 2.1.273 | `2026-07-28` | Yes — configure the server as `{"type": "http", "url": "https://fess.example.com/mcp"}`. It opens with `server/discover` and never sends `initialize`. |
+| MCP **TypeScript** SDK v2 (`@modelcontextprotocol/client` 2.1) | `2026-07-28` | Yes. `versionNegotiation` `{ mode: "auto" }` or a `2026-07-28` pin speaks `2026-07-28`; the default `legacy` mode speaks `2025-11-25`. |
+| MCP **Python** SDK 2.2 | `2026-07-28` | Yes |
+| `mcp-remote` 0.14 (stdio-to-HTTP bridge for desktop clients) | `2026-07-28` | Yes. `--protocol auto` speaks `2026-07-28`; the default `legacy` speaks `2025-11-25`. |
+| MCP TypeScript SDK v1 (`@modelcontextprotocol/sdk` 1.30), and clients built on it | `2025-11-25` | Yes, as a legacy client |
+| **OpenCode** 1.18 (`"type": "remote"`, including its OAuth login) | `2025-11-25` | Yes, as a legacy client |
+
+### Legacy clients
+
+A client that opens with `initialize` is served as a legacy client. This is on by default and controlled by
+`mcp.legacy.protocol.enabled`.
+
+- **Version negotiation.** `initialize` answers with the client's `protocolVersion` when it is `2025-11-25` or
+  `2025-06-18`, and with `2025-11-25` otherwise (the client may then disconnect). `2025-03-26` and earlier are
+  not supported: they send no `MCP-Protocol-Version` header, so their later requests cannot be recognised.
+- **Recognising later requests.** A request whose `MCP-Protocol-Version` header names one of those two
+  revisions, and whose body carries no `params._meta` protocol version, is served as legacy. It needs no
+  `Mcp-Method` / `Mcp-Name` header. A request carrying modern `_meta` is always served per `2026-07-28`, so a
+  legacy version declared *there* is still `-32022`.
+- **Stateless.** No `Mcp-Session-Id` is issued, `GET` and `DELETE` stay 405 (both allowed by `2025-11-25`), and
+  `ping` answers `{}`.
+- **Same server underneath.** A legacy request goes through the same Origin check, authentication (the 401
+  challenge on `initialize` is what starts a legacy client's OAuth discovery), rate limit, handlers and role
+  filtering as a modern one. Results drop the fields only `2026-07-28` defines — `resultType`, `ttlMs`,
+  `cacheScope`, `_meta["io.modelcontextprotocol/serverInfo"]` — and `serverInfo` is returned by `initialize`.
+
+With `mcp.legacy.protocol.enabled=false` the endpoint is modern-only, and `initialize` gets this diagnostic:
 
 ```json
 {"jsonrpc":"2.0","id":0,"error":{"code":-32601,
  "message":"initialize was removed in MCP 2026-07-28; this server speaks 2026-07-28",
  "data":{"supportedVersions":["2026-07-28"]}}}
 ```
-
-Clients that support `2026-07-28` connect directly. Measured against Fess 15.9:
-
-| Client / SDK | Newest protocol revision | Connects directly |
-|---|---|---|
-| **Claude Code** 2.1.273 | `2026-07-28` | Yes — configure the server as `{"type": "http", "url": "https://fess.example.com/mcp"}`. It opens with `server/discover` and never sends `initialize`. |
-| MCP **TypeScript** SDK v2 (`@modelcontextprotocol/client` 2.0) | `2026-07-28` | Yes, with `versionNegotiation` set to `{ mode: "auto" }` or `{ mode: { pin: "2026-07-28" } }`. **Its default is `legacy`**, which sends `initialize` and fails with the diagnostic above. |
-| MCP **Python** SDK 2.2 | `2026-07-28` | Yes |
-| `mcp-remote` 0.14 (stdio-to-HTTP bridge for desktop clients) | `2026-07-28` | Yes, with `--protocol auto` (for example `npx mcp-remote https://fess.example.com/mcp --protocol auto`). **Its default is `legacy`**, which sends `initialize` and fails. |
-| MCP TypeScript SDK v1 (`@modelcontextprotocol/sdk` 1.30), and clients built on it | `2025-11-25` | No |
-
-The TypeScript SDK's `2026-07-28` support ships under the new `@modelcontextprotocol/client` package name
-rather than as a version of `@modelcontextprotocol/sdk`, so a client built on the older package does not pick
-it up by upgrading. Such a client can still reach this endpoint through `mcp-remote --protocol auto`, which
-answers the client's `initialize` itself and speaks `2026-07-28` to this server, or by driving the endpoint
-over HTTP from your own agent code (see [Quick start](#quick-start)).
 
 ## Quick start
 
@@ -429,6 +445,7 @@ Every key below is a **Fess system property**. Put it in `WEB-INF/conf/system.pr
 | Property | Default | Description |
 |----------|---------|-------------|
 | `mcp.enabled` | `true` | Enables the `/mcp` endpoint. When `false`, every request gets HTTP 503. |
+| `mcp.legacy.protocol.enabled` | `true` | Also serves clients that open with the `2025-11-25` / `2025-06-18` `initialize` handshake. See [Legacy clients](#legacy-clients). |
 | `mcp.auth.mode` | `none` | `none`, `fess_token`, or `oauth`. An unusable `oauth` configuration falls back to `none`. |
 | `mcp.allowed.origins` | *(blank)* | Comma-separated allowlist of `Origin` values, as full `scheme://host[:port]`. Blank rejects every present `Origin`; an absent `Origin` is always allowed. A host containing an underscore cannot be expressed here, because `java.net.URI` does not accept one. |
 | `mcp.request.max.bytes` | `1048576` | Maximum request body size in bytes; larger bodies get HTTP 413. `0` or negative rejects every body; `2147483647` removes the bound. `Content-Length` is deliberately ignored — it is caller-supplied and absent for a chunked body. |
@@ -456,8 +473,8 @@ disagrees with the body. All of `MCP-Protocol-Version` and `Mcp-Method` are requ
 request, plus `Mcp-Name` on `tools/call`, `prompts/get`, and `resources/read`. See
 [Required headers and `params._meta`](#required-headers-and-params_meta).
 
-**The first call fails with `-32601` mentioning `initialize`.** Your client speaks an older MCP revision. See
-[Client compatibility](#client-compatibility).
+**The first call fails with `-32601` mentioning `initialize`.** Your client speaks an older MCP revision and
+`mcp.legacy.protocol.enabled` is not `true`. See [Legacy clients](#legacy-clients).
 
 **Every request gets HTTP 403.** The request carries an `Origin` header that is not in `mcp.allowed.origins`,
 which is blank by default. See [Browser clients](#browser-clients-origin-allowlist-and-cors).
@@ -548,7 +565,8 @@ value, and rejected with `-32020`.
 
 ## Methods
 
-Nine methods are routed. Every other method name, including the retired `initialize` and `ping`, is `-32601`.
+Nine methods are routed. Every other method name, including the retired `initialize` and `ping`, is `-32601`
+for a modern request; a [legacy client](#legacy-clients) also gets `initialize` and `ping`.
 
 `resultType` and `_meta["io.modelcontextprotocol/serverInfo"]` are stamped onto **every** successful result by
 the response writer; they are shown once below and omitted from the rest for brevity. `serverInfo.version`
@@ -1199,13 +1217,14 @@ These are deliberate, reviewed choices, not oversights:
 
 ## Migrating from an earlier MCP revision
 
-A client built against `2024-11-05` or any revision before `2026-07-28` cannot connect to this endpoint at
-all. The changes that matter, in the order a client hits them:
+A client built against `2025-11-25` or `2025-06-18` connects as a [legacy client](#legacy-clients) and needs
+none of what follows. A client built against `2025-03-26` or earlier cannot connect. For a client moving to
+`2026-07-28`, the changes that matter, in the order it hits them:
 
 | Change | What it means for a client |
 |--------|----------------------------|
-| **`initialize` is gone** | Returns HTTP 404 with `-32601`; the message and `data.supportedVersions` name the one version this server speaks. Use [`server/discover`](#serverdiscover), which does not negotiate a version because there is only one. |
-| **`ping` is gone** | Returns HTTP 404 with `-32601`. There is no liveness-check method any more, and no `data.supportedVersions`, because there is no replacement to fall forward to. |
+| **`initialize` is gone** | Opens a legacy session when `mcp.legacy.protocol.enabled` is on. Otherwise returns HTTP 404 with `-32601`; the message and `data.supportedVersions` name the one version this server speaks. Use [`server/discover`](#serverdiscover), which does not negotiate a version because there is only one. |
+| **`ping` is gone** | Answered only for a legacy client. Otherwise returns HTTP 404 with `-32601`. There is no liveness-check method any more, and no `data.supportedVersions`, because there is no replacement to fall forward to. |
 | **JSON-RPC batching is gone** | A JSON array request body is rejected with HTTP 400. Batching was removed from the JSON-RPC layer in `2025-06-18`, and this server never re-added it as an extension. |
 | **Request-metadata headers and `params._meta` are mandatory** | See [Required headers and `params._meta`](#required-headers-and-params_meta). Missing or mismatched headers are HTTP 400 with `-32020`, before dispatch. |
 | **An inbound `cursor` is rejected** | The list methods answer a non-null `cursor` with `-32602`. This server returns every item in one page and never issues a `nextCursor`, so any inbound cursor is necessarily stale. An explicit `"cursor": null` is treated as absent, since several mainstream serializers emit one for an unset optional field. |

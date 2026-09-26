@@ -104,6 +104,30 @@ public class McpResponseWriter {
     }
 
     /**
+     * Writes a successful result to a legacy (handshake-based) request.
+     *
+     * <p>The handlers build 2026-07-28 results; this removes what only that revision defines --
+     * {@code resultType} and the {@code ttlMs}/{@code cacheScope} cache hints -- and injects no
+     * {@code _meta.serverInfo}, since a legacy client learned the server's identity from
+     * {@code initialize}.</p>
+     *
+     * @param response the servlet response
+     * @param id the request id
+     * @param result the handler's result object; mutated in place, so it must be a mutable map
+     */
+    public void writeLegacyResult(final HttpServletResponse response, final Object id, final Map<String, Object> result) {
+        result.remove("resultType");
+        result.remove("ttlMs");
+        result.remove("cacheScope");
+
+        final Map<String, Object> envelope = new LinkedHashMap<>();
+        envelope.put("jsonrpc", McpConstants.JSONRPC_VERSION);
+        envelope.put("id", id);
+        envelope.put("result", result);
+        write(response, HttpServletResponse.SC_OK, Json.write(envelope));
+    }
+
+    /**
      * Writes a JSON-RPC error response.
      *
      * <p>When {@code hasId} is false the {@code id} member is omitted entirely.
