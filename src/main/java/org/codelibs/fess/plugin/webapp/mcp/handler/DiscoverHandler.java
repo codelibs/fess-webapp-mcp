@@ -77,6 +77,38 @@ public class DiscoverHandler extends AbstractCacheableHandler {
 
     @Override
     public Map<String, Object> handle(final McpCallContext context) {
+        final Map<String, Object> result = new LinkedHashMap<>();
+        result.put("supportedVersions", List.copyOf(McpConstants.SUPPORTED_PROTOCOL_VERSIONS));
+        result.put("capabilities", buildCapabilities());
+        result.put("instructions", INSTRUCTIONS);
+        putCacheHints(result, context);
+        return result;
+    }
+
+    /**
+     * Builds the legacy {@code initialize} result: the same capabilities and instructions as
+     * {@code server/discover}, plus the negotiated version and the server's identity, which a
+     * legacy client reads here once instead of from every result's {@code _meta}.
+     *
+     * @param protocolVersion the negotiated legacy protocol version
+     * @param serverInfo the server's name and version
+     * @return the {@code InitializeResult} body
+     */
+    public Map<String, Object> handleInitialize(final String protocolVersion, final Map<String, Object> serverInfo) {
+        final Map<String, Object> result = new LinkedHashMap<>();
+        result.put("protocolVersion", protocolVersion);
+        result.put("capabilities", buildCapabilities());
+        result.put("serverInfo", serverInfo);
+        result.put("instructions", INSTRUCTIONS);
+        return result;
+    }
+
+    /**
+     * Builds the capabilities shared by {@code server/discover} and {@code initialize}.
+     *
+     * @return a fresh, mutable capabilities map
+     */
+    protected Map<String, Object> buildCapabilities() {
         final Map<String, Object> capabilities = new LinkedHashMap<>();
         // Empty objects: advertising listChanged or subscribe would oblige us to implement
         // subscriptions/listen, and logging is deprecated in this revision.
@@ -84,13 +116,7 @@ public class DiscoverHandler extends AbstractCacheableHandler {
         capabilities.put("resources", new LinkedHashMap<String, Object>());
         capabilities.put("prompts", new LinkedHashMap<String, Object>());
         capabilities.put("completions", new LinkedHashMap<String, Object>());
-
-        final Map<String, Object> result = new LinkedHashMap<>();
-        result.put("supportedVersions", List.copyOf(McpConstants.SUPPORTED_PROTOCOL_VERSIONS));
-        result.put("capabilities", capabilities);
-        result.put("instructions", INSTRUCTIONS);
-        putCacheHints(result, context);
-        return result;
+        return capabilities;
     }
 
     @Override

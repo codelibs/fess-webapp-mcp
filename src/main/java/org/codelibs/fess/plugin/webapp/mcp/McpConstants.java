@@ -25,8 +25,23 @@ public final class McpConstants {
     /** The single MCP protocol revision this server implements. */
     public static final String PROTOCOL_VERSION = "2026-07-28";
 
-    /** Every protocol revision this server accepts. Modern-only: no legacy handshake. */
+    /**
+     * Every protocol revision this server accepts on a request carrying per-request
+     * {@code _meta}. The legacy revisions below are not listed: they are reached only through
+     * the {@code initialize} handshake, never through {@code _meta}.
+     */
     public static final Set<String> SUPPORTED_PROTOCOL_VERSIONS = Set.of(PROTOCOL_VERSION);
+
+    /** The newest handshake-based ("legacy") revision, offered when a client asks for one this server does not speak. */
+    public static final String LEGACY_PROTOCOL_VERSION = "2025-11-25";
+
+    /**
+     * The handshake-based revisions this server also answers, when {@code mcp.legacy.protocol.enabled}
+     * is on. Both define the {@code MCP-Protocol-Version} header, which is how a request after
+     * {@code initialize} is recognised as legacy; {@code 2025-03-26} and earlier do not, and are
+     * not supported.
+     */
+    public static final Set<String> LEGACY_PROTOCOL_VERSIONS = Set.of(LEGACY_PROTOCOL_VERSION, "2025-06-18");
 
     /** JSON-RPC version string. */
     public static final String JSONRPC_VERSION = "2.0";

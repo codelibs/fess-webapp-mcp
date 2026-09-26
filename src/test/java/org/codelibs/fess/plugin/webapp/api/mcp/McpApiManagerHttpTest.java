@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -34,6 +35,7 @@ import org.codelibs.core.lang.StringUtil;
 import org.codelibs.core.misc.Pair;
 import org.codelibs.fess.plugin.webapp.mcp.McpConstants;
 import org.codelibs.fess.plugin.webapp.mcp.RateLimiter;
+import org.codelibs.fess.plugin.webapp.mcp.auth.McpAuthenticator;
 import org.codelibs.fess.plugin.webapp.mcp.auth.McpPrincipal;
 import org.codelibs.fess.plugin.webapp.mcp.auth.OAuthResourceServerAuthenticator;
 import org.codelibs.fess.plugin.webapp.mcp.handler.McpMethodHandler;
@@ -467,9 +469,16 @@ public class McpApiManagerHttpTest {
             "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\","
                     + "\"capabilities\":{},\"clientInfo\":{\"name\":\"legacy-client\",\"version\":\"1.0.0\"}}}";
 
+    /** A manager with {@code mcp.legacy.protocol.enabled=false}: modern clients only. */
+    private static TestManager modernOnlyManager() {
+        final TestManager manager = new TestManager();
+        manager.properties.put("mcp.legacy.protocol.enabled", "false");
+        return manager;
+    }
+
     @Test
     public void testLegacyInitializeWithNoMcpHeadersGetsTheDiagnosticNotAHeaderError() throws Exception {
-        final String body = post(new TestManager(), LEGACY_INITIALIZE_BODY, Map.of());
+        final String body = post(modernOnlyManager(), LEGACY_INITIALIZE_BODY, Map.of());
 
         assertEquals(404, lastResponse.getStatus(), body);
         assertTrue(body.contains("-32601"), body);
@@ -485,7 +494,7 @@ public class McpApiManagerHttpTest {
         // The other side of the same coin: short-circuiting the retired methods early must not
         // change what a conformant client sees. McpDispatcherTest covers the dispatcher's own
         // branch directly; this covers the pipeline answering with the identical payload.
-        final String body = post(new TestManager(), modernBody("initialize"), modernHeaders("initialize"));
+        final String body = post(modernOnlyManager(), modernBody("initialize"), modernHeaders("initialize"));
 
         assertEquals(404, lastResponse.getStatus(), body);
         assertTrue(body.contains("-32601"), body);
@@ -1325,5 +1334,187 @@ public class McpApiManagerHttpTest {
         };
         assertEquals("unknown", manager.resolveRateLimitKey(McpHttpTestSupport.newRequest("POST", "/mcp"), new McpCallContext()),
                 "a null client IP must not reach ConcurrentHashMap");
+    }
+
+    // ------------------------------------------------------------------
+    // Legacy (handshake-based) clients, mcp.legacy.protocol.enabled (default true). MCP
+    // 2026-07-28 lets a server be dual-era: initialize selects legacy semantics, and a legacy
+    // client then names the negotiated version in MCP-Protocol-Version with no _meta and no
+    // Mcp-Method/Mcp-Name.
+    // ------------------------------------------------------------------
+
+    /**
+     * A manager whose {@code tools/list} answers a fixed result in 2026-07-28 shape -- cache
+     * hints included, as the real (container-bound) handler writes them -- so what the legacy
+     * writer strips is observable.
+     */
+    static class StubToolsListManager extends TestManager {
+        @Override
+        protected McpDispatcher getDispatcher() {
+            return new McpDispatcher(List.of(new McpMethodHandler() {
+                @Override
+                public String getMethod() {
+                    return "tools/list";
+                }
+
+                @Override
+                public Map<String, Object> handle(final McpCallContext context) {
+                    final Map<String, Object> result = new LinkedHashMap<>();
+                    result.put("tools", List.of(Map.of("name", "search")));
+                    result.put("ttlMs", 60000L);
+                    result.put("cacheScope", "private");
+                    return result;
+                }
+            }));
+        }
+    }
+
+    private static Map<String, String> legacyHeaders(final String version) {
+        return Map.of(McpConstants.HEADER_PROTOCOL_VERSION, version);
+    }
+
+    private static String legacyBody(final String method, final String params) {
+        return "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"" + method + "\",\"params\":" + params + "}";
+    }
+
+    @Test
+    public void testLegacyInitializeIsAnsweredWithTheClientsVersion() throws Exception {
+        final String body = post(new TestManager(), LEGACY_INITIALIZE_BODY, Map.of());
+
+        assertEquals(200, lastResponse.getStatus(), body);
+        assertTrue(body.contains("\"protocolVersion\":\"2025-06-18\""), "a version this server speaks is echoed back: " + body);
+        assertTrue(body.contains("\"capabilities\":{\"tools\":{},\"resources\":{},\"prompts\":{},\"completions\":{}}"), body);
+        assertTrue(body.contains("\"serverInfo\":{\"name\":"), body);
+        assertTrue(body.contains("\"instructions\":"), body);
+        assertFalse(body.contains("resultType"), "resultType is 2026-07-28 only: " + body);
+        assertFalse(body.contains("_meta"), "a legacy client reads serverInfo from initialize, not _meta: " + body);
+    }
+
+    @Test
+    public void testLegacyInitializeWithAnUnspokenVersionIsOfferedTheNewestLegacyVersion() throws Exception {
+        for (final String requested : new String[] { "2024-11-05", "2026-07-28", "1900-01-01" }) {
+            final String body = post(new TestManager(), LEGACY_INITIALIZE_BODY.replace("2025-06-18", requested), Map.of());
+            assertEquals(200, lastResponse.getStatus(), requested + ": " + body);
+            assertTrue(body.contains("\"protocolVersion\":\"2025-11-25\""), requested + ": " + body);
+        }
+    }
+
+    @Test
+    public void testLegacyInitializeWithoutAVersionIsOfferedTheNewestLegacyVersion() throws Exception {
+        for (final String params : new String[] { "{}", "{\"protocolVersion\":null}", "{\"protocolVersion\":20250618}" }) {
+            final String body = post(new TestManager(), legacyBody("initialize", params), Map.of());
+            assertEquals(200, lastResponse.getStatus(), params + ": " + body);
+            assertTrue(body.contains("\"protocolVersion\":\"2025-11-25\""), params + ": " + body);
+        }
+    }
+
+    @Test
+    public void testLegacyInitializedNotificationIsAccepted() throws Exception {
+        final String body =
+                post(new TestManager(), "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}", legacyHeaders("2025-11-25"));
+        assertEquals(202, lastResponse.getStatus(), body);
+    }
+
+    @Test
+    public void testLegacyRequestNeedsNoMetaAndGetsNo2026Fields() throws Exception {
+        for (final String version : new String[] { "2025-11-25", "2025-06-18" }) {
+            final String body = post(new StubToolsListManager(), legacyBody("tools/list", "{}"), legacyHeaders(version));
+            assertEquals(200, lastResponse.getStatus(), version + ": " + body);
+            assertTrue(body.contains("\"id\":7"), body);
+            assertTrue(body.contains("\"name\":\"search\""), version + ": the modern handler serves it: " + body);
+            assertFalse(body.contains("resultType"), body);
+            assertFalse(body.contains("ttlMs"), body);
+            assertFalse(body.contains("cacheScope"), body);
+            assertFalse(body.contains("_meta"), body);
+        }
+    }
+
+    @Test
+    public void testLegacyPingIsAnEmptyResult() throws Exception {
+        final String body = post(new TestManager(), "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}", legacyHeaders("2025-11-25"));
+        assertEquals(200, lastResponse.getStatus(), body);
+        assertEquals("{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{}}", body);
+    }
+
+    @Test
+    public void testLegacyToolsCallGoesThroughTheRateLimiter() throws Exception {
+        final TestManager manager = new TestManager();
+        manager.rateLimiter = new RateLimiter(1);
+        final String call = legacyBody("tools/call", "{\"name\":\"unknown_tool\",\"arguments\":{}}");
+        post(manager, call, legacyHeaders("2025-11-25"));
+        assertTrue(manager.rateLimiterCalled, "a legacy tools/call must not route around the rate limit");
+        final String body = post(manager, call, legacyHeaders("2025-11-25"));
+        assertEquals(429, lastResponse.getStatus(), body);
+    }
+
+    @Test
+    public void testLegacyInitializeIsChallengedInAnAuthenticatingMode() throws Exception {
+        // The OAuth discovery of a legacy client starts from this 401: initialize must not be
+        // routed ahead of authenticate().
+        final TestManager manager = new TestManager();
+        manager.authMode = McpApiManager.AUTH_MODE_FESS_TOKEN;
+        final String body = post(manager, LEGACY_INITIALIZE_BODY, Map.of());
+        assertEquals(401, lastResponse.getStatus(), body);
+        assertNotNull(lastResponse.getHeader("WWW-Authenticate"), body);
+    }
+
+    @Test
+    public void testLegacyRequestCarriesTheAuthenticatedCallersRoles() throws Exception {
+        // Role filtering is decided in authenticate(), before the era is: a legacy request must
+        // hand RoleQueryHelper the same userRoles attribute a modern one does.
+        final TestManager manager = new StubToolsListManager() {
+            @Override
+            protected McpAuthenticator getAuthenticator() {
+                return new McpAuthenticator() {
+                    @Override
+                    public McpPrincipal authenticate(final HttpServletRequest request, final HttpServletResponse response) {
+                        return new McpPrincipal("alice", Set.of(), Set.of("Rsales", "1alice"));
+                    }
+
+                    @Override
+                    public boolean ownsRoleResolution() {
+                        return true;
+                    }
+                };
+            }
+
+            @Override
+            protected List<String> getSearchDefaultPermissionList() {
+                return List.of();
+            }
+        };
+        final MockletHttpServletRequestImpl request = McpHttpTestSupport.newRequest("POST", "/mcp");
+        legacyHeaders("2025-11-25").forEach(request::addHeader);
+        final String body = post(manager, legacyBody("tools/list", "{}"), request, McpHttpTestSupport.newResponse(request));
+
+        assertEquals(200, lastResponse.getStatus(), body);
+        assertEquals(Set.of("Rsales", "1alice"), request.getAttribute(McpConstants.USER_ROLES_ATTRIBUTE));
+    }
+
+    @Test
+    public void testHeaderlessRequestIsNotTakenForLegacy() throws Exception {
+        // 2025-03-26 and earlier sent no MCP-Protocol-Version; they are not supported, so a
+        // request without the header stays on the modern path and is rejected there.
+        final String body = post(new StubToolsListManager(), legacyBody("tools/list", "{}"), Map.of());
+        assertEquals(400, lastResponse.getStatus(), body);
+        assertTrue(body.contains("-32020"), body);
+    }
+
+    @Test
+    public void testLegacyVersionIsRejectedWhenLegacyIsDisabled() throws Exception {
+        final TestManager manager = new StubToolsListManager();
+        manager.properties.put("mcp.legacy.protocol.enabled", "false");
+        final String body = post(manager, legacyBody("tools/list", "{}"), legacyHeaders("2025-11-25"));
+        assertEquals(400, lastResponse.getStatus(), body);
+        assertFalse(body.contains("\"name\":\"search\""), body);
+    }
+
+    @Test
+    public void testModernRequestIsUnchangedWhileLegacyIsEnabled() throws Exception {
+        final String body = post(new StubToolsListManager(), modernBody("tools/list"), modernHeaders("tools/list"));
+        assertEquals(200, lastResponse.getStatus(), body);
+        assertTrue(body.contains("\"resultType\":\"complete\""), body);
+        assertTrue(body.contains("\"cacheScope\""), body);
+        assertTrue(body.contains("io.modelcontextprotocol/serverInfo"), body);
     }
 }

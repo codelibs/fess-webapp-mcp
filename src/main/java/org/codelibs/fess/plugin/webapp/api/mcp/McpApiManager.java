@@ -483,6 +483,20 @@ public class McpApiManager extends BaseApiManager {
                 return;
             }
 
+            // A legacy (handshake-based) client: initialize itself, or a later request whose
+            // MCP-Protocol-Version names a legacy revision. Such a client sends no _meta and no
+            // Mcp-Method/Mcp-Name, so this must precede header validation; it has already been
+            // through Origin validation and authenticate(), and it goes through the same rate
+            // limit and handlers, so the caller's role filtering is exactly the modern path's.
+            final String legacyVersion = resolveLegacyProtocolVersion(request, mcpRequest);
+            if (legacyVersion != null) {
+                final McpCallContext context =
+                        new McpCallContext(mcpRequest, McpRequestMeta.legacy(legacyVersion), mcpRequest.getParams(), principal);
+                enforceRateLimit(request, context);
+                writer.writeLegacyResult(response, id, dispatchLegacy(context, legacyVersion));
+                return;
+            }
+
             // A method MCP 2026-07-28 retired must be answered here, BEFORE header validation:
             // a client old enough to still call initialize or ping sends neither
             // MCP-Protocol-Version nor Mcp-Method (Mcp-Method did not exist before this
@@ -578,6 +592,77 @@ public class McpApiManager extends BaseApiManager {
             return Integer.MAX_VALUE;
         }
         return Math.max(max, 0) + 1;
+    }
+
+    /**
+     * Returns the legacy (handshake-based) protocol version a request is to be served under, or
+     * {@code null} when it is a modern request.
+     * <p>
+     * MCP 2026-07-28 lets a server be "dual-era": an {@code initialize} request selects legacy
+     * semantics. {@code initialize} negotiates the version -- the client's own when this server
+     * speaks it, {@link McpConstants#LEGACY_PROTOCOL_VERSION} otherwise, which the client may
+     * refuse. After that, a legacy client names the negotiated version in
+     * {@code MCP-Protocol-Version} on every request and sends no {@code _meta}, which is how those
+     * requests are recognised. Anything else is left to the modern path.
+     * </p>
+     *
+     * @param request the servlet request
+     * @param mcpRequest the parsed request
+     * @return the legacy version, or {@code null} for a modern request or when
+     *         {@code mcp.legacy.protocol.enabled} is off
+     */
+    protected String resolveLegacyProtocolVersion(final HttpServletRequest request, final McpRequest mcpRequest) {
+        final String version;
+        if (McpDispatcher.METHOD_INITIALIZE.equals(mcpRequest.getMethod())) {
+            // instanceof, not a bare contains(): Set.of rejects a null probe with an NPE.
+            version = mcpRequest.getParams().get("protocolVersion") instanceof final String requested
+                    && McpConstants.LEGACY_PROTOCOL_VERSIONS.contains(requested) ? requested : McpConstants.LEGACY_PROTOCOL_VERSION;
+        } else if (mcpRequest.getParams().get("_meta") instanceof final Map<?, ?> meta
+                && meta.containsKey(McpConstants.META_PROTOCOL_VERSION)) {
+            // A request carrying modern _meta is served per this revision whatever its header
+            // says, so a legacy version declared there is answered -32022 on the modern path.
+            return null;
+        } else {
+            final String header = request.getHeader(McpConstants.HEADER_PROTOCOL_VERSION);
+            if (header == null || !McpConstants.LEGACY_PROTOCOL_VERSIONS.contains(header)) {
+                return null;
+            }
+            version = header;
+        }
+        // Consulted last, so a modern request never pays for the property read.
+        return isLegacyProtocolEnabled() ? version : null;
+    }
+
+    /**
+     * Serves a legacy request: {@code initialize} and {@code ping}, which only the legacy
+     * revisions define, here; every other method through the same handlers as a modern request.
+     *
+     * @param context the call context
+     * @param legacyVersion the legacy protocol version in effect
+     * @return the result body, still in 2026-07-28 shape; {@link McpResponseWriter#writeLegacyResult} trims it
+     */
+    protected Map<String, Object> dispatchLegacy(final McpCallContext context, final String legacyVersion) {
+        final String method = context.getRequest().getMethod();
+        if (McpDispatcher.METHOD_INITIALIZE.equals(method)) {
+            return discoverHandler.handleInitialize(legacyVersion, getResponseWriter().serverInfo());
+        }
+        if (McpDispatcher.METHOD_PING.equals(method)) {
+            return new LinkedHashMap<>();
+        }
+        return getDispatcher().dispatch(context);
+    }
+
+    /**
+     * Returns whether legacy (handshake-based) clients are served.
+     * <p>
+     * Read through {@link #getSystemProperty(String, String)} with the same "only {@code true},
+     * case-insensitively" rule as {@code FessConfig#getSystemPropertyAsBoolean}.
+     * </p>
+     *
+     * @return true unless {@code mcp.legacy.protocol.enabled} is set to something other than {@code true}
+     */
+    protected boolean isLegacyProtocolEnabled() {
+        return Constants.TRUE.equalsIgnoreCase(getSystemProperty("mcp.legacy.protocol.enabled", Constants.TRUE));
     }
 
     /**
