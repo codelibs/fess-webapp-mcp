@@ -16,6 +16,7 @@
 package org.codelibs.fess.plugin.webapp.mcp.tool;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -316,7 +317,13 @@ public class SearchTool implements McpTool {
         if (fields.isEmpty()) {
             return "sort order, as <field>.asc or <field>.desc";
         }
-        return "sort order, as <field>.asc or <field>.desc; accepted fields: " + fields;
+        final String description = "sort order, as <field>.asc or <field>.desc; accepted fields: " + fields;
+        if (Arrays.asList(getSortableFields()).contains("content_length")) {
+            // Same name, different quantity: get_document's content_length counts the characters
+            // of the extracted text. Measured on the verification corpus: 524 here, 298 there.
+            return description + " (content_length is the size of the original file in bytes)";
+        }
+        return description;
     }
 
     /**

@@ -58,7 +58,10 @@ public class DiscoverHandler extends AbstractCacheableHandler {
      */
     protected static final String INSTRUCTIONS =
             "Fess Enterprise Search Server. Use the 'search' tool to perform full-text search with Lucene-like query syntax "
-                    + "(AND default, OR explicit, quotes for phrase, - for exclusion). " + "Use 'suggest' for query autocomplete.";
+                    + "(AND default, OR explicit, quotes for phrase, - for exclusion); its 'sort' argument orders the hits "
+                    + "(<field>.asc or <field>.desc, accepted fields listed in its description). "
+                    + "Each hit carries a doc_id: pass it to 'get_document' to read the document's full text. "
+                    + "Use 'suggest' for query autocomplete.";
 
     /**
      * Creates a {@code server/discover} handler.

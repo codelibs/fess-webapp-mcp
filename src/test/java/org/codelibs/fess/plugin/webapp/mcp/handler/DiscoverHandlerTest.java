@@ -126,6 +126,16 @@ public class DiscoverHandlerTest {
     }
 
     @Test
+    public void testInstructionsPointAtGetDocumentAndSort() {
+        // Measured with a real agent: instructions that named only search and suggest left it to
+        // find get_document and the sort argument by reading every schema.
+        final String instructions = (String) new TestDiscoverHandler().handle(null).get("instructions");
+        assertTrue(instructions.contains("'get_document'"), instructions);
+        assertTrue(instructions.contains("doc_id"), instructions);
+        assertTrue(instructions.contains("'sort'"), instructions);
+    }
+
+    @Test
     public void testResolveServerVersion_FallsBackToUnknownOutsideAJar() {
         // Running from target/test-classes (not a packaged jar) has no manifest, so
         // Package#getImplementationVersion() returns null and the fallback applies.
