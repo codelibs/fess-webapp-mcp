@@ -155,6 +155,23 @@ public class McpApiManagerHttpTest {
             // here runs the default "none" mode unless a test overrides this field.
             return authMode;
         }
+
+        boolean loginRequired = false;
+        boolean loginSession = false;
+        boolean loginRequiredCalled = false;
+
+        @Override
+        protected boolean isLoginRequired() {
+            // no-op: the real implementation reads login.required from the container
+            loginRequiredCalled = true;
+            return loginRequired;
+        }
+
+        @Override
+        protected boolean hasLoginSession() {
+            // no-op: the real implementation asks FessLoginAssist for the session's user
+            return loginSession;
+        }
     }
 
     private MockletHttpServletResponseImpl lastResponse;
@@ -1152,6 +1169,56 @@ public class McpApiManagerHttpTest {
         post(manager, modernBody("tools/list"), modernHeaders("tools/list"));
         assertEquals(List.of("null->NONE", "NONE->FESS_TOKEN", "FESS_TOKEN->NONE"), manager.reported,
                 "/mcp dropping from 401-for-everyone to 200-for-anyone must not happen silently");
+    }
+
+    // ------------------------------------------------------------------
+    // login.required: the search pages redirect to the login page and /api/v2 answers 401
+    // auth_required, so a mode that authenticates nobody must not serve an anonymous caller.
+    // ------------------------------------------------------------------
+
+    @Test
+    public void testNoneModeRefusesAnAnonymousCallerWhenLoginIsRequired() throws Exception {
+        for (final String method : new String[] { "tools/list", "tools/call", "resources/read", "server/discover" }) {
+            final TestManager manager = new TestManager();
+            manager.loginRequired = true;
+            final String body = post(manager, modernBody(method), modernHeaders(method));
+            assertEquals(403, lastResponse.getStatus(), method + ": " + body);
+            assertTrue(body.contains("login.required=true"), method + " must say why it was refused: " + body);
+            assertTrue(body.contains("mcp.auth.mode"), method + " must say what to change: " + body);
+            assertNull(lastResponse.getHeader("WWW-Authenticate"),
+                    method + ": no challenge, since no credential sent to this endpoint can help in none mode");
+        }
+    }
+
+    @Test
+    public void testNoneModeServesALoggedInUserWhenLoginIsRequired() throws Exception {
+        final TestManager manager = new TestManager();
+        manager.loginRequired = true;
+        manager.loginSession = true;
+        final String body = post(manager, modernBody("tools/list"), modernHeaders("tools/list"));
+        assertEquals(200, lastResponse.getStatus(), body);
+        assertFalse(body.contains("login.required"), "a logged-in user must get past the gate: " + body);
+    }
+
+    @Test
+    public void testNoneModeServesAnonymousCallersWhenLoginIsNotRequired() throws Exception {
+        final TestManager manager = new TestManager();
+        final String body = post(manager, modernBody("tools/list"), modernHeaders("tools/list"));
+        assertEquals(200, lastResponse.getStatus(), body);
+        assertFalse(body.contains("login.required"), body);
+        assertTrue(manager.loginRequiredCalled, "none mode must consult login.required");
+    }
+
+    @Test
+    public void testAuthenticatingModesLeaveLoginRequiredToTheirOwnCredentialCheck() throws Exception {
+        // fess_token and oauth authenticate the caller themselves; a valid credential is the
+        // login. An unauthenticated call must still get that mode's own 401 challenge.
+        final TestManager manager = new TestManager();
+        manager.authMode = McpApiManager.AUTH_MODE_FESS_TOKEN;
+        manager.loginRequired = true;
+        final String body = post(manager, modernBody("tools/list"), modernHeaders("tools/list"));
+        assertEquals(401, lastResponse.getStatus(), body);
+        assertFalse(manager.loginRequiredCalled, "an authenticating mode must not consult login.required");
     }
 
     @Test

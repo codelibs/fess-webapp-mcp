@@ -855,6 +855,17 @@ public class McpApiManager extends BaseApiManager {
      */
     protected McpPrincipal authenticate(final HttpServletRequest request, final HttpServletResponse response) {
         final McpAuthenticator authenticator = getAuthenticator();
+        if (authenticator instanceof NoneAuthenticator && isLoginRequired() && !hasLoginSession()) {
+            // login.required=true means searching needs a login: the search pages redirect to the
+            // login page and /api/v2 answers 401 auth_required (fess#3284). A mode that
+            // authenticates nobody would otherwise hand every guest-visible document to an
+            // anonymous caller. 403 rather than 401: no credential sent to this endpoint can help
+            // in none mode, and a 401 would send an MCP client into OAuth discovery for metadata
+            // this mode does not publish.
+            throw new McpError(HttpServletResponse.SC_FORBIDDEN, ErrorCode.InvalidRequest,
+                    "This Fess server requires a login to search (login.required=true), and the MCP endpoint does not "
+                            + "authenticate callers (mcp.auth.mode=none). Set mcp.auth.mode to fess_token or oauth.");
+        }
         final McpPrincipal principal = authenticator.authenticate(request, response);
         if (authenticator.ownsRoleResolution()) {
             request.setAttribute(McpConstants.USER_ROLES_ATTRIBUTE, resolveRoles(principal));
@@ -1096,6 +1107,25 @@ public class McpApiManager extends BaseApiManager {
      */
     protected List<String> getSearchDefaultPermissionList() {
         return Arrays.asList(ComponentUtil.getFessConfig().getSearchDefaultPermissionsAsArray());
+    }
+
+    /**
+     * Returns whether Fess requires a login to search ({@code login.required}).
+     *
+     * @return true when anonymous searching is turned off
+     */
+    protected boolean isLoginRequired() {
+        return ComponentUtil.getFessConfig().isLoginRequired();
+    }
+
+    /**
+     * Returns whether the request belongs to a user who is logged in to Fess, which is what
+     * {@code login.required} asks for.
+     *
+     * @return true when the session carries a logged-in user
+     */
+    protected boolean hasLoginSession() {
+        return ComponentUtil.getFessLoginAssist().getSavedUserBean().isPresent();
     }
 
     /**
