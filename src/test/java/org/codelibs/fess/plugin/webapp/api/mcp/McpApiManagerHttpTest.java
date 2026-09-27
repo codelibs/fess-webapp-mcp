@@ -507,8 +507,9 @@ public class McpApiManagerHttpTest {
         // ping was retired too, and a client still calling it is just as header-less. README
         // documents it as a plain -32601 with no replacement, so -- unlike initialize -- it
         // deliberately carries no supportedVersions payload: there is no version to fall
-        // forward to that would bring ping back.
-        final String body = post(new TestManager(), "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}", Map.of());
+        // forward to that would bring ping back. Legacy is off here: with it on, a header-less
+        // ping is a legacy client's and answers {} (testHeaderlessPingIsALegacyPing).
+        final String body = post(modernOnlyManager(), "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}", Map.of());
 
         assertEquals(404, lastResponse.getStatus(), body);
         assertTrue(body.contains("-32601"), body);
@@ -588,8 +589,9 @@ public class McpApiManagerHttpTest {
         // Step 10 (HeaderValidator.requirePresent) must run before step 11
         // (McpRequestMeta.parse): a body with no _meta and no headers must fail as a missing
         // header (-32020), not as a missing _meta (-32602). If requirePresent and
-        // McpRequestMeta.parse were swapped, this would be -32602 instead.
-        final String body = post(new TestManager(), "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}", Map.of());
+        // McpRequestMeta.parse were swapped, this would be -32602 instead. Legacy is off: with
+        // it on, such a body is a legacy client's and never reaches the modern checks.
+        final String body = post(modernOnlyManager(), "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}", Map.of());
         assertEquals(400, lastResponse.getStatus());
         assertTrue(body.contains("-32020"), "a missing header must be reported before a missing _meta: " + body);
         assertFalse(body.contains("-32602"), body);
@@ -1492,10 +1494,57 @@ public class McpApiManagerHttpTest {
     }
 
     @Test
-    public void testHeaderlessRequestIsNotTakenForLegacy() throws Exception {
-        // 2025-03-26 and earlier sent no MCP-Protocol-Version; they are not supported, so a
-        // request without the header stays on the modern path and is rejected there.
+    public void testHeaderlessRequestIsServedAsLegacy() throws Exception {
+        // Gemini CLI 0.61 negotiates 2025-11-25 in initialize and then sends no
+        // MCP-Protocol-Version at all. 2025-11-25 says a server that cannot tell the version
+        // assumes an older one; refusing with -32020 left such a client with no tools.
         final String body = post(new StubToolsListManager(), legacyBody("tools/list", "{}"), Map.of());
+        assertEquals(200, lastResponse.getStatus(), body);
+        assertTrue(body.contains("\"name\":\"search\""), body);
+        assertFalse(body.contains("resultType"), body);
+        assertFalse(body.contains("ttlMs"), body);
+    }
+
+    @Test
+    public void testHeaderlessRequestWithLegacyMetaIsServedAsLegacy() throws Exception {
+        // A legacy client's own _meta (a progress token) carries no protocol version.
+        final String body = post(new StubToolsListManager(), legacyBody("tools/list", "{\"_meta\":{\"progressToken\":1}}"), Map.of());
+        assertEquals(200, lastResponse.getStatus(), body);
+        assertFalse(body.contains("resultType"), body);
+    }
+
+    @Test
+    public void testHeaderlessPingIsALegacyPing() throws Exception {
+        final String body = post(new TestManager(), "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}", Map.of());
+        assertEquals(200, lastResponse.getStatus(), body);
+        assertEquals("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}", body);
+    }
+
+    @Test
+    public void testModernRequestWithoutTheHeaderStillGetsTheHeaderError() throws Exception {
+        // A modern request is recognised by its _meta, not by the header, so a modern client
+        // that forgot the header is still told so instead of being answered in legacy shape.
+        final String body = post(new StubToolsListManager(), modernBody("tools/list"), Map.of("Mcp-Method", "tools/list"));
+        assertEquals(400, lastResponse.getStatus(), body);
+        assertTrue(body.contains("-32020"), body);
+    }
+
+    @Test
+    public void testUnsupportedVersionHeaderIsNotTakenForLegacy() throws Exception {
+        // 2025-03-26 had no MCP-Protocol-Version header; a header naming it, or any version
+        // this server does not speak, stays on the modern path and is refused there.
+        for (final String version : new String[] { "2025-03-26", "2024-11-05", "garbage" }) {
+            final String body = post(new StubToolsListManager(), legacyBody("tools/list", "{}"), legacyHeaders(version));
+            assertEquals(400, lastResponse.getStatus(), version + ": " + body);
+            assertFalse(body.contains("\"name\":\"search\""), version + ": " + body);
+        }
+    }
+
+    @Test
+    public void testHeaderlessRequestIsRejectedWhenLegacyIsDisabled() throws Exception {
+        final TestManager manager = new StubToolsListManager();
+        manager.properties.put("mcp.legacy.protocol.enabled", "false");
+        final String body = post(manager, legacyBody("tools/list", "{}"), Map.of());
         assertEquals(400, lastResponse.getStatus(), body);
         assertTrue(body.contains("-32020"), body);
     }
