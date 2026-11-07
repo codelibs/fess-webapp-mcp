@@ -30,6 +30,7 @@ import java.util.UUID;
 import jakarta.servlet.http.HttpServletResponse;
 
 import org.codelibs.fess.exception.InvalidQueryException;
+import org.codelibs.fess.exception.ResultOffsetExceededException;
 import org.codelibs.fess.plugin.webapp.exception.McpApiException;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
 import org.codelibs.fess.plugin.webapp.mcp.protocol.McpCallContext;
@@ -658,6 +659,35 @@ public class ToolsCallHandlerTest {
         final String text = (String) ((Map<?, ?>) ((List<?>) result.get("content")).get(0)).get("text");
         assertCarriesCorrelationId(text);
         assertFalse(text.contains("/var/lib/fess"), "an unexpected failure must stay redacted");
+    }
+
+    @Test
+    public void testStartPastTheResultOffsetLimitIsAToolExecutionErrorNotACorrelationId() {
+        // ResultOffsetExceededException is the caller's own start value past
+        // query.max.search.result.offset. /api/v2/search answers it with invalid_request and the
+        // message bundle's "No more results can be displayed."; the catch-all used to answer a bare
+        // error_code and a WARN stack trace instead.
+        final java.util.concurrent.atomic.AtomicReference<org.lastaflute.web.validation.VaMessenger<org.codelibs.fess.mylasta.action.FessMessages>> asked =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        final ToolsCallHandler handler = new ToolsCallHandler(
+                List.of(new RejectingTool(new ResultOffsetExceededException("The number of result size is exceeded.")))) {
+            @Override
+            protected String resolveCallerMessage(
+                    final org.lastaflute.web.validation.VaMessenger<org.codelibs.fess.mylasta.action.FessMessages> messageCode) {
+                asked.set(messageCode);
+                return "No more results can be displayed.";
+            }
+        };
+        final Map<String, Object> result =
+                assertDoesNotThrow(() -> handler.handle(contextWithParams(Map.of("name", "search", "arguments", Map.of("q", "x")))));
+        assertEquals(Boolean.TRUE, result.get("isError"), result.toString());
+        final String text = (String) ((Map<?, ?>) ((List<?>) result.get("content")).get(0)).get("text");
+        assertEquals("No more results can be displayed.", text);
+        assertFalse(text.contains("error_code"), "the caller must not get a correlation id for its own start value");
+        final org.codelibs.fess.mylasta.action.FessMessages messages = new org.codelibs.fess.mylasta.action.FessMessages();
+        asked.get().message(messages);
+        assertTrue(messages.hasMessageOf(org.lastaflute.core.message.UserMessages.GLOBAL_PROPERTY_KEY,
+                org.codelibs.fess.mylasta.action.FessMessages.ERRORS_result_size_exceeded));
     }
 
 }

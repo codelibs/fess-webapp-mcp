@@ -26,6 +26,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codelibs.fess.exception.InvalidQueryException;
+import org.codelibs.fess.exception.ResultOffsetExceededException;
 import org.codelibs.fess.mylasta.action.FessMessages;
 import org.codelibs.fess.plugin.webapp.exception.McpApiException;
 import org.codelibs.fess.plugin.webapp.mcp.ErrorCode;
@@ -340,6 +341,21 @@ public class ToolsCallHandler implements McpMethodHandler {
                 // nothing to correct it with, so say it here too.
                 text = text + " " + buildSortHint();
             }
+            final Map<String, Object> result = new LinkedHashMap<>();
+            result.put("content", List.of(Map.of("type", "text", "text", text)));
+            result.put("isError", true);
+            return result;
+        } catch (final ResultOffsetExceededException e) {
+            // start is past query.max.search.result.offset. That is the caller's own value, exactly
+            // like the sort and query rejections above, and /api/v2/search already answers it with
+            // invalid_request "No more results can be displayed." from the same message bundle. It is
+            // not an InvalidQueryException (no message code of its own), so the catch-all below used
+            // to answer a bare correlation id and write a stack trace at WARN, which an unauthenticated
+            // caller could repeat at will. Resolve the same message v2 does and log at DEBUG.
+            if (logger.isDebugEnabled()) {
+                logger.debug("[MCP] Tool '{}' rejected a start past the result offset limit", name, e);
+            }
+            final String text = resolveCallerMessage(messages -> messages.addErrorsResultSizeExceeded(UserMessages.GLOBAL_PROPERTY_KEY));
             final Map<String, Object> result = new LinkedHashMap<>();
             result.put("content", List.of(Map.of("type", "text", "text", text)));
             result.put("isError", true);
