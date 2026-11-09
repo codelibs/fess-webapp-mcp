@@ -288,6 +288,7 @@ A `search` result carries more than the hits, and a client that ignores the rest
   "total": 128,
   "total_relation": "EQUAL_TO",
   "has_more": true,
+  "fusion_offset": 0,
   "collapsed": false,
   "partial": false,
   "timed_out": false,
@@ -298,6 +299,12 @@ A `search` result carries more than the hits, and a client that ignores the rest
 - **`total` is how many documents matched**, and `total_relation` says whether that number is exact
   (`EQUAL_TO`) or a floor the search engine stopped counting at (`GREATER_THAN_OR_EQUAL_TO`).
 - **`has_more`** says whether another page exists after this one. Page with `start` (or `offset`).
+- **`fusion_offset` keeps deep pages exact when rank fusion is on.** With server-side rank fusion
+  (`rank.fusion.engine.enabled=false` and a vector searcher registered) the pages from the middle of the fusion
+  window on are cut from a list that is `fusion_offset` documents longer than the keyword results. Send the value
+  of the previous response back as `fusion_offset` with every request whose `start` is above 0; without it a deep
+  page skips or repeats up to that many documents. It is 0 when the results were not fused, and an unneeded
+  `fusion_offset` is harmless there.
 - **`collapsed` says you may not be able to reach `total`.** Fess's `result.collapsed` setting — `true` in
   the shipped `system.properties` — folds near-duplicate results *after* the count is taken, so with it on,
   fewer than `total` items are obtainable however far you page. Measured on a corpus of 30 near-identical
@@ -626,7 +633,7 @@ omitted. No tool declares `idempotentHint`.
         "name": "search",
         "description": "Search documents via Fess. Query syntax is similar to Lucene: multiple terms are combined with AND by default, use OR explicitly for OR search (e.g., \"term1 OR term2\"), use quotes for phrase search, use - for exclusion.",
         "inputSchema": { "type": "object", "properties": { "q": { "type": "string", "description": "query string" }, "...": {} }, "required": ["q"] },
-        "outputSchema": { "type": "object", "properties": { "hits": {}, "total": {}, "total_relation": {}, "has_more": {}, "collapsed": {}, "partial": {}, "timed_out": {}, "shard_failed": {} }, "required": ["hits", "total", "has_more", "collapsed", "partial", "timed_out", "shard_failed"], "additionalProperties": false },
+        "outputSchema": { "type": "object", "properties": { "hits": {}, "total": {}, "total_relation": {}, "has_more": {}, "fusion_offset": {}, "collapsed": {}, "partial": {}, "timed_out": {}, "shard_failed": {} }, "required": ["hits", "total", "has_more", "fusion_offset", "collapsed", "partial", "timed_out", "shard_failed"], "additionalProperties": false },
         "annotations": { "title": "Search Documents", "readOnlyHint": true, "destructiveHint": false, "openWorldHint": false }
       }
     ],
@@ -673,6 +680,7 @@ still fails with `-32602 Missing required parameter: q`.
       "total": 128,
       "total_relation": "EQUAL_TO",
       "has_more": true,
+      "fusion_offset": 0,
       "collapsed": false,
       "partial": false,
       "timed_out": false,
@@ -871,6 +879,7 @@ A missing `ref`, `argument`, `argument.name`, or (for `ref/prompt`) `ref.name` i
 | `q` | string | Yes | Query string |
 | `start` | integer | No | Start position for paging (default `0`) |
 | `offset` | integer | No | Alias for `start`, used only when `start` is absent. When both are sent, **`start` wins** — including when `start` is itself unparseable or negative, so the alias never silently repairs a broken `start` and pages from somewhere the caller did not ask for. |
+| `fusion_offset` | integer | No | The `fusion_offset` of the previous response, sent back with every page after the first. Not an alias of `start`. Default `0`. |
 | `num` | integer | No | Results per page. Default `mcp.default.page.size` (3). A value above `paging.search.page.max.size` is clamped to that maximum; **zero or negative falls back to the default**, not the maximum. |
 | `sort` | string | No | `<field>.asc` / `<field>.desc`. The advertised `inputSchema` description lists the fields this deployment accepts, so a client need not guess: Fess ships `score`, `filename`, `created`, `content_length`, `last_modified`, `timestamp`, `click_count`, `favorite_count`, and `query.additional.sort.fields` extends the list. An unaccepted field or order is answered with an `isError: true` result that names it and lists the accepted fields. |
 | `fields` | object | No | Field filters keyed by field name, e.g. `{"label": ["label1"]}` |
@@ -887,6 +896,7 @@ A missing `ref`, `argument`, `argument.name`, or (for `ref/prompt`) `ref.name` i
 | `total` | integer | Yes | Number of matching documents |
 | `total_relation` | string | No | `EQUAL_TO` when `total` is exact, `GREATER_THAN_OR_EQUAL_TO` when the engine stopped counting. Omitted rather than fabricated when Fess did not supply one. |
 | `has_more` | boolean | Yes | Whether a page exists after this one |
+| `fusion_offset` | integer | Yes | `0` unless rank fusion shifted the pages; send it back as `fusion_offset` when requesting a later page |
 | `collapsed` | boolean | Yes | Whether near-duplicate results were folded, so fewer than `total` items are obtainable |
 | `partial` | boolean | Yes | Whether the search did not complete, so these results are not the whole answer |
 | `timed_out` | boolean | Yes | Whether the search engine stopped collecting because the query timeout elapsed |

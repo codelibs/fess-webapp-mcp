@@ -88,6 +88,8 @@ public class SearchTool implements McpTool {
         properties.put("q", Map.of("type", "string", "description", "query string"));
         properties.put("start", Map.of("type", "integer", "description", "start position"));
         properties.put("offset", Map.of("type", "integer", "description", "offset (alias of start)"));
+        properties.put("fusion_offset", Map.of("type", "integer", "description",
+                "the fusion_offset of the previous response; send it back with every page after the first so deep pages stay exact"));
         properties.put("num", Map.of("type", "integer", "description", "number of results"));
         properties.put("sort", Map.of("type", "string", "description", buildSortDescription()));
         properties.put("fields", fields);
@@ -126,7 +128,10 @@ public class SearchTool implements McpTool {
                 Map.of("type", "integer", "description", "total number of matching documents"), "total_relation",
                 Map.of("type", "string", "description",
                         "EQUAL_TO when total is exact, GREATER_THAN_OR_EQUAL_TO when the search engine stopped counting"),
-                "has_more", Map.of("type", "boolean", "description", "whether a page exists after this one"), "collapsed",
+                "has_more", Map.of("type", "boolean", "description", "whether a page exists after this one"), "fusion_offset",
+                Map.of("type", "integer", "description",
+                        "0 unless rank fusion shifted the pages; send it back as fusion_offset when requesting a later page"),
+                "collapsed",
                 Map.of("type", "boolean", "description",
                         "whether near-duplicate results were folded, so fewer than total items are obtainable"),
                 "partial",
@@ -135,7 +140,7 @@ public class SearchTool implements McpTool {
                 Map.of("type", "boolean", "description", "whether the search engine stopped collecting because the query timeout elapsed"),
                 "shard_failed", Map.of("type", "boolean", "description",
                         "whether part of the index failed to answer, so matching documents may be missing")));
-        schema.put("required", List.of("hits", "total", "has_more", "collapsed", "partial", "timed_out", "shard_failed"));
+        schema.put("required", List.of("hits", "total", "has_more", "fusion_offset", "collapsed", "partial", "timed_out", "shard_failed"));
         schema.put("additionalProperties", false);
         return schema;
     }
@@ -183,6 +188,11 @@ public class SearchTool implements McpTool {
         // defaulting to EQUAL_TO would claim an exactness this tool cannot verify.
         putIfNotNull(structured, "total_relation", data.getAllRecordCountRelation());
         structured.put("has_more", data.isExistNextPage());
+        // With rank fusion the pages after the first are cut from a list that is longer than the
+        // keyword searcher's, by this many documents. The client sends it back as fusion_offset
+        // so that start still lands on the page it means; without it a deep page skips or repeats
+        // up to this many documents. 0 when the results were not fused.
+        structured.put("fusion_offset", Integer.valueOf(data.getOffset()));
         // total counts matching documents; result collapsing folds near duplicates afterwards, so
         // with this true fewer than total items are obtainable however far the caller pages. Fess
         // ships result.collapsed=true, and without this flag total reads as a promise the caller
@@ -254,7 +264,7 @@ public class SearchTool implements McpTool {
      *       per-entry validation ({@code fields} is an object of arrays of strings), which is
      *       where a type check turns into a schema engine. A wrong element type still throws
      *       inside the search and is reported as a redacted {@code isError:true} result.</li>
-     *   <li><b>{@code start}, {@code offset}, {@code num}.</b> Their accessors already accept any
+     *   <li><b>{@code start}, {@code offset}, {@code fusion_offset}, {@code num}.</b> Their accessors already accept any
      *       type deliberately -- {@code Number} directly, anything else via
      *       {@code Integer.parseInt(toString())} with {@code NumberFormatException} caught and a
      *       documented fallback -- so no cast can fail and rejecting a numeric string here would
@@ -650,12 +660,8 @@ public class SearchTool implements McpTool {
                 // getInputSchema() advertises offset as "offset (alias of start)" over
                 // tools/list to every client, but this accessor used to read "start" alone, so
                 // the alias resolved to nothing here: a client that paginated with offset kept
-                // being served page 1 forever. offset was not entirely inert -- getOffset()
-                // below still reads it -- but that accessor feeds a different contract
-                // (Fess's RankFusionProcessor shifts the sub-searcher window with it) which
-                // only engages with two or more registered searchers *and* on the
-                // deep-pagination branch. A stock install has one searcher, so nothing consumed
-                // offset at all.
+                // being served page 1 forever. getOffset() below does not read it: the rank
+                // fusion shift has its own argument, fusion_offset.
                 //
                 // "start" wins whenever the caller sent it, even when its value turns out to be
                 // unparseable or negative: it is the primary name, and silently substituting
@@ -712,17 +718,14 @@ public class SearchTool implements McpTool {
 
             @Override
             public int getOffset() {
-                // Deliberately still reads "offset" alone, and deliberately does not alias
-                // "start" back the other way. Despite the name, this is not the start position:
-                // Fess's RankFusionProcessor uses it to shift each sub-searcher's window on its
-                // deep-pagination branch, on top of the start position getStartPosition()
-                // already supplied. Aliasing start into it would double-count the caller's
-                // paging offset on every hybrid/rank-fusion search.
-                final Object value = paramMap.get("offset");
+                // Reads "fusion_offset", the value a previous response reported, and nothing
+                // else: not "offset", which is an alias of start. Fess's RankFusionProcessor
+                // subtracts this from start on its deep-pagination branch, so feeding it the
+                // start alias would cancel the start position and serve the first page again.
+                final Object value = paramMap.get("fusion_offset");
                 try {
                     if (value != null) {
                         return value instanceof final Number n ? n.intValue() : Integer.parseInt(value.toString());
-
                     }
                 } catch (final NumberFormatException e) {
                     logger.debug("Failed to parse {}", value, e);
