@@ -40,6 +40,10 @@ Behaviour changes for clients that already speak `2026-07-28` but ran against an
 - **`search`'s `offset` argument now works.** It was always advertised as an alias of `start`, but nothing
   read it as one, so a client paginating with `offset` was served page 1 forever. It now sets the start
   position when `start` is absent.
+- **`search` takes and returns `fusion_offset`.** With server-side rank fusion, later pages are exact only when
+  the client sends back the `fusion_offset` of the previous response. `search`'s `offset` argument no longer
+  doubles as the rank-fusion window shift: it only sets the start position, as advertised. Requires a Fess whose
+  `/api/v2/search` returns `offset`.
 - **`tools/call` no longer requires `params.arguments`.** The normative schema declares it optional, and
   `get_index_stats` takes no arguments, so a conformant client could not reach that tool at all.
 - **`as` no longer discards `q`.** See the note under [`search`](README.md#search).

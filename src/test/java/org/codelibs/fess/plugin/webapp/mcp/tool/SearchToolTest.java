@@ -624,13 +624,69 @@ public class SearchToolTest {
     }
 
     @Test
-    public void testOffsetAccessorStillReadsOnlyOffset() {
-        // getOffset() feeds a different contract from getStartPosition(): Fess's
-        // RankFusionProcessor uses it to shift the sub-searcher window on the deep-pagination
-        // branch, so it must keep meaning "offset" alone and must not start aliasing start.
-        assertEquals(20, offsetOf(Map.of("q", "x", "offset", Integer.valueOf(20))), "getOffset() must keep reading offset");
-        assertEquals(0, offsetOf(Map.of("q", "x", "start", Integer.valueOf(20))),
-                "getOffset() must not pick start up: the rank-fusion window shift is a separate contract");
+    public void testOffsetAccessorReadsFusionOffsetOnly() {
+        // getOffset() feeds Fess's RankFusionProcessor, which subtracts it from the start
+        // position on its deep-pagination branch. It must read the value a response reported
+        // as fusion_offset and nothing else: not start, and not offset, which is an alias of
+        // start -- either would cancel the start position and serve the first page again.
+        assertEquals(7, offsetOf(Map.of("q", "x", "fusion_offset", Integer.valueOf(7))), "getOffset() must read fusion_offset");
+        assertEquals(7, offsetOf(Map.of("q", "x", "fusion_offset", "7")), "a numeric String is parsed like start");
+        assertEquals(0, offsetOf(Map.of("q", "x", "start", Integer.valueOf(20))), "getOffset() must not pick start up");
+        assertEquals(0, offsetOf(Map.of("q", "x", "offset", Integer.valueOf(20))), "getOffset() must not pick the start alias up");
+        assertEquals(0, offsetOf(Map.of("q", "x", "fusion_offset", "abc")), "an unparseable value falls back to 0");
+    }
+
+    @Test
+    public void testOffsetAliasOfStartDoesNotShiftTheFusionWindow() {
+        // offset=20 is a request for start=20 and must leave the fusion shift at 0.
+        final Map<String, Object> arguments = Map.of("q", "x", "offset", Integer.valueOf(20));
+        assertEquals(20, startPositionOf(arguments));
+        assertEquals(0, offsetOf(arguments));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testSearchReportsTheFusionOffsetToSendBack() {
+        final SearchTool tool = new ContainerFreeSearchTool() {
+            @Override
+            protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments, final SearchRenderData data) {
+                data.setOffset(7);
+                return List.of(Map.of("title", "t", "url", "https://example.com/"));
+            }
+        };
+
+        final Map<String, Object> structured =
+                (Map<String, Object>) tool.call(Map.of("q", "x"), new McpCallContext()).get("structuredContent");
+
+        assertEquals(Integer.valueOf(7), structured.get("fusion_offset"), "the offset a client sends back as fusion_offset");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testSearchReportsZeroFusionOffsetWhenNotFused() {
+        final SearchTool tool = new ContainerFreeSearchTool() {
+            @Override
+            protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments, final SearchRenderData data) {
+                return List.of(Map.of("title", "t", "url", "https://example.com/"));
+            }
+        };
+
+        final Map<String, Object> structured =
+                (Map<String, Object>) tool.call(Map.of("q", "x"), new McpCallContext()).get("structuredContent");
+
+        assertEquals(Integer.valueOf(0), structured.get("fusion_offset"), "always present, 0 when the results were not fused");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    public void testSchemasDeclareFusionOffset() {
+        final SearchTool tool = new SearchTool();
+        final Map<String, Object> input = (Map<String, Object>) tool.getInputSchema().get("properties");
+        final Map<String, Object> output = tool.getOutputSchema();
+        assertTrue(input.containsKey("fusion_offset"), "inputSchema must declare fusion_offset");
+        assertTrue(((Map<String, Object>) output.get("properties")).containsKey("fusion_offset"),
+                "outputSchema must declare fusion_offset");
+        assertTrue(((List<String>) output.get("required")).contains("fusion_offset"), "call() always produces fusion_offset");
     }
 
     @Test
