@@ -445,6 +445,7 @@ public class SearchTool implements McpTool {
      * </p>
      *
      * @param arguments the raw {@code search} tool arguments
+     * @param data the render data that {@link SearchHelper} fills in with the search result
      * @return the processed document items, in result order; never null
      */
     protected List<Map<String, Object>> executeSearch(final Map<String, Object> arguments, final SearchRenderData data) {
@@ -510,6 +511,12 @@ public class SearchTool implements McpTool {
         return stripHighlightTags(contentDescription);
     }
 
+    /**
+     * Builds one {@code hits[]} entry of {@code structuredContent} from a document item.
+     *
+     * @param doc the processed document item
+     * @return the hit, with the fields that are present on the document
+     */
     protected Map<String, Object> buildHit(final Map<String, Object> doc) {
         final Map<String, Object> hit = new LinkedHashMap<>();
         putIfNotNull(hit, "doc_id", doc.get("doc_id"));

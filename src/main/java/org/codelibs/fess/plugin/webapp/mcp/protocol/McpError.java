@@ -27,8 +27,13 @@ public class McpError extends RuntimeException {
 
     private static final long serialVersionUID = 1L;
 
+    /** The HTTP status to send. */
     private final int httpStatus;
+
+    /** The JSON-RPC error code. */
     private final ErrorCode errorCode;
+
+    /** The structured payload for {@code error.data}, may be null. */
     private final transient Map<String, Object> data;
 
     /**
